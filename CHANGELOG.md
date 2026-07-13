@@ -89,9 +89,10 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
   handoff prompts for upstream owners, and repin only reviewed final upstream
   commits in dependency order.
-- Public Git builds now pin `graphql-orm` 0.7.0 and `agql-auth` 0.9.0 by exact
-  reviewed commit instead of requiring an adjacent local sibling checkout.
-  CI checks out the same revisions for baseline compatibility verification.
+- Public Git builds now pin the final `graphql-orm` 0.7.0 merge commit and
+  `agql-auth` 0.10.0 annotated-tag target instead of requiring an adjacent
+  local sibling checkout or an open-PR revision. CI checks out the same exact
+  revisions for baseline compatibility verification.
 - Crate version is now `0.2.0` because the public budget reconciliation and
   proof-serialization changes are pre-1.0 breaking API changes.
 - AI schema module version is now `0.8.0`. In addition to the `0.7.0` tool-call

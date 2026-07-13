@@ -5,10 +5,10 @@ reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
 `agql-auth`. The public manifest pins reviewed full Git revisions; local path
 overrides are unsupported release artifacts.
 
-The current public source snapshot consumes candidate `graphql-orm` 0.7.0 and
-`agql-auth` 0.9.0 revisions. They are available by exact commit while their
-upstream PRs are reviewed, so standalone Git builds do not depend on whatever
-currently happens to be at the sibling default branches.
+The current public source snapshot consumes the final reviewed `graphql-orm`
+0.7.0 merge commit and `agql-auth` 0.10.0 annotated-tag target. Standalone Git
+builds therefore resolve the released dependency universe without depending on
+moving sibling default branches.
 
 ## Features
 

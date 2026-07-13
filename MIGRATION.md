@@ -33,15 +33,22 @@ data; no consumer or data migration is required.
 The public manifest now resolves one exact Git dependency universe:
 
 - `graphql-orm` 0.7.0 at
-  `f24db2f0e64dbc939ca875984d48326f47542aeb`; and
-- `agql-auth` 0.9.0 at
-  `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
+  `1e145a124e9e3f1b0ffd70165289170b627ecb73`; and
+- `agql-auth` 0.10.0 at the peeled `v0.10.0` target
+  `c92dcb441237bbe308499b26525945f60ffa394a`.
 
 Remove host patches or path overrides to older sibling versions. Hosts that
-also depend directly on either crate must use these exact revisions until a
-later coordinated release updates the dependency universe. This is a Rust
-dependency/source-identity migration only; it changes no GraphQL SDL, AI schema
-module version, persisted data, or application authorization policy.
+also depend directly on either crate must use these exact revisions so Cargo
+resolves one source/type universe. This changes no `graphql-orm-ai` GraphQL
+SDL, AI schema-module version, persisted AI data, or application authorization
+policy; no AI data migration is required.
+
+`agql-auth` 0.10.0 separately adds a nullable `authorization_policy` field to
+OAuth state storage. Hosts using its OIDC authorization-state persistence must
+apply the auth crate's 0.10.0 migration: legacy absence remains an ordinary
+login, while a flow requiring a bound policy fails closed when that binding is
+absent. Hosts that do not use that OIDC storage need no auth data migration.
+The `graphql-orm` bridge API remains source-stable for the AI runtime.
 
 ## Unreleased: schema module 0.7.0 to 0.8.0
 

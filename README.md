@@ -119,11 +119,11 @@ the matching `graphql-orm` and `agql-auth` releases:
 graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<reviewed-commit>", features = ["sqlite"] }
 ```
 
-> **Pre-release dependency note:** this source snapshot pins the reviewed
-> `graphql-orm` 0.7.0 and `agql-auth` 0.9.0 candidate commits exactly. They are
-> under upstream review and may not yet be tagged on their default branches.
-> Keep the exact revisions from this manifest; do not replace the shared
-> contracts with application-specific substitutes.
+> **Pre-release dependency note:** this source snapshot pins the reviewed final
+> `graphql-orm` 0.7.0 merge commit and the `agql-auth` 0.10.0 annotated-tag
+> target exactly. Keep the full revisions from this manifest; do not replace
+> the shared contracts with moving branches or application-specific
+> substitutes.
 
 A host then:
 
