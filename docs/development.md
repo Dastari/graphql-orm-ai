@@ -1,0 +1,55 @@
+# Development and Verification
+
+## Default checks
+
+```bash
+cargo fmt --check
+cargo test --features provider-openai
+cargo clippy --all-targets --features provider-openai -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai --no-deps
+```
+
+Check the optional naming contract independently:
+
+```bash
+cargo test --features graphql-case-pascal --test graphql_naming
+RUSTDOCFLAGS="-D warnings" \
+  cargo doc --features graphql-case-pascal --no-deps
+```
+
+Compile other backends without connecting to them:
+
+```bash
+cargo check --no-default-features --features postgres
+cargo check --no-default-features --features mssql
+```
+
+Do not run Cargo `--all-features`: the persistence backends are intentionally
+mutually exclusive. Provider feature matrices must select exactly one backend.
+
+## Database tests
+
+Default tests use in-memory SQLite. PostgreSQL and MSSQL integration tests are
+permitted only through a harness that creates and owns a disposable Docker
+container, generated credentials, unique database, and cleanup. A generic
+database URL is never accepted. No current check needs a PostgreSQL server.
+
+## Rustdoc
+
+The crate denies rustdoc warnings in CI. Public APIs need useful documentation,
+not placeholder comments. Fallible methods document `# Errors`; proof types
+explain the exact binding they establish and any checks that still remain.
+
+Private ORM derive output is kept in the private persistence module and is the
+only scoped exception to generated missing-doc warnings.
+
+## Release-policy check
+
+On a committed branch, compare against the reviewed base:
+
+```bash
+scripts/check-release-policy.sh <base-revision>
+```
+
+CI additionally runs `cargo-semver-checks` against a sibling baseline worktree
+so local path dependencies resolve consistently.
