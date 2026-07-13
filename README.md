@@ -228,12 +228,14 @@ The [documentation index](docs/README.md) links architecture, security,
 development, release, and implementation-status guides. Public APIs are
 documented in generated Rustdoc.
 
-Every user-visible change updates [CHANGELOG.md](CHANGELOG.md). Every public
+The root README stays aligned with every public/runtime change. Every
+user-visible change updates [CHANGELOG.md](CHANGELOG.md), and every public
 Rust/GraphQL/configuration/security/persistence/restore contract change also
 updates [MIGRATION.md](MIGRATION.md), even when no data migration is required.
-CI enforces those files, crate/schema version movement, `cargo-semver-checks`,
-warnings- and missing-docs-denied Rustdoc, and the PascalCase SDL contract.
-Repository rules are recorded in [AGENTS.md](AGENTS.md).
+CI enforces that documentation bundle, crate/schema version movement,
+`cargo-semver-checks`, warnings- and missing-docs-denied Rustdoc, and the
+PascalCase SDL contract. Repository rules are recorded in
+[AGENTS.md](AGENTS.md).
 
 ## License
 

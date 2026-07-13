@@ -29,6 +29,10 @@ if grep -Eq '^(src/.*\.rs|Cargo\.toml)$' <<<"${changed}"; then
 fi
 
 if [[ "${public_changed}" == true ]]; then
+  has_change README.md || {
+    echo "release-policy: public/runtime changes require README.md" >&2
+    exit 1
+  }
   has_change CHANGELOG.md || {
     echo "release-policy: public/runtime changes require CHANGELOG.md" >&2
     exit 1
@@ -68,4 +72,4 @@ if grep -Eq '^src/persistence\.rs$' <<<"${changed}"; then
   fi
 fi
 
-echo "release-policy: changelog, migration, crate-version, and schema-version checks passed"
+echo "release-policy: readme, changelog, migration, crate-version, and schema-version checks passed"

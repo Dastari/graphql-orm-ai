@@ -76,9 +76,9 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
   disclosure-validated runtime result envelopes.
 - Optional `graphql-case-pascal` feature for coherent PascalCase resolvers,
   arguments, inputs, outputs, subscriptions, and forwarded ORM fields.
-- Repository governance, documentation index, migration/release policy,
-  warnings- and missing-docs-denied CI Rustdoc checks, and SemVer enforcement
-  scaffolding.
+- Repository governance, documentation index, README/changelog/migration
+  release-policy enforcement, warnings- and missing-docs-denied CI Rustdoc
+  checks, and SemVer enforcement scaffolding.
 - Project-agnostic local execution design covering local HTTP model servers and
   allowlisted native/ACP subprocess harnesses without arbitrary shell,
   environment, filesystem, network, or tool authority.

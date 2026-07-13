@@ -7,11 +7,13 @@ without guessing.
 ## Unreleased: documentation and release enforcement
 
 CI and the documented release gate now deny missing public Rust documentation
-in addition to ordinary Rustdoc warnings. Contributors must add useful Rustdoc
-for every new public item, including `# Errors` sections for fallible APIs and
-explicit proof boundaries for security-sensitive types. This changes no
-consumer Rust API, GraphQL SDL, feature/default, runtime behavior, schema module,
-or persisted data; no consumer or data migration is required.
+in addition to ordinary Rustdoc warnings. The release-policy check also
+requires `README.md`, `CHANGELOG.md`, and `MIGRATION.md` to move together with
+public Rust/runtime changes. Contributors must add useful Rustdoc for every new
+public item, including `# Errors` sections for fallible APIs and explicit proof
+boundaries for security-sensitive types. This changes no consumer Rust API,
+GraphQL SDL, feature/default, runtime behavior, schema module, or persisted
+data; no consumer or data migration is required.
 
 ## Unreleased: upstream dependency alignment
 

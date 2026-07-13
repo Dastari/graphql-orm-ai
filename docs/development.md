@@ -47,6 +47,10 @@ only scoped exception to generated missing-doc warnings.
 
 ## Release-policy check
 
+Public Rust/runtime changes must update `README.md`, `CHANGELOG.md`, and
+`MIGRATION.md` together. The policy also enforces crate-version movement and a
+new schema-module version for persistence changes.
+
 On a committed branch, compare against the reviewed base:
 
 ```bash

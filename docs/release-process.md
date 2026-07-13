@@ -11,9 +11,11 @@ For every change, classify all affected contracts:
 - Configuration, authorization, egress, approval, budget, provider, backup,
   restore, and operational behavior.
 
-Update `CHANGELOG.md` for user-visible changes. Update `MIGRATION.md` for every
-contract category above, including an explicit “no data migration required”
-statement where applicable.
+Keep `README.md` aligned with the current public surface, update `CHANGELOG.md`
+for user-visible changes, and update `MIGRATION.md` for every contract category
+above, including an explicit “no data migration required” statement where
+applicable. The release-policy check requires all three files whenever public
+Rust or runtime source changes.
 
 ## SemVer
 
