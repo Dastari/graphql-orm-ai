@@ -56,6 +56,8 @@ adapters listed below are still being implemented.
 - Separate, exact proofs for provider egress and atomic budget reservation.
   Provider built-ins such as web search, file search, code execution, image
   analysis, and image generation require their own authorized transfer.
+  Request validation and transfer estimates cover bounded tool/schema/built-in
+  metadata and attachment encoding, not only visible prompt text.
 - Structured AI-owned proposals and exact one-shot approval envelopes bound to
   resource versions, policy/auth state, actor/delegation, target/schema/
   document/projection, and a server-generated canonical action preview.

@@ -5,7 +5,7 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.15.0` and the AI
+This development line advances the pre-1.0 crate version to `0.16.0` and the AI
 schema module to `0.16.0`.
 
 ### Added
@@ -181,6 +181,14 @@ schema module to `0.16.0`.
 
 ### Changed
 
+- Provider-neutral request validation now bounds instruction/text/JSON/output-
+  schema/custom-tool-schema metadata, output-token ceilings, and built-in tool
+  cardinality/configuration, with a 64-MiB aggregate metadata ceiling. Built-in
+  kinds and their domain/store values must be unique and structurally valid.
+  Exact egress byte estimates now include
+  the complete serialized request plus attachment transfer encoding, so tool,
+  schema, continuation, and built-in metadata cannot escape the authorized
+  transfer ceiling.
 - `ProviderKind` and the GraphQL `AiProviderKindInput` add `LocalHarness` with
   stable value `local_harness`; provider-profile GraphQL may enable and route a
   logical installed profile but cannot configure its process registration.

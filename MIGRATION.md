@@ -4,6 +4,32 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: bounded complete provider request metadata (crate 0.15.0 to 0.16.0)
+
+`ModelRequest::validate` now rejects oversized instructions, text/JSON blocks,
+output schemas, custom-tool schemas/fingerprints, zero or excessively large
+output-token ceilings, more than 16 provider built-ins, duplicate built-in
+kinds, duplicate/invalid web domains or file-store IDs, and invalid built-in
+result limits. Serialized non-attachment request metadata has a 64-MiB hard
+aggregate ceiling. Web-domain filters accept normalized DNS names and an optional
+leading `*.` only; schemes, paths, whitespace, empty labels, and invalid label
+characters are rejected.
+
+Provider egress validation now estimates the complete serialized
+`ModelRequest`, including model, instructions, tool definitions, schemas,
+built-in configuration, continuation and tool-result metadata, then adds the
+exact Base64 expansion of attachment bytes. Existing egress planners must use
+the request's current conservative estimate rather than reproducing the older
+input-only calculation. A previously accepted manifest whose
+`estimated_bytes` omitted tool/schema/built-in metadata now correctly fails
+before transport and must be reauthorized with the complete ceiling.
+
+This is a pre-1.0 provider validation, egress, and behavioral contract change.
+It adds no Rust type, GraphQL SDL, Cargo feature/default, entity, field, index,
+constraint, persistent semantic, or backup/restore change.
+`AI_SCHEMA_MODULE_VERSION` remains `0.16.0`; no AI-owned or
+application-domain data migration is needed.
+
 ## Unreleased: installed local-harness foundation (crate 0.14.0 to 0.15.0)
 
 `ProviderKind` and GraphQL `AiProviderKindInput` now include `LocalHarness`

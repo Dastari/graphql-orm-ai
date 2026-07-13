@@ -10,6 +10,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+const MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
 use crate::{
     AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError,
     AiProviderAttachmentRequest, AiResolvedProviderAttachment, AiRunId, AiSessionId,
@@ -191,10 +193,26 @@ impl ModelRequest {
     ///
     /// Provider adapters still apply their own capability and protocol limits.
     pub fn validate(&self) -> Result<(), ProviderError> {
-        if self.model.is_empty() || self.model.len() > 200 {
+        if self.model.trim().is_empty() || self.model.len() > 200 {
             return Err(ProviderError::InvalidRequest);
         }
-        if self.instructions.len() > 32 || self.input.len() > 256 || self.tools.len() > 128 {
+        if self.instructions.len() > 32
+            || self
+                .instructions
+                .iter()
+                .any(|instruction| instruction.len() > 1024 * 1024)
+            || self.input.len() > 256
+            || self.tools.len() > 128
+            || self.builtin_tools.len() > 16
+            || self
+                .maximum_output_tokens
+                .is_some_and(|tokens| tokens == 0 || tokens > u64::from(u32::MAX))
+            || self.output_schema.as_ref().is_some_and(|schema| {
+                !schema.is_object()
+                    || serde_json::to_vec(schema)
+                        .map_or(true, |encoded| encoded.len() > 1024 * 1024)
+            })
+        {
             return Err(ProviderError::InvalidRequest);
         }
         if let Some(ModelContinuation::ProviderResponse { response_id }) = &self.continuation
@@ -212,6 +230,13 @@ impl ModelRequest {
         let mut tool_result_call_ids = BTreeSet::new();
         let mut attachment_ids = BTreeSet::new();
         for block in &self.input {
+            if matches!(block, ModelInputBlock::Text { text } if text.len() > 16 * 1024 * 1024)
+                || matches!(block, ModelInputBlock::Json { value }
+                    if serde_json::to_vec(value)
+                        .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024))
+            {
+                return Err(ProviderError::InvalidRequest);
+            }
             if let ModelInputBlock::ToolResult {
                 call_id,
                 tool_id,
@@ -252,45 +277,115 @@ impl ModelRequest {
                 return Err(ProviderError::InvalidRequest);
             }
         }
+        let mut builtin_kinds = BTreeSet::new();
+        for builtin in &self.builtin_tools {
+            let valid = match builtin {
+                ModelBuiltinTool::WebSearch { allowed_domains } => {
+                    builtin_kinds.insert("web_search")
+                        && allowed_domains.len() <= 100
+                        && unique_valid_values(allowed_domains, valid_web_domain)
+                }
+                ModelBuiltinTool::FileSearch {
+                    store_ids,
+                    maximum_results,
+                } => {
+                    builtin_kinds.insert("file_search")
+                        && !store_ids.is_empty()
+                        && store_ids.len() <= 20
+                        && unique_valid_values(store_ids, valid_provider_reference)
+                        && maximum_results.is_none_or(|value| (1..=50).contains(&value))
+                }
+                ModelBuiltinTool::CodeInterpreter => builtin_kinds.insert("code_interpreter"),
+                ModelBuiltinTool::ImageGeneration => builtin_kinds.insert("image_generation"),
+            };
+            if !valid {
+                return Err(ProviderError::InvalidRequest);
+            }
+        }
+        if self.serialized_metadata_bytes().is_none() {
+            return Err(ProviderError::InvalidRequest);
+        }
         Ok(())
     }
 
     fn estimated_payload_bytes(&self) -> u64 {
-        let instruction_bytes: usize = self.instructions.iter().map(String::len).sum();
-        let input_bytes: usize = self
+        let serialized_bytes = self.serialized_metadata_bytes().unwrap_or(u64::MAX);
+        let encoded_attachment_bytes = self
             .input
             .iter()
-            .map(|block| match block {
-                ModelInputBlock::Text { text } => text.len(),
-                ModelInputBlock::Attachment {
-                    attachment_id,
-                    mime,
-                    byte_count,
-                    sha256,
-                } => attachment_id
-                    .len()
-                    .saturating_add(mime.len())
-                    .saturating_add(sha256.len())
-                    .saturating_add(
-                        (usize::try_from(*byte_count)
-                            .unwrap_or(usize::MAX)
-                            .saturating_add(2)
-                            / 3)
+            .filter_map(|block| match block {
+                ModelInputBlock::Attachment { byte_count, .. } => Some(
+                    byte_count
+                        .saturating_add(2)
+                        .checked_div(3)
+                        .unwrap_or(u64::MAX)
                         .saturating_mul(4),
-                    ),
-                ModelInputBlock::Json { value } => value.to_string().len(),
-                ModelInputBlock::ToolResult {
-                    call_id,
-                    tool_id,
-                    output,
-                } => call_id
-                    .len()
-                    .saturating_add(tool_id.len())
-                    .saturating_add(output.to_string().len()),
+                ),
+                ModelInputBlock::Text { .. }
+                | ModelInputBlock::Json { .. }
+                | ModelInputBlock::ToolResult { .. } => None,
             })
-            .sum();
-        instruction_bytes.saturating_add(input_bytes) as u64
+            .fold(0_u64, u64::saturating_add);
+        serialized_bytes.saturating_add(encoded_attachment_bytes)
     }
+
+    fn serialized_metadata_bytes(&self) -> Option<u64> {
+        let mut total = 4_096_u64
+            .checked_add(serialized_bytes(&self.model)?)?
+            .checked_add(64_u64.saturating_mul(self.instructions.len() as u64))?
+            .checked_add(64_u64.saturating_mul(self.input.len() as u64))?
+            .checked_add(64_u64.saturating_mul(self.tools.len() as u64))?
+            .checked_add(64_u64.saturating_mul(self.builtin_tools.len() as u64))?;
+        for instruction in &self.instructions {
+            total = total.checked_add(serialized_bytes(instruction)?)?;
+        }
+        for block in &self.input {
+            total = total.checked_add(serialized_bytes(block)?)?;
+        }
+        for tool in &self.tools {
+            total = total.checked_add(serialized_bytes(tool)?)?;
+        }
+        for builtin in &self.builtin_tools {
+            total = total.checked_add(serialized_bytes(builtin)?)?;
+        }
+        if let Some(continuation) = &self.continuation {
+            total = total.checked_add(serialized_bytes(continuation)?)?;
+        }
+        if let Some(schema) = &self.output_schema {
+            total = total.checked_add(serialized_bytes(schema)?)?;
+        }
+        (total <= MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES).then_some(total)
+    }
+}
+
+fn serialized_bytes(value: &impl Serialize) -> Option<u64> {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|encoded| u64::try_from(encoded.len()).ok())
+}
+
+fn unique_valid_values(values: &[String], valid: impl Fn(&str) -> bool) -> bool {
+    let mut unique = BTreeSet::new();
+    values
+        .iter()
+        .all(|value| valid(value) && unique.insert(value.as_str()))
+}
+
+fn valid_web_domain(value: &str) -> bool {
+    let value = value.strip_prefix("*.").unwrap_or(value);
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with(['.', '-'])
+        && !value.ends_with(['.', '-'])
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn valid_provider_reference(value: &str) -> bool {
@@ -332,12 +427,16 @@ impl ModelToolDefinition {
             .and_then(|schema| schema.get("type"))
             .and_then(serde_json::Value::as_str)
             == Some("object");
+        let schema_is_bounded =
+            serde_json::to_vec(&self.parameters).is_ok_and(|encoded| encoded.len() <= 1024 * 1024);
         if self.tool_id.is_empty()
             || self.tool_id.len() > 200
             || !provider_name_valid
             || self.fingerprint.is_empty()
+            || self.fingerprint.len() > 512
             || self.description.len() > 2_000
             || !schema_is_object
+            || !schema_is_bounded
         {
             return Err(ProviderError::InvalidRequest);
         }

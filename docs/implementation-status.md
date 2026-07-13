@@ -50,6 +50,10 @@ production-ready behavior.
   attachment capability requires its own matching authorized transfer, and an
   opaque atomic budget proof must match run/attempt/fence/provider/model/output
   ceiling/expiry before transport.
+- Complete provider-neutral metadata bounds and conservative transfer sizing
+  cover tools/schemas/built-ins/continuation as well as prompt and exact
+  attachment encoding; duplicate or malformed built-in configuration fails
+  before egress.
 - Concrete SQLite/PostgreSQL ORM budget service: fresh-principal and tenant
   binding, current run-fence validation, bounded policy resolution, atomic
   multi-counter reservation, stable window keys, unique content-bound

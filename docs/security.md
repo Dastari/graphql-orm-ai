@@ -22,6 +22,13 @@ Read permission does not imply permission to disclose data externally. Every
 provider, built-in, attachment, web, image, code, MCP, and remote model transfer
 requires an exact egress manifest and decision.
 
+The manifest byte ceiling covers the complete serialized provider-neutral
+request: model/instructions, structured input, tool definitions and schemas,
+built-in configuration, continuation/tool-result metadata, output schema, and
+attachment transfer encoding. Provider built-in kinds and domain/store values
+are bounded and unique. A small text prompt cannot therefore smuggle an
+unbounded tool/schema payload under an input-only estimate.
+
 Application tool output must conform to a server-owned static disclosure
 schema. Unknown fields and `NeverExport` nodes fail closed. Runtime
 classification may only raise classification or remove/redact fields. Secret

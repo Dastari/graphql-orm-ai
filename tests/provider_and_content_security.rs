@@ -180,6 +180,62 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
 }
 
 #[tokio::test]
+async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
+    let mut invalid = request("test-model");
+    invalid.builtin_tools = vec![
+        ModelBuiltinTool::WebSearch {
+            allowed_domains: vec!["example.com".to_owned()],
+        },
+        ModelBuiltinTool::WebSearch {
+            allowed_domains: vec!["other.example".to_owned()],
+        },
+    ];
+    assert!(matches!(
+        invalid.validate(),
+        Err(ProviderError::InvalidRequest)
+    ));
+
+    invalid.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+        allowed_domains: vec!["https://example.com/path".to_owned()],
+    }];
+    assert!(matches!(
+        invalid.validate(),
+        Err(ProviderError::InvalidRequest)
+    ));
+
+    let session_id = AiSessionId::new();
+    let run_id = AiRunId::new();
+    let mut inference = manifest(
+        session_id,
+        run_id,
+        "test-model",
+        AiEgressCapability::ModelInference,
+    );
+    inference.estimated_bytes = 10_000;
+    let context = ProviderRequestContext::new(
+        session_id,
+        run_id,
+        "correlation",
+        budget(run_id, ProviderKind::OpenAiCompatible, "test-model"),
+        inference.clone(),
+        proof(&inference),
+    )
+    .expect("context should bind");
+    let mut schema_heavy = request("test-model");
+    schema_heavy.output_schema = Some(json!({
+        "type": "object",
+        "description": "x".repeat(20_000),
+        "additionalProperties": false
+    }));
+    let provider = MockProvider::new(vec![]);
+    assert!(matches!(
+        provider.stream(schema_heavy, context).await,
+        Err(ProviderError::EgressDenied)
+    ));
+    assert_eq!(provider.request_count(), 0);
+}
+
+#[tokio::test]
 async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
     let session_id = AiSessionId::new();
     let run_id = AiRunId::new();
