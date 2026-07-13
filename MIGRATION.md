@@ -4,6 +4,68 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.15.0 to 0.16.0 and principal inbox (crate 0.12.0 to 0.13.0)
+
+Apply AI schema module `0.16.0` while session writes, provider-output commits,
+subscriptions, pruning workers, and restore callbacks are closed. Do not start
+0.13.0 code against the 0.15.0 module: session creation, message queueing,
+archive/restore/delete, and final assistant-output persistence now append a
+principal-inbox event in the same state-machine transaction.
+
+The managed schema changes are:
+
+- add private `graphql_orm_ai_inbox_streams`, with deterministic ID, exact
+  principal kind/subject, never-rewound `stream_head`,
+  `minimum_retained_sequence`, last-event time, row-version fence, and a unique
+  principal kind/subject index;
+- add a unique principal kind/subject/sequence constraint to
+  `graphql_orm_ai_inbox_events`;
+- add required captured `scope_key`, `scope_kind`, `scope_id`, and optional
+  `tenant_id` to new inbox events; and
+- add nullable `scope_key`, `inbox_event_retention_seconds`, and
+  `inbox_minimum_events` to retention policies, plus a unique index on
+  non-null scope keys.
+
+The inbox-event entity existed as reserved private schema, but 0.12.0 exposed
+no writer, query, or subscription for it. A normal deployment should therefore
+find it empty. If an early consumer wrote private rows anyway, do not infer
+authority or silently assign scopes. A dependency-owned migration must either
+prove each row's exact owner/session/scope, backfill captured scope fields,
+validate unique contiguous per-principal sequences, and construct the matching
+stream head, or remove the unsupported rows while the runtime is closed. No
+client cursor existed in the public 0.12.0 GraphQL contract.
+
+Legacy retention rows remain stored but are not effective for inbox pruning
+until all three nullable migration fields are populated and valid. Supported
+write-backend migration diagnostics may use `ai_scope_key` to reproduce the
+stable non-secret scope identity; that value is not authorization. Prefer the
+new recent-MFA-protected `setAiRetentionPolicy` mutation to create the current
+scope policy. Resolve duplicate logical legacy policies explicitly before
+adding/currently relying on the unique keyed policy. Never invent a retention
+period or treat absence as permission to delete.
+
+Host `AiConfigurationService` implementations must add `retention_policy` and
+`set_retention_policy`. Host `AiConfigurationAccessPolicy` implementations
+must handle `ReadRetention` and `ManageRetention`. Compose the corresponding
+configuration query/mutation fields if GraphQL management is enabled. The
+mutation is CAS-bound, requires current recent MFA in the ORM service, and
+audits in the same transaction.
+
+Hosts composing `AiQueryRoot`/`AiSubscriptionRoot` gain
+`aiInboxEventPage`/`aiInboxEvents` (or coherent PascalCase names). Install an
+explicit `Arc<dyn AiInboxService>`; missing registration fails closed. Schedule
+`OrmAiInboxPruningService` only as a trusted host worker after all required
+scope policies are current. It deletes only a bounded expired prefix, keeps the
+configured recent-event floor, and atomically advances the retained cursor.
+Do not expose pruning as an ordinary user mutation or manually renumber rows.
+
+This is a pre-1.0 Rust API, GraphQL SDL, persistence, index/constraint,
+authorization, backup/restore, and behavioral contract change. Cargo features
+and defaults do not change. Backups must include the new stream entity and
+captured inbox scope fields. Restore reconciliation must validate stream
+bounds and retained-prefix continuity before reopening. No application-domain
+table or data migration is required.
+
 ## Unreleased: exact provider attachment reopening (crate 0.11.0 to 0.12.0)
 
 Provider turns containing `ModelInputBlock::Attachment` now require exact

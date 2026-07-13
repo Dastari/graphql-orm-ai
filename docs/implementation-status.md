@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.15.0`) and 37 private records
+- AI schema-module identity (currently version `0.16.0`) and 38 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -184,6 +184,16 @@ production-ready behavior.
   to a captured watermark, commit-only wakeup hints, database re-reads after
   wake/lag, explicit reset signaling, and periodic principal rehydration plus
   session/scope reauthorization.
+- Exact-principal cross-session inbox streams with same-transaction
+  session/message/assistant-output notifications, protected bounded payloads,
+  catch-up pages, receiver-before-replay subscriptions, lag recovery, explicit
+  reset signaling, and periodic current-principal plus referenced-session/scope
+  reauthorization.
+- GraphQL-managed, recent-MFA/CAS/audit-protected retention settings and a
+  bounded ORM inbox-pruning worker. Pruning reads captured scope identities and
+  current policies in the deletion transaction, preserves a recent-event
+  floor, deletes only a contiguous expired prefix, never rewinds the stream
+  head, and fails closed for absent/legacy policy.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -195,10 +205,10 @@ production-ready behavior.
 
 - Applied host migrations and production PostgreSQL parity testing. PostgreSQL
   remains compile-checked only; no local or production PostgreSQL was touched.
-- Durable per-principal inbox sequencing/subscriptions and retention purge
-  execution. Session-event live wakeup/replay/reauthorization is implemented;
-  reset signaling is present, while actual retention pruning remains.
-- Usage, skill, and inbox subscription roots beyond the session,
+- Per-session event/live-delta and message/content retention purge execution.
+  Principal-inbox retention is implemented; other retention fields remain
+  obligations until their dedicated bounded workers land.
+- Usage and skill roots beyond the session,
   configuration, attachment, proposal, and approval surfaces.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
@@ -250,11 +260,11 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add exact authorized image/file resolution to provider adapters, including
-   provider-side file lifecycle/deletion where applicable.
-2. Add the per-principal inbox stream and retention/pruning worker, then the
-   remaining provider/configuration surfaces, including Ollama and the
-   deterministic fake-process foundation for an allowlisted local harness.
+1. Add authenticated budget-policy, usage, and immutable pricing-catalog
+   GraphQL surfaces plus bounded session-event/content retention workers.
+2. Add the remaining provider/configuration surfaces, beginning with Ollama
+   and the deterministic fake-process foundation for an allowlisted local
+   harness; provider-persistent file lifecycle remains separately gated.
 3. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 

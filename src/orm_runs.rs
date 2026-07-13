@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup};
 
@@ -295,10 +296,12 @@ pub(crate) struct PreparedProviderBlock {
 pub(crate) struct PreparedProviderOutput {
     pub message_id: Uuid,
     pub event_id: Uuid,
+    pub inbox_event_id: Uuid,
     pub provider_kind: String,
     pub provider_model: String,
     pub protected_preview: serde_json::Value,
     pub protected_event: serde_json::Value,
+    pub protected_inbox_event: serde_json::Value,
     pub blocks: Vec<PreparedProviderBlock>,
     pub correlation_id: String,
     pub provider_response_id: Option<String>,
@@ -1218,6 +1221,24 @@ impl OrmAiRunService {
                         session_id: lease.session_id.0,
                         sequence: event_sequence,
                     });
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: output.inbox_event_id,
+                            principal_kind: output.expected_owner_principal_kind,
+                            principal_subject: output.expected_owner_subject,
+                            scope: crate::AiScope {
+                                kind: output.expected_scope_kind,
+                                id: output.expected_scope_id,
+                                tenant_id: output.expected_tenant_id,
+                            },
+                            session_id: lease.session_id.0,
+                            event_type: "assistant_message_completed".to_owned(),
+                            protected_payload: output.protected_inbox_event,
+                            created_at: now.unix_timestamp(),
+                        },
+                    )
+                    .await?;
                     lease_from_record(&updated_run)
                 })
             })
@@ -2987,10 +3008,12 @@ mod tests {
                 PreparedProviderOutput {
                     message_id,
                     event_id: Uuid::new_v4(),
+                    inbox_event_id: Uuid::new_v4(),
                     provider_kind: "mock".to_owned(),
                     provider_model: "checkpoint-test".to_owned(),
                     protected_preview: serde_json::json!({"protected": true}),
                     protected_event: serde_json::json!({"protected": true}),
+                    protected_inbox_event: serde_json::json!({"protected": true}),
                     blocks: vec![PreparedProviderBlock {
                         id: Uuid::new_v4(),
                         kind: "text".to_owned(),

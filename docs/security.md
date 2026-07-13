@@ -72,6 +72,14 @@ real claims no broader than the redacted request, and the private transport
 must enforce destination allowlisting and routed/direct authorization parity;
 these external properties cannot be proven by the crate's Rust type alone.
 
+The cross-session inbox is not an authorization cache. Rows are partitioned by
+exact principal kind and subject, payloads remain protected, and delivery
+rechecks the referenced session owner plus current session/scope read policy.
+Long subscriptions periodically rehydrate the principal; wakeups never carry
+client data. Retention is recent-MFA/CAS/audit managed and deletes only a
+contiguous prefix under current scope policies. A missing policy, cursor gap,
+or concurrent stream change fails closed instead of guessing.
+
 ## Operational safety
 
 Runs use monotonically increasing fencing generations. Stale workers and late

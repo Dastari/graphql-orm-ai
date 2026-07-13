@@ -287,12 +287,17 @@ pub(crate) struct AiToolPolicyRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_retention_policies",
     plural = "GraphqlOrmAiRetentionPolicies",
-    default_sort = "updated_at DESC"
+    default_sort = "updated_at DESC",
+    unique_index = "scope_key"
 )]
 pub(crate) struct AiRetentionPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    /// Stable scope identity. Legacy rows must be explicitly migrated before
+    /// they become effective.
+    #[filterable(type = "string")]
+    pub scope_key: Option<String>,
     pub scope_kind: String,
     pub scope_id: String,
     pub tenant_id: Option<String>,
@@ -302,6 +307,10 @@ pub(crate) struct AiRetentionPolicyRecord {
     pub audit_retention_seconds: i64,
     pub deleted_content_purge_seconds: i64,
     pub provider_file_delete_required: bool,
+    /// Cross-session inbox event age, absent on legacy/unconfigured rows.
+    pub inbox_event_retention_seconds: Option<i64>,
+    /// Recent inbox events retained regardless of age.
+    pub inbox_minimum_events: Option<i64>,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
     #[sortable]
@@ -577,6 +586,43 @@ pub(crate) struct AiSessionEventRecord {
     pub created_at: i64,
 }
 
+/// Durable per-principal cross-session notification stream head.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_inbox_streams",
+    plural = "GraphqlOrmAiInboxStreams",
+    default_sort = "last_event_at ASC",
+    unique_composite = "principal_kind, principal_subject"
+)]
+pub(crate) struct AiInboxStreamRecord {
+    /// Deterministic principal-stream identifier.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Principal class stream owner.
+    #[filterable(type = "string")]
+    pub principal_kind: String,
+    /// Principal subject stream owner.
+    #[filterable(type = "string")]
+    pub principal_subject: String,
+    /// Highest sequence ever allocated; pruning never rewinds this value.
+    pub stream_head: i64,
+    /// Lowest sequence that may still be replayed.
+    pub minimum_retained_sequence: i64,
+    /// Timestamp of the latest appended event.
+    #[sortable]
+    pub last_event_at: i64,
+    /// CAS version serializing append and prune operations.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
 /// Durable per-principal cross-session notification event.
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -588,7 +634,8 @@ pub(crate) struct AiSessionEventRecord {
     table = "graphql_orm_ai_inbox_events",
     plural = "GraphqlOrmAiInboxEvents",
     default_sort = "sequence ASC",
-    keyset = "sequence asc, id asc"
+    keyset = "sequence asc, id asc",
+    unique_composite = "principal_kind, principal_subject, sequence"
 )]
 pub(crate) struct AiInboxEventRecord {
     /// Event ID.
@@ -602,6 +649,15 @@ pub(crate) struct AiInboxEventRecord {
     /// Principal subject stream owner.
     #[filterable(type = "string")]
     pub principal_subject: String,
+    /// Stable scope-policy lookup key captured with the event.
+    #[filterable(type = "string")]
+    pub scope_key: String,
+    /// Scope kind captured with the event.
+    pub scope_kind: String,
+    /// Scope ID captured with the event.
+    pub scope_id: String,
+    /// Optional tenant boundary captured with the event.
+    pub tenant_id: Option<String>,
     /// Per-principal monotonic sequence.
     #[filterable(type = "number")]
     #[sortable]
@@ -614,6 +670,7 @@ pub(crate) struct AiInboxEventRecord {
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_payload: serde_json::Value,
     /// Created timestamp.
+    #[filterable(type = "number")]
     pub created_at: i64,
 }
 
@@ -1663,7 +1720,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.15.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.16.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -1719,6 +1776,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiSessionRecord::metadata(),
                 AiSessionParticipantRecord::metadata(),
                 AiSessionEventRecord::metadata(),
+                AiInboxStreamRecord::metadata(),
                 AiInboxEventRecord::metadata(),
                 AiMessageRecord::metadata(),
                 AiMessageBlockRecord::metadata(),

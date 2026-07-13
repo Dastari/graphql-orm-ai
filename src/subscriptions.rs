@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
-use crate::{AiError, AiSessionEventView, AiSessionId};
+use crate::{AiError, AiInboxEventEnvelope, AiInboxService, AiSessionEventView, AiSessionId};
 
 /// Commit-only wakeup hint. The durable event table remains the source of
 /// truth; consumers never deliver this value directly to clients.
@@ -70,12 +70,36 @@ impl AiSubscriptionRoot {
         Pin<Box<dyn Stream<Item = async_graphql::Result<AiSessionEventEnvelope>> + Send>>,
     > {
         let after_sequence = after_sequence.unwrap_or(0);
-        if after_sequence < 0 {
+        if after_sequence < 0 || after_sequence > i64::from(i32::MAX) {
             return Err(AiError::InvalidInput("invalid event sequence".to_owned()).extend());
         }
         let principal = agql_auth::principal_from_ctx(context)?;
         let stream = subscription_service(context)?
             .session_events(principal, AiSessionId(session_id), after_sequence)
+            .await
+            .map_err(|error| error.extend())?;
+        Ok(Box::pin(
+            stream.map(|item| item.map_err(|error| error.extend())),
+        ))
+    }
+
+    /// Replays the current principal's durable cross-session inbox, then
+    /// follows commit-only wakeup hints with periodic principal
+    /// reauthorization.
+    async fn ai_inbox_events(
+        &self,
+        context: &Context<'_>,
+        after_sequence: Option<i64>,
+    ) -> async_graphql::Result<
+        Pin<Box<dyn Stream<Item = async_graphql::Result<AiInboxEventEnvelope>> + Send>>,
+    > {
+        let after_sequence = after_sequence.unwrap_or(0);
+        if after_sequence < 0 || after_sequence > i64::from(i32::MAX) {
+            return Err(AiError::InvalidInput("invalid inbox sequence".to_owned()).extend());
+        }
+        let principal = agql_auth::principal_from_ctx(context)?;
+        let stream = inbox_service(context)?
+            .inbox_events(principal, after_sequence)
             .await
             .map_err(|error| error.extend())?;
         Ok(Box::pin(
@@ -92,5 +116,14 @@ fn subscription_service(
         .cloned()
         .ok_or_else(|| {
             AiError::InvalidConfiguration("AI subscription service is missing".to_owned()).extend()
+        })
+}
+
+fn inbox_service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiInboxService>> {
+    context
+        .data_opt::<Arc<dyn AiInboxService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration("AI inbox service is missing".to_owned()).extend()
         })
 }

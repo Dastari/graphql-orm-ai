@@ -107,6 +107,8 @@ uncertain for privileged reconciliation. The worker must not replay that
 provider call. A stale worker cannot append after lease expiry or recovery
 because the durable transaction re-reads the exact current fence.
 
-The current implementation does not prune live events. Hosts must not manually
-delete rows or reuse cursors. A future bounded retention worker will apply the
-configured retention policy while preserving cursor and restore contracts.
+The principal-inbox retention worker does not prune per-session live-delta
+events. Hosts must not manually delete those rows or reuse cursors. A separate
+bounded session-event retention worker remains required; until it lands, keep
+the configured delta policy as an obligation rather than treating it as
+executed purge.

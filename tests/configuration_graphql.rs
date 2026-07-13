@@ -48,6 +48,14 @@ impl AiConfigurationService for ConfigurationService {
         Ok(None)
     }
 
+    async fn retention_policy(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: AiScope,
+    ) -> Result<Option<AiRetentionPolicyView>, AiError> {
+        Ok(None)
+    }
+
     async fn upsert_provider_profile(
         &self,
         _principal: &AuthPrincipal,
@@ -95,6 +103,28 @@ impl AiConfigurationService for ConfigurationService {
             effective_at: 1,
         })
     }
+
+    async fn set_retention_policy(
+        &self,
+        _principal: &AuthPrincipal,
+        input: SetAiRetentionPolicyInput,
+    ) -> Result<AiRetentionPolicyView, AiError> {
+        Ok(AiRetentionPolicyView {
+            scope_kind: input.scope.kind,
+            scope_id: input.scope.id,
+            tenant_id: input.scope.tenant_id,
+            message_retention_seconds: input.message_retention_seconds,
+            delta_retention_seconds: input.delta_retention_seconds,
+            raw_payload_retention_seconds: input.raw_payload_retention_seconds,
+            audit_retention_seconds: input.audit_retention_seconds,
+            deleted_content_purge_seconds: input.deleted_content_purge_seconds,
+            provider_file_delete_required: input.provider_file_delete_required,
+            inbox_event_retention_seconds: input.inbox_event_retention_seconds,
+            inbox_minimum_events: input.inbox_minimum_events,
+            row_version: 1,
+            updated_at: 1,
+        })
+    }
 }
 
 fn principal() -> AuthPrincipal {
@@ -122,10 +152,15 @@ async fn credential_mutation_returns_only_redacted_state() {
     .data(service_data)
     .finish();
     let profile_id = Uuid::new_v4();
-    let request = Request::new(format!(
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let document = format!(
         "mutation {{ setAiProviderCredential(input: {{ profileId: \"{profile_id}\", credential: \"synthetic-test-secret\", expectedVersion: 1 }}) {{ id credentialConfigured rowVersion }} }}"
-    ))
-    .data(principal());
+    );
+    #[cfg(feature = "graphql-case-pascal")]
+    let document = format!(
+        "mutation {{ SetAiProviderCredential(Input: {{ ProfileId: \"{profile_id}\", Credential: \"synthetic-test-secret\", ExpectedVersion: 1 }}) {{ Id CredentialConfigured RowVersion }} }}"
+    );
+    let request = Request::new(document).data(principal());
     let response = schema.execute(request).await;
 
     assert!(response.errors.is_empty());
@@ -134,6 +169,16 @@ async fn credential_mutation_returns_only_redacted_state() {
     assert!(!serialized.contains("synthetic-test-secret"));
     assert!(!serialized.contains("credentialReference"));
     assert!(!schema.sdl().contains("credentialReference"));
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    {
+        assert!(schema.sdl().contains("aiRetentionPolicy(scope:"));
+        assert!(schema.sdl().contains("setAiRetentionPolicy(input:"));
+    }
+    #[cfg(feature = "graphql-case-pascal")]
+    {
+        assert!(schema.sdl().contains("AiRetentionPolicy(Scope:"));
+        assert!(schema.sdl().contains("SetAiRetentionPolicy(Input:"));
+    }
 }
 
 #[tokio::test]

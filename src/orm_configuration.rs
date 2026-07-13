@@ -23,8 +23,9 @@ use crate::{
     AiConfigurationAccessPolicy, AiConfigurationAction, AiConfigurationService,
     AiContentProtectionMode, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
     AiContentProtectionPolicyView, AiError, AiProviderEndpointPolicy, AiProviderKindInput,
-    AiProviderProfileView, AiScope, AiSecretStore, RemoveAiProviderCredentialInput, SecretRef,
-    SetAiContentProtectionPolicyInput, UpsertAiProviderProfileInput,
+    AiProviderProfileView, AiRetentionPolicyView, AiScope, AiSecretStore,
+    RemoveAiProviderCredentialInput, SecretRef, SetAiContentProtectionPolicyInput,
+    SetAiRetentionPolicyInput, UpsertAiProviderProfileInput,
 };
 
 /// Durable configuration backend using generated ORM APIs and a compensating
@@ -173,6 +174,19 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .await?
             .as_ref()
             .map(content_policy_view))
+    }
+
+    async fn retention_policy(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<Option<AiRetentionPolicyView>, AiError> {
+        self.require_access(principal, &scope, AiConfigurationAction::ReadRetention)
+            .await?;
+        Ok(load_retention_policy(&self.database, &scope)
+            .await?
+            .as_ref()
+            .map(retention_policy_view))
     }
 
     async fn upsert_provider_profile(
@@ -613,6 +627,130 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .map_err(map_transaction)?;
         Ok(content_policy_view(&record))
     }
+
+    async fn set_retention_policy(
+        &self,
+        principal: &AuthPrincipal,
+        input: SetAiRetentionPolicyInput,
+    ) -> Result<AiRetentionPolicyView, AiError> {
+        self.require_recent_mfa(principal)?;
+        validate_retention_input(&input)?;
+        let scope: AiScope = input.scope.into();
+        self.require_access(principal, &scope, AiConfigurationAction::ManageRetention)
+            .await?;
+        let scope_hash = scope_key(&scope);
+        let actor_kind = principal_kind(principal);
+        let actor_subject = principal.subject().to_owned();
+        let expected_version = input.expected_version;
+        let record = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let existing = tx
+                        .query::<AiRetentionPolicyRecord>()
+                        .filter(AiRetentionPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(scope_hash.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if existing.len() > 1 {
+                        return Err(OrmPublicError::new(
+                            OrmErrorCode::AuthorizationMisconfigured,
+                        ));
+                    }
+                    let record = match (existing.into_iter().next(), expected_version) {
+                        (None, None) => tx
+                            .insert::<AiRetentionPolicyRecord>(CreateAiRetentionPolicyRecordInput {
+                                scope_key: Some(scope_hash),
+                                scope_kind: scope.kind,
+                                scope_id: scope.id,
+                                tenant_id: scope.tenant_id,
+                                message_retention_seconds: input.message_retention_seconds,
+                                delta_retention_seconds: input.delta_retention_seconds,
+                                raw_payload_retention_seconds: input.raw_payload_retention_seconds,
+                                audit_retention_seconds: input.audit_retention_seconds,
+                                deleted_content_purge_seconds: input.deleted_content_purge_seconds,
+                                provider_file_delete_required: input.provider_file_delete_required,
+                                inbox_event_retention_seconds: Some(
+                                    input.inbox_event_retention_seconds,
+                                ),
+                                inbox_minimum_events: Some(input.inbox_minimum_events),
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        (Some(current), Some(expected_version)) => match tx
+                            .compare_and_swap::<AiRetentionPolicyRecord>(
+                                &current.id,
+                                expected_version,
+                                AiRetentionPolicyRecordWhereInput {
+                                    scope_key: Some(StringFilter {
+                                        eq: Some(scope_hash),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiRetentionPolicyRecordInput {
+                                    message_retention_seconds: Some(
+                                        input.message_retention_seconds,
+                                    ),
+                                    delta_retention_seconds: Some(input.delta_retention_seconds),
+                                    raw_payload_retention_seconds: Some(
+                                        input.raw_payload_retention_seconds,
+                                    ),
+                                    audit_retention_seconds: Some(input.audit_retention_seconds),
+                                    deleted_content_purge_seconds: Some(
+                                        input.deleted_content_purge_seconds,
+                                    ),
+                                    provider_file_delete_required: Some(
+                                        input.provider_file_delete_required,
+                                    ),
+                                    inbox_event_retention_seconds: Some(Some(
+                                        input.inbox_event_retention_seconds,
+                                    )),
+                                    inbox_minimum_events: Some(Some(input.inbox_minimum_events)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            ConditionalUpdateOutcome::Updated(record) => record,
+                            ConditionalUpdateOutcome::NotFound => {
+                                return Err(OrmPublicError::not_found());
+                            }
+                            ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        },
+                        _ => return Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    };
+                    insert_audit(
+                        tx,
+                        AuditFact {
+                            actor_principal_kind: &actor_kind,
+                            actor_subject: &actor_subject,
+                            action: "ai.retention_policy.set",
+                            resource_kind: "retention_policy",
+                            resource_reference: &record.id.to_string(),
+                            outcome: "allowed",
+                            reason_code: "retention_policy_updated",
+                            policy_version: Some(record.row_version.to_string()),
+                        },
+                    )
+                    .await?;
+                    Ok(record)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        Ok(retention_policy_view(&record))
+    }
 }
 
 #[async_trait]
@@ -672,6 +810,44 @@ async fn load_content_policy(
         ));
     }
     Ok(rows.into_iter().next())
+}
+
+async fn load_retention_policy(
+    database: &Database<DefaultWriteBackend>,
+    scope: &AiScope,
+) -> Result<Option<AiRetentionPolicyRecord>, AiError> {
+    let scope_hash = scope_key(scope);
+    let rows = database
+        .transaction(TransactionMode::Default, move |tx| {
+            Box::pin(async move {
+                tx.query::<AiRetentionPolicyRecord>()
+                    .filter(AiRetentionPolicyRecordWhereInput {
+                        scope_key: Some(StringFilter {
+                            eq: Some(scope_hash),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .limit(2)
+                    .fetch_all()
+                    .await
+                    .map_err(OrmPublicError::from)
+            })
+        })
+        .await
+        .map_err(map_transaction)?;
+    if rows.len() > 1 {
+        return Err(AiError::InvalidConfiguration(
+            "multiple retention policies exist for one scope".to_owned(),
+        ));
+    }
+    let record = rows.into_iter().next();
+    if record.as_ref().is_some_and(|record| {
+        record.inbox_event_retention_seconds.is_none() || record.inbox_minimum_events.is_none()
+    }) {
+        return Err(AiError::RuntimeNotReady);
+    }
+    Ok(record)
 }
 
 struct AuditFact<'a> {
@@ -734,6 +910,24 @@ fn content_policy_view(record: &AiContentProtectionPolicyRecord) -> AiContentPro
     }
 }
 
+fn retention_policy_view(record: &AiRetentionPolicyRecord) -> AiRetentionPolicyView {
+    AiRetentionPolicyView {
+        scope_kind: record.scope_kind.clone(),
+        scope_id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+        message_retention_seconds: record.message_retention_seconds,
+        delta_retention_seconds: record.delta_retention_seconds,
+        raw_payload_retention_seconds: record.raw_payload_retention_seconds,
+        audit_retention_seconds: record.audit_retention_seconds,
+        deleted_content_purge_seconds: record.deleted_content_purge_seconds,
+        provider_file_delete_required: record.provider_file_delete_required,
+        inbox_event_retention_seconds: record.inbox_event_retention_seconds.unwrap_or_default(),
+        inbox_minimum_events: record.inbox_minimum_events.unwrap_or_default(),
+        row_version: record.row_version,
+        updated_at: record.updated_at,
+    }
+}
+
 fn profile_scope(record: &AiProviderProfileRecord) -> AiScope {
     AiScope {
         kind: record.scope_kind.clone(),
@@ -742,7 +936,7 @@ fn profile_scope(record: &AiProviderProfileRecord) -> AiScope {
     }
 }
 
-fn scope_key(scope: &AiScope) -> String {
+pub(crate) fn scope_key(scope: &AiScope) -> String {
     let mut hash = Sha256::new();
     hash.update(b"graphql-orm-ai/scope/v1\0");
     for value in [
@@ -760,6 +954,39 @@ fn scope_key(scope: &AiScope) -> String {
         }
     }
     hex::encode(hash.finalize())
+}
+
+/// Returns the stable non-secret persistence identity for an AI scope.
+///
+/// This value supports dependency-owned migration diagnostics and exact
+/// configuration matching. It proves neither scope validity nor caller
+/// authorization and must never be used in place of host access policy.
+pub fn ai_scope_key(scope: &AiScope) -> String {
+    scope_key(scope)
+}
+
+fn validate_retention_input(input: &SetAiRetentionPolicyInput) -> Result<(), AiError> {
+    const MINIMUM_RETENTION_SECONDS: i64 = 60;
+    const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
+    let durations = [
+        Some(input.delta_retention_seconds),
+        Some(input.raw_payload_retention_seconds),
+        Some(input.audit_retention_seconds),
+        Some(input.deleted_content_purge_seconds),
+        Some(input.inbox_event_retention_seconds),
+        input.message_retention_seconds,
+    ];
+    if durations
+        .into_iter()
+        .flatten()
+        .any(|seconds| !(MINIMUM_RETENTION_SECONDS..=MAXIMUM_RETENTION_SECONDS).contains(&seconds))
+        || !(1..=100_000).contains(&input.inbox_minimum_events)
+    {
+        return Err(AiError::InvalidInput(
+            "invalid AI retention policy bounds".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_endpoint(

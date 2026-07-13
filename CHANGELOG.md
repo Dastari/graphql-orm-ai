@@ -5,10 +5,21 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.12.0` and the AI
-schema module to `0.15.0`.
+This development line advances the pre-1.0 crate version to `0.13.0` and the AI
+schema module to `0.16.0`.
 
 ### Added
+
+- Durable exact-principal cross-session inbox sequencing with protected
+  lifecycle/message/assistant-output events committed atomically with their
+  source state, bounded catch-up pages, receiver-before-replay subscriptions,
+  lag recovery, explicit retention-gap reset, and periodic current-principal
+  reauthorization.
+- GraphQL-managed, recent-MFA/CAS/audit-protected scope retention settings,
+  including explicit inbox age and recent-event-floor bounds. The host-only
+  `OrmAiInboxPruningService` deletes only an expired contiguous prefix,
+  serializes with appends through the stream CAS, never rewinds sequence heads,
+  and reports missing policies or concurrent conflicts without unsafe deletion.
 
 - Exact, provider-neutral attachment reopening through
   `AiProviderAttachmentResolver`, private-field request/resolved payload types,
@@ -26,7 +37,7 @@ schema module to `0.15.0`.
   idempotent blob deletion, durable redacted audit, and bounded retry backoff.
 - Configurable upload-processing and cleanup claim lifetimes, plus a redacted
   per-pass cleanup report suitable for deployment telemetry.
-- Project-agnostic AI schema module with 37 private persistence entities for
+- Project-agnostic AI schema module with 38 private persistence entities for
   configuration, sessions, protected history, fenced runs, tools, approvals,
   proposals, budgets, usage, egress, audit, and restore readiness.
 - Owner-isolated ORM-backed session/configuration services and resumable
@@ -157,6 +168,17 @@ schema module to `0.15.0`.
 
 ### Changed
 
+- AI schema module `0.16.0` adds principal inbox stream heads, exact
+  principal-sequence uniqueness, captured event scope identity, and nullable
+  migration-gated inbox fields plus a stable scope key on retention policies.
+  Session/provider-output writes now append the applicable inbox event in the
+  same transaction.
+- `AiConfigurationService` and the configuration GraphQL roots now include
+  retention query/mutation contracts. This is a pre-1.0 public Rust and
+  GraphQL SDL change requiring host service implementations to add both
+  methods and configuration policies to handle `ReadRetention` and
+  `ManageRetention`.
+
 - `AiProviderCallExecutor` optionally accepts the exact attachment resolver and
   validated reopening limits. Attachment turns fail before transport when it
   is absent, and current scope/session access is checked again after storage
@@ -212,7 +234,7 @@ schema module to `0.15.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.15.0`.
+  reconciliation. The current module is `0.16.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -222,7 +244,7 @@ schema module to `0.15.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.15.0`.
+  the current module is `0.16.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts

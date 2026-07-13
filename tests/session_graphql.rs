@@ -37,6 +37,41 @@ struct RecordingSessionService {
     principal_subject: Mutex<Option<String>>,
 }
 
+#[derive(Default)]
+struct RecordingInboxService {
+    request: Mutex<Option<(String, i64, i64)>>,
+}
+
+#[async_trait]
+impl AiInboxService for RecordingInboxService {
+    async fn inbox_event_page(
+        &self,
+        principal: &AuthPrincipal,
+        after_sequence: i64,
+        first: i64,
+    ) -> Result<AiInboxEventPage, AiError> {
+        *self
+            .request
+            .lock()
+            .expect("test mutex should not be poisoned") =
+            Some((principal.subject().to_owned(), after_sequence, first));
+        Ok(AiInboxEventPage {
+            events: vec![],
+            watermark: 7,
+            has_more: false,
+            reset_required: false,
+        })
+    }
+
+    async fn inbox_events(
+        &self,
+        _principal: AuthPrincipal,
+        _after_sequence: i64,
+    ) -> Result<AiInboxEventStream, AiError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+}
+
 #[async_trait]
 impl AiSessionService for RecordingSessionService {
     async fn sessions(
@@ -245,5 +280,44 @@ async fn event_page_rejects_unbounded_requests_before_service_execution() {
             .as_ref()
             .and_then(|extensions| extensions.get("code")),
         Some(&async_graphql::Value::from("AI_INVALID_INPUT"))
+    );
+}
+
+#[tokio::test]
+async fn inbox_query_uses_bounded_defaults_and_the_current_principal() {
+    let session_service = Arc::new(RecordingSessionService::default());
+    let inbox = Arc::new(RecordingInboxService::default());
+    let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
+        .data(session_service as Arc<dyn AiSessionService>)
+        .data(inbox.clone() as Arc<dyn AiInboxService>)
+        .finish();
+    let response = schema
+        .execute(
+            Request::new(
+                "{ aiInboxEventPage { watermark hasMore resetRequired events { sequence } } }",
+            )
+            .data(principal("user-a")),
+        )
+        .await;
+
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().expect("response JSON"),
+        json!({
+            "aiInboxEventPage": {
+                "watermark": 7,
+                "hasMore": false,
+                "resetRequired": false,
+                "events": [],
+            }
+        })
+    );
+    assert_eq!(
+        inbox
+            .request
+            .lock()
+            .expect("test mutex should not be poisoned")
+            .as_ref(),
+        Some(&("user-a".to_owned(), 0, 100))
     );
 }

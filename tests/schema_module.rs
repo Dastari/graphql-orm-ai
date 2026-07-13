@@ -8,8 +8,8 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.15.0");
-    assert_eq!(catalog.entities().len(), 37);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.16.0");
+    assert_eq!(catalog.entities().len(), 38);
     assert!(
         catalog
             .entities()
@@ -58,6 +58,56 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 "idempotency_key".to_owned(),
             ]
     }));
+    let inbox_stream = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_inbox_streams")
+        .expect("principal inbox stream table should exist");
+    assert!(inbox_stream.composite_unique_indexes.iter().any(|columns| {
+        columns == &["principal_kind".to_owned(), "principal_subject".to_owned()]
+    }));
+    let inbox_event = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_inbox_events")
+        .expect("principal inbox event table should exist");
+    assert!(inbox_event.composite_unique_indexes.iter().any(|columns| {
+        columns
+            == &[
+                "principal_kind".to_owned(),
+                "principal_subject".to_owned(),
+                "sequence".to_owned(),
+            ]
+    }));
+    assert!(
+        inbox_event
+            .columns
+            .iter()
+            .any(|column| column.name == "scope_key" && !column.nullable)
+    );
+    let retention = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_retention_policies")
+        .expect("retention policy table should exist");
+    assert!(
+        retention
+            .columns
+            .iter()
+            .any(|column| { column.name == "scope_key" && column.nullable && !column.is_unique })
+    );
+    assert!(
+        retention
+            .indexes
+            .iter()
+            .any(|index| { index.is_unique && index.columns == ["scope_key"] })
+    );
+    assert!(
+        retention
+            .columns
+            .iter()
+            .any(|column| { column.name == "inbox_event_retention_seconds" && column.nullable })
+    );
     let attempt_outcome = schema
         .tables
         .iter()

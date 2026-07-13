@@ -19,6 +19,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
@@ -484,9 +485,23 @@ impl AiSessionService for OrmAiSessionService {
         }
         let session_id = Uuid::new_v4();
         let participant_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
         let (owner_principal_kind, owner_subject) = principal_identity(principal);
         let owner_subject = owner_subject.to_owned();
         let now = unix_seconds();
+        let protection_policy = self.protection_policy(principal, &scope).await?;
+        let protected_inbox_event = self
+            .protect_value(
+                &protection_policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({"sessionId": session_id, "state": "active"}),
+            )
+            .await?;
         let scope_for_insert = scope.clone();
         let session = self
             .database
@@ -497,9 +512,9 @@ impl AiSessionService for OrmAiSessionService {
                             id: session_id,
                             owner_principal_kind: owner_principal_kind.clone(),
                             owner_subject: owner_subject.clone(),
-                            tenant_id: scope_for_insert.tenant_id,
-                            scope_kind: scope_for_insert.kind,
-                            scope_id: scope_for_insert.id,
+                            tenant_id: scope_for_insert.tenant_id.clone(),
+                            scope_kind: scope_for_insert.kind.clone(),
+                            scope_id: scope_for_insert.id.clone(),
                             title,
                             state: "active".to_owned(),
                             stream_head: 0,
@@ -514,13 +529,27 @@ impl AiSessionService for OrmAiSessionService {
                         CreateAiSessionParticipantRecordInput {
                             id: participant_id,
                             session_id,
-                            principal_kind: owner_principal_kind,
-                            principal_subject: owner_subject,
+                            principal_kind: owner_principal_kind.clone(),
+                            principal_subject: owner_subject.clone(),
                             participant_role: "owner".to_owned(),
                         },
                     )
                     .await
                     .map_err(OrmPublicError::from)?;
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: inbox_event_id,
+                            principal_kind: owner_principal_kind,
+                            principal_subject: owner_subject,
+                            scope: scope_for_insert,
+                            session_id,
+                            event_type: "session_created".to_owned(),
+                            protected_payload: protected_inbox_event,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
                     Ok(session)
                 })
             })
@@ -553,6 +582,33 @@ impl AiSessionService for OrmAiSessionService {
         session_id: AiSessionId,
     ) -> Result<bool, AiError> {
         self.require_session_policy(principal, session_id, AiSessionAction::Delete)
+            .await?;
+        let existing = AiSessionRecord::find_by_id(&self.database, &session_id.0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        if !is_owner(principal, &existing) {
+            return Err(AiError::NotFound);
+        }
+        if existing.state == "deleting" {
+            return Ok(true);
+        }
+        let scope = record_scope(&existing);
+        self.require_scope(principal, &scope, AiSessionAction::Delete)
+            .await?;
+        let policy = self.protection_policy(principal, &scope).await?;
+        let inbox_event_id = Uuid::new_v4();
+        let protected_inbox_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({"sessionId": session_id.0, "state": "deleting"}),
+            )
             .await?;
         let expected_kind = principal_identity(principal).0;
         let expected_subject = principal.subject().to_owned();
@@ -588,7 +644,23 @@ impl AiSessionService for OrmAiSessionService {
                         .await
                         .map_err(OrmPublicError::from)?;
                     match outcome {
-                        ConditionalUpdateOutcome::Updated(_) => Ok(true),
+                        ConditionalUpdateOutcome::Updated(_) => {
+                            append_inbox_event(
+                                tx,
+                                PreparedAiInboxEvent {
+                                    id: inbox_event_id,
+                                    principal_kind: expected_kind,
+                                    principal_subject: expected_subject,
+                                    scope,
+                                    session_id: session_id.0,
+                                    event_type: "session_deleting".to_owned(),
+                                    protected_payload: protected_inbox_event,
+                                    created_at: now,
+                                },
+                            )
+                            .await?;
+                            Ok(true)
+                        }
                         ConditionalUpdateOutcome::NotFound => Err(OrmPublicError::not_found()),
                         ConditionalUpdateOutcome::Conflict => {
                             Err(OrmPublicError::new(OrmErrorCode::Conflict))
@@ -642,6 +714,7 @@ impl AiSessionService for OrmAiSessionService {
         let block_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
         let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
         let content_hash = message_content_hash(&input.text, &deduplicated_attachments);
         let preview = bounded_prefix(&input.text, self.limits.maximum_preview_bytes);
         let protected_preview = self
@@ -678,6 +751,18 @@ impl AiSessionService for OrmAiSessionService {
                     &scope,
                 ),
                 json!({"messageId": message_id, "runId": run_id}),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({"sessionId": input.session_id, "messageId": message_id, "runId": run_id}),
             )
             .await?;
         let principal_reference =
@@ -838,6 +923,20 @@ impl AiSessionService for OrmAiSessionService {
                         session_id,
                         sequence: event_sequence,
                     });
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: inbox_event_id,
+                            principal_kind: principal_kind.clone(),
+                            principal_subject: principal_subject.clone(),
+                            scope,
+                            session_id,
+                            event_type: "message_queued".to_owned(),
+                            protected_payload: protected_inbox_event,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
                     for attachment_id in attachments {
                         let updated = tx
                             .update_by_id::<AiAttachmentRecord>(
@@ -872,6 +971,30 @@ impl OrmAiSessionService {
     ) -> Result<AiSessionView, AiError> {
         self.require_session_policy(principal, session_id, AiSessionAction::Archive)
             .await?;
+        let visible = self
+            .visible_session(principal, session_id, AiSessionAction::Archive)
+            .await?
+            .ok_or(AiError::NotFound)?;
+        let scope = record_scope(&visible);
+        let policy = self.protection_policy(principal, &scope).await?;
+        let inbox_event_id = Uuid::new_v4();
+        let protected_inbox_event = self
+            .protect_value(
+                &policy,
+                content_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({"sessionId": session_id.0, "state": next_state}),
+            )
+            .await?;
+        let inbox_event_type = if archive {
+            "session_archived"
+        } else {
+            "session_restored"
+        };
         let (expected_kind, expected_subject) = principal_identity(principal);
         let expected_subject = expected_subject.to_owned();
         let now = unix_seconds();
@@ -907,7 +1030,23 @@ impl OrmAiSessionService {
                         .await
                         .map_err(OrmPublicError::from)?;
                     match outcome {
-                        ConditionalUpdateOutcome::Updated(record) => Ok(record),
+                        ConditionalUpdateOutcome::Updated(record) => {
+                            append_inbox_event(
+                                tx,
+                                PreparedAiInboxEvent {
+                                    id: inbox_event_id,
+                                    principal_kind: expected_kind,
+                                    principal_subject: expected_subject,
+                                    scope,
+                                    session_id: session_id.0,
+                                    event_type: inbox_event_type.to_owned(),
+                                    protected_payload: protected_inbox_event,
+                                    created_at: now,
+                                },
+                            )
+                            .await?;
+                            Ok(record)
+                        }
                         ConditionalUpdateOutcome::NotFound => Err(OrmPublicError::not_found()),
                         ConditionalUpdateOutcome::Conflict => {
                             Err(OrmPublicError::new(OrmErrorCode::Conflict))

@@ -20,12 +20,16 @@ adapters listed below are still being implemented.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 37 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 38 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, egress, audit, skills, and restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
   protected message blocks, stable pagination, idempotent send, and resumable
   session-event subscriptions designed for virtualized frontends.
+- A durable per-principal cross-session inbox with atomic lifecycle/message/
+  assistant-output notifications, bounded catch-up, resumable subscriptions,
+  periodic current-principal reauthorization, explicit retention-gap reset,
+  and a GraphQL-policy-driven bounded pruning worker.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
@@ -201,10 +205,12 @@ services are concrete today and which host seams are still foundations.
 ## Chat and streaming model
 
 Messages, content blocks, events, runs, tool calls, and artifacts are separate
-bounded resources. Reads use stable keyset windows; subscriptions replay from
-a cursor to a captured watermark and then switch to commit-only wakeups. A
-frontend can therefore retain a small virtualized window even for extremely
-large histories instead of receiving or rendering the entire session.
+bounded resources. Reads use stable keyset windows; per-session and
+cross-session principal-inbox subscriptions replay from a cursor to a captured
+watermark and then switch to commit-only wakeups. A frontend can therefore
+retain a small virtualized window even for extremely large histories instead
+of receiving or rendering the entire session. See the
+[principal inbox guide](docs/principal-inbox.md).
 
 Attachments use opaque AI-owned references. Ticketed streaming upload,
 ownership, byte/hash checks, quarantine, scanning, acceptance, promotion,
@@ -228,7 +234,8 @@ implemented through authenticated, optionally PascalCase GraphQL roots.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authenticated
-budget-policy/usage GraphQL lifecycles and live-delta retention/purge,
+budget-policy/usage GraphQL lifecycles and per-session live-delta
+retention/purge,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings, other provider adapters,

@@ -221,6 +221,7 @@ impl OrmAiProviderOutputService {
 
         let message_id = Uuid::new_v4();
         let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
         let raw_blocks = normalize_blocks(result.events(), self.limits)?;
         let preview_text = raw_blocks
             .iter()
@@ -282,6 +283,23 @@ impl OrmAiProviderOutputService {
                 }),
             )
             .await?;
+        let protected_inbox_event = self
+            .protect(
+                &policy,
+                context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &scope,
+                ),
+                json!({
+                    "sessionId": lease.session_id().0,
+                    "messageId": message_id,
+                    "runId": lease.run_id().0,
+                    "blockCount": blocks.len(),
+                }),
+            )
+            .await?;
         let block_count = blocks.len();
         let checkpoint_hash = final_output_checkpoint_hash(
             lease.run_id(),
@@ -298,10 +316,12 @@ impl OrmAiProviderOutputService {
                 PreparedProviderOutput {
                     message_id,
                     event_id,
+                    inbox_event_id,
                     provider_kind: result.provider_kind().as_str().to_owned(),
                     provider_model: result.provider_model().to_owned(),
                     protected_preview,
                     protected_event,
+                    protected_inbox_event,
                     blocks,
                     correlation_id: result.budget_reservation_id().0.to_string(),
                     provider_response_id: result.provider_response_id().map(str::to_owned),

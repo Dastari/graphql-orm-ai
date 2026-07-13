@@ -23,6 +23,10 @@ pub enum AiConfigurationAction {
     ReadContentProtection,
     /// Change content-protection mode or key policy.
     ManageContentProtection,
+    /// Read scope retention and purge settings.
+    ReadRetention,
+    /// Change scope retention and purge settings.
+    ManageRetention,
 }
 
 /// Host-owned administrative authorization for GraphQL-managed AI settings.
@@ -126,6 +130,39 @@ pub struct AiContentProtectionPolicyView {
     pub effective_at: i64,
 }
 
+/// Redacted retention and purge settings for one application scope.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiRetentionPolicyView {
+    /// Scope kind.
+    pub scope_kind: String,
+    /// Scope ID.
+    pub scope_id: String,
+    /// Optional tenant boundary.
+    pub tenant_id: Option<String>,
+    /// Optional message retention in seconds; absent means no automatic
+    /// message-age purge is configured.
+    pub message_retention_seconds: Option<i64>,
+    /// Live-delta retention in seconds.
+    pub delta_retention_seconds: i64,
+    /// Raw provider/tool payload retention in seconds.
+    pub raw_payload_retention_seconds: i64,
+    /// Audit-fact retention in seconds.
+    pub audit_retention_seconds: i64,
+    /// Delay before deleted content may be physically purged, in seconds.
+    pub deleted_content_purge_seconds: i64,
+    /// Whether provider-persistent files must be deleted during purge.
+    pub provider_file_delete_required: bool,
+    /// Cross-session inbox-event retention in seconds.
+    pub inbox_event_retention_seconds: i64,
+    /// Most recent cross-session inbox events retained regardless of age.
+    pub inbox_minimum_events: i64,
+    /// CAS version.
+    pub row_version: i64,
+    /// Update time in Unix seconds.
+    pub updated_at: i64,
+}
+
 /// Provider profile CAS upsert.
 #[derive(InputObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -185,6 +222,32 @@ pub struct SetAiContentProtectionPolicyInput {
     pub expected_version: Option<i64>,
 }
 
+/// Scope retention-policy CAS input.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct SetAiRetentionPolicyInput {
+    /// Owning scope.
+    pub scope: AiScopeInput,
+    /// Optional message retention in seconds.
+    pub message_retention_seconds: Option<i64>,
+    /// Live-delta retention in seconds.
+    pub delta_retention_seconds: i64,
+    /// Raw provider/tool payload retention in seconds.
+    pub raw_payload_retention_seconds: i64,
+    /// Audit-fact retention in seconds.
+    pub audit_retention_seconds: i64,
+    /// Delay before deleted content may be physically purged, in seconds.
+    pub deleted_content_purge_seconds: i64,
+    /// Require provider-persistent file deletion during purge.
+    pub provider_file_delete_required: bool,
+    /// Cross-session inbox-event retention in seconds.
+    pub inbox_event_retention_seconds: i64,
+    /// Most recent cross-session inbox events retained regardless of age.
+    pub inbox_minimum_events: i64,
+    /// Expected CAS version, or absent to create.
+    pub expected_version: Option<i64>,
+}
+
 /// GraphQL content-protection mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
@@ -208,8 +271,8 @@ impl From<AiContentProtectionModeInput> for AiContentProtectionMode {
 ///
 /// Implementations must enforce administrative authorization and scope/tenant
 /// isolation for every method. Mutations must use CAS, append a redacted audit
-/// event, and require current recent MFA for credential and content-protection
-/// changes. A failed audit append fails the mutation.
+/// event, and require current recent MFA for credential, content-protection,
+/// and retention changes. A failed audit append fails the mutation.
 #[async_trait]
 pub trait AiConfigurationService: Send + Sync {
     /// Lists at most 100 visible redacted profiles for a scope.
@@ -225,6 +288,13 @@ pub trait AiConfigurationService: Send + Sync {
         principal: &AuthPrincipal,
         scope: AiScope,
     ) -> Result<Option<AiContentProtectionPolicyView>, AiError>;
+
+    /// Loads the redacted retention state for a visible scope.
+    async fn retention_policy(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<Option<AiRetentionPolicyView>, AiError>;
 
     /// Creates or CAS-updates a provider profile and audits the change.
     async fn upsert_provider_profile(
@@ -256,6 +326,13 @@ pub trait AiConfigurationService: Send + Sync {
         principal: &AuthPrincipal,
         input: SetAiContentProtectionPolicyInput,
     ) -> Result<AiContentProtectionPolicyView, AiError>;
+
+    /// Creates or CAS-updates required scope retention and purge settings.
+    async fn set_retention_policy(
+        &self,
+        principal: &AuthPrincipal,
+        input: SetAiRetentionPolicyInput,
+    ) -> Result<AiRetentionPolicyView, AiError>;
 }
 
 /// Composable redacted configuration query root.
@@ -297,6 +374,19 @@ impl AiConfigurationQueryRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         configuration_service(context)?
             .content_protection_policy(&principal, scope.into())
+            .await
+            .map_err(extend)
+    }
+
+    /// Loads redacted scope retention and purge settings.
+    async fn ai_retention_policy(
+        &self,
+        context: &Context<'_>,
+        scope: AiScopeInput,
+    ) -> async_graphql::Result<Option<AiRetentionPolicyView>> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        configuration_service(context)?
+            .retention_policy(&principal, scope.into())
             .await
             .map_err(extend)
     }
@@ -367,6 +457,19 @@ impl AiConfigurationMutationRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         configuration_service(context)?
             .set_content_protection_policy(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Sets required per-scope retention and purge settings.
+    async fn set_ai_retention_policy(
+        &self,
+        context: &Context<'_>,
+        input: SetAiRetentionPolicyInput,
+    ) -> async_graphql::Result<AiRetentionPolicyView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        configuration_service(context)?
+            .set_retention_policy(&principal, input)
             .await
             .map_err(extend)
     }

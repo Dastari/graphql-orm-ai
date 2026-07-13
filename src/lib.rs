@@ -34,6 +34,7 @@ mod domain;
 mod egress;
 mod error;
 mod execution;
+mod inbox;
 mod live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
@@ -49,6 +50,8 @@ mod orm_configuration;
 mod orm_coordinator;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_egress;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_inbox;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -92,6 +95,7 @@ pub use domain::*;
 pub use egress::*;
 pub use error::*;
 pub use execution::*;
+pub use inbox::*;
 pub use live_delta::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_approvals::*;
@@ -107,6 +111,8 @@ pub use orm_configuration::*;
 pub use orm_coordinator::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_egress::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_inbox::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_live_delta::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -143,8 +149,8 @@ pub mod prelude {
         AiAttachmentCleanupReport, AiAttachmentCleanupService, AiAttachmentScanner,
         AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation, AiBudgetService,
         AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema, AiEgressDecision,
-        AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
-        AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
+        AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError, AiInboxPruningService,
+        AiInboxService, AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
         AiProposalTypeDescriptor, AiProvider, AiProviderAttachmentRequest,
         AiProviderAttachmentResolver, AiRemoteAuthenticatedGraphqlAdapter,
         AiRemoteGraphqlAuthority, AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
@@ -157,7 +163,7 @@ pub mod prelude {
         AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
         AiApplicationToolCallLimits, AiApprovalServiceLimits, AiAttachmentCleanupLimits,
         AiAttachmentServiceLimits, AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder,
-        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits,
+        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits, AiInboxPruningLimits,
         AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
         AiProposalServiceLimits, AiProviderAttachmentResolutionLimits, AiProviderCallExecutor,
         AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
@@ -165,8 +171,9 @@ pub mod prelude {
         AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
         OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-        OrmAiEgressDecisionAudit, OrmAiLiveDeltaService, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRunService,
+        OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
+        OrmAiLiveDeltaService, OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
+        ai_scope_key,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

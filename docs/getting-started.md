@@ -41,8 +41,18 @@ contract from default camelCase to PascalCase.
    authenticated GraphQL roots. Supply host policies, fresh principal
    rehydration, content protection, recent-MFA policy, and the same fenced run
    service; do not expose the private generated ORM entities.
-8. Apply/validate migrations and restore reconciliation, then open the runtime
+8. Install `OrmAiInboxService` as `Arc<dyn AiInboxService>` when composing the
+   ordinary query/subscription roots. Configure `OrmAiConfigurationService`
+   retention policy access, then schedule `OrmAiInboxPruningService` only as a
+   trusted bounded host worker.
+9. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
+
+The principal inbox lets a virtualized chat drawer refresh bounded session
+shells across multiple conversations without loading transcript history. Its
+subscription reauthorizes the current principal and rechecks each referenced
+session/scope; its pruning worker uses only current GraphQL-managed retention
+policies. See the [principal inbox guide](principal-inbox.md).
 
 For attachments, construct `OrmAiAttachmentService` with the same access and
 protection boundaries plus an exact `graphql-orm-storage::BlobStore`, trusted
@@ -131,7 +141,7 @@ ambiguous replay remain closed. See the
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
 upload/search/deletion, attachment quotas/derivatives, budget/usage GraphQL
-management, live-delta retention, provider-turn/partial-
+management, per-session live-delta retention, provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL

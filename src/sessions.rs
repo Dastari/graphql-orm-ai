@@ -10,7 +10,7 @@ use graphql_orm::graphql::pagination::{
 };
 use uuid::Uuid;
 
-use crate::{AiError, AiScope, AiSessionId};
+use crate::{AiError, AiInboxEventPage, AiInboxService, AiScope, AiSessionId};
 
 /// Scope input for session creation/configuration.
 #[derive(Clone, Debug, InputObject)]
@@ -381,11 +381,33 @@ impl AiQueryRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         let after_sequence = after_sequence.unwrap_or(0);
         let first = first.unwrap_or(100);
-        if after_sequence < 0 || !(1..=500).contains(&first) {
+        if after_sequence < 0 || after_sequence > i64::from(i32::MAX) || !(1..=500).contains(&first)
+        {
             return Err(AiError::InvalidInput("invalid event window".to_owned()).extend());
         }
         service(context)?
             .session_event_page(&principal, AiSessionId(session_id), after_sequence, first)
+            .await
+            .map_err(extend)
+    }
+
+    /// Returns a bounded cross-session inbox catch-up page for the current
+    /// principal.
+    async fn ai_inbox_event_page(
+        &self,
+        context: &Context<'_>,
+        after_sequence: Option<i64>,
+        first: Option<i64>,
+    ) -> async_graphql::Result<AiInboxEventPage> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        let after_sequence = after_sequence.unwrap_or(0);
+        let first = first.unwrap_or(100);
+        if after_sequence < 0 || after_sequence > i64::from(i32::MAX) || !(1..=500).contains(&first)
+        {
+            return Err(AiError::InvalidInput("invalid inbox event window".to_owned()).extend());
+        }
+        inbox_service(context)?
+            .inbox_event_page(&principal, after_sequence, first)
             .await
             .map_err(extend)
     }
@@ -479,6 +501,15 @@ fn service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiSessionServ
         .cloned()
         .map_err(|_| {
             AiError::InvalidConfiguration("AI session service is not installed".to_owned()).extend()
+        })
+}
+
+fn inbox_service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiInboxService>> {
+    context
+        .data_opt::<Arc<dyn AiInboxService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration("AI inbox service is not installed".to_owned()).extend()
         })
 }
 

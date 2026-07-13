@@ -348,3 +348,57 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
         .expect("pending policy remains inspectable");
     assert!(!resolved.ready);
 }
+
+#[tokio::test]
+async fn retention_policy_is_recent_mfa_protected_bounded_and_cas_managed() {
+    let (service, _secrets, now) = service().await;
+    let input = |expected_version| SetAiRetentionPolicyInput {
+        scope: scope_input(),
+        message_retention_seconds: Some(31_536_000),
+        delta_retention_seconds: 3_600,
+        raw_payload_retention_seconds: 86_400,
+        audit_retention_seconds: 31_536_000,
+        deleted_content_purge_seconds: 86_400,
+        provider_file_delete_required: true,
+        inbox_event_retention_seconds: 604_800,
+        inbox_minimum_events: 100,
+        expected_version,
+    };
+    assert!(matches!(
+        service
+            .set_retention_policy(&no_mfa_principal(), input(None))
+            .await,
+        Err(AiError::RecentMfaRequired)
+    ));
+    let principal = recent_principal(now);
+    let created = service
+        .set_retention_policy(&principal, input(None))
+        .await
+        .expect("retention policy is created");
+    assert_eq!(created.row_version, 0);
+    assert_eq!(created.inbox_minimum_events, 100);
+    let loaded = service
+        .retention_policy(&principal, scope())
+        .await
+        .expect("retention query is authorized")
+        .expect("retention policy exists");
+    assert_eq!(loaded.inbox_event_retention_seconds, 604_800);
+    assert!(matches!(
+        service
+            .set_retention_policy(&principal, input(Some(99)))
+            .await,
+        Err(AiError::Conflict)
+    ));
+    assert!(matches!(
+        service
+            .set_retention_policy(
+                &principal,
+                SetAiRetentionPolicyInput {
+                    inbox_minimum_events: 0,
+                    ..input(Some(0))
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+}

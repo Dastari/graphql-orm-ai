@@ -60,6 +60,13 @@ Local ORM state is canonical. Messages, blocks, runs, tool calls, and durable
 events are independently windowed. Subscriptions replay to a watermark and use
 commit-only wakeups; clients never need a complete session snapshot.
 
+A separate exact-principal inbox provides a small cross-session stream for
+chat drawers. Source operations and their protected notification commit in one
+transaction. Delivery rechecks the referenced session/scope; GraphQL-managed
+retention deletes only an expired prefix and advances an explicit retained
+cursor without reusing sequence values. See the
+[principal inbox guide](principal-inbox.md).
+
 Optional visible provider deltas follow the same durable event path. They are
 UTF-8/time/byte bounded, freshly authorized and protected, then committed only
 after exact run-fence and uncertain-budget validation. They remain provisional
