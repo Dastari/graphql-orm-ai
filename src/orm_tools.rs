@@ -214,7 +214,7 @@ impl AiToolResultEgressRoute {
         Ok(self)
     }
 
-    fn validate(&self) -> Result<(), AiError> {
+    pub(crate) fn validate(&self) -> Result<(), AiError> {
         let required = [
             self.provider_profile_id.as_str(),
             self.destination.as_str(),
@@ -308,6 +308,28 @@ impl AiPersistedApplicationToolCall {
     /// Consumes the outcome and returns its renewed lease proof.
     pub fn into_lease(self) -> AiRunLease {
         self.lease
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_completed(
+        lease: AiRunLease,
+        provider_call_id: &str,
+        tool_id: &str,
+        output: Option<serde_json::Value>,
+        egress_manifest: Option<AiEgressManifest>,
+    ) -> Self {
+        Self {
+            id: AiToolCallId::new(),
+            provider_call_id: provider_call_id.to_owned(),
+            state: AiApplicationToolCallState::Completed,
+            model_input: output.map(|output| ModelInputBlock::ToolResult {
+                call_id: provider_call_id.to_owned(),
+                tool_id: tool_id.to_owned(),
+                output,
+            }),
+            egress_manifest,
+            lease,
+        }
     }
 }
 

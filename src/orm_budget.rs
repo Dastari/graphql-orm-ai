@@ -1467,6 +1467,7 @@ mod tests {
                 retry_count: 0,
                 next_attempt_at: None,
                 error_code: None,
+                latest_checkpoint_id: None,
             },
         )
         .await

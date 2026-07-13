@@ -114,7 +114,7 @@ not reusable.
 - Per-item proposal review is not yet exposed; whole structured payload review
   is bounded and schema validated.
 - Long-lived approval waits currently retain a fenced waiting lease and need
-  heartbeat/recovery supervision. A future crash-resumable coordinator must not
+  heartbeat/recovery supervision. The current read-only coordinator must not
   weaken restore reconciliation or silently requeue uncertain work.
 - Consumer-specific UI, domain mutations, proposal rendering, and integration
   tests remain in each consuming application.

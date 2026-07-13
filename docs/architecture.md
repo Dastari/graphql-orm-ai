@@ -77,7 +77,9 @@ The implemented provider turn is deliberately security ordered:
 8. reauthorize/protect and atomically append the assistant message blocks,
    completed-message event, and renewed run fence.
 
-Terminal completion is a separate fenced write after output persistence. This
+Terminal completion is a separate fenced write after output persistence. The
+output transaction also appends and links an exact final-output checkpoint, so
+expired-lease recovery can verify and finish that one crash window. This
 ordering prevents a completed run without durable history and prevents a late
 worker from writing output after recovery/reclaim.
 
@@ -89,11 +91,13 @@ static disclosure, separately authorizes/audits result egress, persists the
 protected outcome, advances the fence, and permits only exact bounded
 continuation.
 
-A crash-resumable top-level coordinator and all consequential paths remain
-closed. Mutations, proposals, approval-required/non-idempotent tools, ambiguous
-resume, and stateless reasoning continuation require their complete preview,
-approval, fresh-authorization, persistence, and reconciliation contracts before
-they can be exposed.
+The top-level read-only coordinator now owns fenced provider heartbeats,
+bounded turn/tool sequencing, exact continuation, output persistence, and safe
+terminal/recovery classification. Restart adoption for a partially completed
+provider/tool batch and all consequential paths remain closed. Mutations,
+approval-required/non-idempotent tools, other ambiguous resume, and stateless
+reasoning continuation require their complete preview, approval,
+fresh-authorization, persistence, and reconciliation contracts before exposure.
 
 ## Proposal and approval staging
 

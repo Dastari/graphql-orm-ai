@@ -58,7 +58,16 @@ run is left for normal fenced recovery rather than replayed.
 Always replace the old `AiRunLease` with the lease returned by
 `AiPersistedApplicationToolCall`. The prior row-version proof is invalid.
 
-## Bounded continuation
+## Bounded coordinator and continuation
+
+`AiReadOnlyAgentCoordinator` is the supported top-level owner for one freshly
+claimed read-only attempt. It starts the lease, heartbeats it while provider
+streams are pending, obtains each exact plan from a trusted host
+`AiReadOnlyAgentTurnPlanner`, applies the guard sequence below, persists final
+protected output, and commits `Completed`, `Failed`, or `RecoveryRequired`.
+Provider, resolver, and output ambiguity is never silently retried. If a
+heartbeat loses the fence, the coordinator stops without attempting any final
+write.
 
 Create one `AiAgentLoopGuard` from the original running lease. It binds the
 session, run, attempt, generation, maximum provider turns, and maximum total
@@ -77,7 +86,7 @@ immutable manifests produced for those exact results as one unit. The normal
 provider executor still reserves a fresh atomic budget and freshly authorizes
 and audits the model-inference and result transfers before transport.
 
-Do not reconstruct a guard to resume an ambiguous loop. A lost worker,
+Do not reconstruct a guard to resume an ambiguous partial loop. A lost worker,
 partially completed batch, expired lease, unknown provider response, or restore
 snapshot stays closed for reconciliation/operator review.
 
@@ -103,10 +112,13 @@ or turn retention on.
 
 - No mutation, proposal, consequential, approval-required, or non-idempotent
   descriptor can enter this loop.
-- No top-level crash-resumable loop worker is implemented yet; the guard and
-  durable primitives make the proof sequence explicit for that worker.
-- Live provider/tool delta coalescing is not implemented; clients continue to
-  consume durable bounded cursor windows.
+- Restart adoption for a provider turn or partially completed tool batch is not
+  implemented. Only final protected output has an exact same-transaction
+  checkpoint that expired recovery can safely finalize.
+- `AiLiveDeltaCoalescer` bounds visible text/reasoning-summary batches to no
+  more than 50 ms / 4 KiB and excludes structured/tool events, but protected
+  durable session-event persistence is not wired yet. A raw batch is not an
+  egress proof and must remain inside the trusted backend.
 - Tool enablement management is not yet exposed through its final
   authenticated GraphQL configuration lifecycle.
 - Provider-independent stateless continuation and Anthropic/xAI/Ollama tool

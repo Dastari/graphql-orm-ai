@@ -840,6 +840,8 @@ pub(crate) struct AiRunRecord {
     pub next_attempt_at: Option<i64>,
     /// Safe error code.
     pub error_code: Option<String>,
+    /// Latest exact coordinator checkpoint for recovery classification.
+    pub latest_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
     /// Created timestamp.
     #[sortable]
     pub created_at: i64,
@@ -967,6 +969,51 @@ pub(crate) struct AiRunStepRecord {
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
+}
+
+/// Immutable fenced coordinator checkpoint containing only redacted recovery
+/// metadata. Protected resumable payloads are reserved for a later module
+/// version and must never be inferred from this row.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_run_checkpoints",
+    plural = "GraphqlOrmAiRunCheckpoints",
+    default_sort = "created_at ASC",
+    append_only = true
+)]
+pub(crate) struct AiRunCheckpointRecord {
+    /// Checkpoint ID, assigned by the owning fenced transaction.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Owning run.
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Exact attempt that committed the checkpoint.
+    #[filterable(type = "uuid")]
+    pub attempt_id: graphql_orm::uuid::Uuid,
+    /// Exact fencing generation that committed the checkpoint.
+    pub lease_generation: i64,
+    /// Stable redacted phase value.
+    #[filterable(type = "string")]
+    pub checkpoint_kind: String,
+    /// Safe provider response reference, never response content.
+    pub provider_response_id: Option<String>,
+    /// Atomic budget/usage correlation for the settled provider turn.
+    pub budget_reservation_id: Option<graphql_orm::uuid::Uuid>,
+    /// Durable assistant message proving final protected output persistence.
+    pub assistant_message_id: Option<graphql_orm::uuid::Uuid>,
+    /// Stable hash over every recovery-relevant redacted field.
+    pub checkpoint_hash: String,
+    /// Checkpoint commit time.
+    #[sortable]
+    pub created_at: i64,
 }
 
 /// Model-requested tool invocation and protected result.
@@ -1574,7 +1621,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.8.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.9.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -1639,6 +1686,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiRunAttemptRecord::metadata(),
                 AiRunAttemptOutcomeRecord::metadata(),
                 AiRunStepRecord::metadata(),
+                AiRunCheckpointRecord::metadata(),
                 AiToolCallRecord::metadata(),
                 AiApprovalRecord::metadata(),
                 AiProposalRecord::metadata(),

@@ -33,12 +33,15 @@ mod domain;
 mod egress;
 mod error;
 mod execution;
+mod live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_coordinator;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_egress;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -80,12 +83,15 @@ pub use domain::*;
 pub use egress::*;
 pub use error::*;
 pub use execution::*;
+pub use live_delta::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_approvals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_configuration::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_coordinator::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_egress::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -128,10 +134,11 @@ pub mod prelude {
     pub use crate::{
         AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
         AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
-        AiProviderOutputLimits, AiProviderUsageAccounting, AiRunServiceLimits,
-        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiBudgetService,
-        OrmAiEgressDecisionAudit, OrmAiProposalService, OrmAiProviderOutputService,
-        OrmAiRunService,
+        AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
+        AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
+        AiRunServiceLimits, OrmAiApplicationToolCallService, OrmAiApprovalService,
+        OrmAiBudgetService, OrmAiEgressDecisionAudit, OrmAiProposalService,
+        OrmAiProviderOutputService, OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

@@ -4,6 +4,62 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.8.0 to 0.9.0
+
+This public/security/persistence slice advances the pre-1.0 crate version from
+`0.2.0` to `0.3.0`. Update the Git revision and package expectation together;
+the intentional initial-turn constructor restriction and new recovery-report
+field are a pre-1.0 breaking API/behavior boundary.
+
+Apply `AiSchemaModule` through the managed `graphql-orm` schema manager while
+provider starts, workers, subscriptions, and callbacks remain closed. This
+revision adds:
+
+- nullable `graphql_orm_ai_runs.latest_checkpoint_id`; and
+- append-only `graphql_orm_ai_run_checkpoints`, bound to the exact run,
+  attempt, fencing generation, provider response reference, settled budget
+  reservation, final assistant message, and a stable redacted checkpoint hash.
+
+The protected assistant message/blocks, session event, renewed run fence, and
+`assistant_output_persisted` checkpoint now commit in one state-machine
+transaction. If the worker dies after that transaction but before terminal run
+finalization, expired-lease reconciliation verifies the complete checkpoint,
+hash, attempt/generation, and finalized assistant message before committing
+`Completed`. Missing, swapped, malformed, or any other active checkpoint still
+fails closed or becomes `RecoveryRequired`; it is never replay authority.
+
+The module version is `0.9.0`; never apply these semantics under an earlier
+version. Existing completed/history rows require no rewrite and may keep a null
+checkpoint reference. Reconcile any existing active pre-release run through
+the prior owning service before reopening workers. Do not invent checkpoint
+rows or update the private tables with manual SQL. No application-domain data
+migration is required. Keep the runtime start gate closed until managed schema
+validation and restore reconciliation report module `0.9.0` ready.
+
+### Rust API and behavior changes
+
+- `AiReadOnlyAgentCoordinator` now owns the bounded top-level read-only loop.
+  Hosts implement `AiReadOnlyAgentTurnPlanner` and supply proof-preserving run,
+  provider-turn, tool, and output services. Replace the lease after every
+  fenced operation and configure a heartbeat interval comfortably shorter than
+  the run-service lease TTL.
+- Provider/tool/output ambiguity is durably classified as
+  `AiReadOnlyAgentRunOutcome::RecoveryRequired` when the current fence can
+  commit it. A lost heartbeat fence returns an error without attempting a
+  terminal write.
+- `AiProviderCallPlan::new_with_tools` is now for initial turns only. Code that
+  previously supplied `ModelContinuation` or `ModelInputBlock::ToolResult`
+  directly must retain the exact `AiAgentContinuation` and call
+  `new_continuation_with_tools`.
+- `AiRunRecoveryReport` has a new public `completed` counter.
+- `AiLiveDeltaCoalescer` and related public types provide synchronous bounded
+  batching only. Batches contain sensitive content and are not authorization or
+  durability proofs; hosts must not emit them externally. ORM-backed protected
+  durable live-batch persistence remains an explicit implementation gate.
+
+This adds no public GraphQL root or client-visible SDL. The new generated ORM
+records remain private implementation entities.
+
 ## Unreleased: multi-repository ownership workflow
 
 Development now assigns one owning agent and isolated branch/worktree to each

@@ -1287,6 +1287,7 @@ mod tests {
                 retry_count: 0,
                 next_attempt_at: Some(fixture.now.unix_timestamp()),
                 error_code: None,
+                latest_checkpoint_id: None,
             },
         )
         .await

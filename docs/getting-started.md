@@ -56,7 +56,7 @@ ORM entities; that authenticated configuration surface remains an
 implementation gate.
 
 Construct `OrmAiRunService` from the same ORM database and trusted clock. The
-first concrete provider path is deliberately explicit:
+lower-level concrete provider path is deliberately explicit:
 
 1. `claim_next` and `start` a run, replacing the returned lease after every
    successful fenced call.
@@ -70,6 +70,15 @@ first concrete provider path is deliberately explicit:
    again, protects content, writes windowable blocks and a session event, and
    returns a renewed lease.
 4. Finish the run with that renewed lease.
+
+For the bounded registered read-only tool path, prefer
+`AiReadOnlyAgentCoordinator` over manually sequencing these calls. Supply a
+trusted `AiReadOnlyAgentTurnPlanner` that constructs initial turns with
+`new_with_tools` and consumes exact later `AiAgentContinuation` values with
+`new_continuation_with_tools`. Configure its heartbeat interval comfortably
+shorter than the run-service lease TTL. A successful coordinator outcome means
+the terminal/recovery state was durably committed; a lost fence returns an
+error and must not be followed by another write from that worker.
 
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run
@@ -86,8 +95,9 @@ arbitrary GraphQL, and ambiguous resume remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Attachment handling,
-budget/usage GraphQL management, the crash-resumable top-level loop worker,
-and the consequential tool executor remain under implementation. The proposal
+budget/usage GraphQL management, partial-batch restart adoption, durable live
+delta persistence, and the consequential tool executor remain under
+implementation. The proposal
 and approval persistence/GraphQL lifecycles are implemented; approval
 consumption still must be followed by fresh ordinary resolver authorization.
 See the [proposal and approval lifecycle guide](review-lifecycles.md).

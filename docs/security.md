@@ -70,10 +70,19 @@ redacted.
 
 The concrete worker also binds attempt ID, owner, expiry, state, and row version
 on every child or terminal write. Lease expiry before `Running` is safe to
-requeue; expiry after start is classified `RecoveryRequired`. Successful model
-output is bound to the exact session/run/attempt/generation, reauthorized, and
-protected before the message, bounded blocks, event, and renewed run fence
-commit atomically.
+requeue. After start, only an exact linked final-output checkpoint may change
+the ordinary `RecoveryRequired` result: recovery verifies its hash,
+attempt/generation, budget reference, and complete protected assistant message
+before finalizing. Successful model output, bounded blocks, event, checkpoint,
+and renewed run fence commit atomically.
+
+The read-only coordinator heartbeats the current fence while provider
+transport is pending and stops immediately when that proof is lost. Provider,
+resolver, or output ambiguity is classified for recovery rather than replayed.
+Live-delta batches contain sensitive plaintext inside the trusted process;
+coalescing supplies only UTF-8/time/byte bounds and never authorizes delivery.
+Until protected fenced delta-event persistence is wired, batches must not be
+treated as durable cursor events or sent across an external boundary.
 
 Application-tool events are accepted only when offered from an exact current
 catalog/policy snapshot and only for idempotent read-only queries with no

@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.8.0`) and 36 private records
+- AI schema-module identity (currently version `0.9.0`) and 37 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -74,6 +74,17 @@ production-ready behavior.
   opaque call ID, durable model-visible result, and immutable egress manifest.
   The OpenAI adapter requires explicit retained-response configuration and
   matching retention manifests for stateful continuation.
+- Top-level read-only coordinator with host-owned exact initial/continuation
+  planning, periodic fenced provider heartbeats, bounded loop/tool sequencing,
+  protected output persistence, safe terminal classification, and conservative
+  recovery-required closure for ambiguous provider/tool/output handoffs.
+- Immutable run checkpoints linked from the current run. Protected final
+  assistant output and its exact checkpoint commit together, allowing expired
+  recovery to safely finalize only that proven post-output/pre-terminal crash
+  window while malformed or other active phases remain closed.
+- UTF-8-safe visible text/reasoning-summary coalescer primitives enforcing a
+  maximum 50 ms / 4 KiB batch and excluding structured/tool events. The
+  primitive performs no persistence or disclosure by itself.
 - Secret-store contract plus explicit, read-only, allowlist-mapped environment
   bootstrap store. Runtime construction now requires a secret store.
 - Per-scope content-protection policy/envelope/protector contracts with a
@@ -173,10 +184,11 @@ production-ready behavior.
   catalog validation, privileged uncertain-call recovery, retention/purge, and
   telemetry sinks. The ordinary transactional reservation/reconciliation path
   is implemented.
-- Top-level crash-resumable application-tool loop worker, live delta
-  coalescing, and provider-independent stateless continuation. The protected
-  read-only call/result primitives and bounded exact stateful continuation are
-  implemented; ambiguous resume remains deliberately closed.
+- Restart adoption for a provider turn or partially completed application-tool
+  batch, ORM-backed protected live-delta persistence, and provider-independent
+  stateless continuation. The bounded top-level coordinator, exact stateful
+  continuation, live batching primitive, and final-output crash reconciliation
+  are implemented; all other ambiguous resume remains deliberately closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -194,9 +206,9 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add the crash-resumable coordinator around the existing read-only tool
-   primitives, including checkpoint/reconciliation rules and live delta
-   coalescing.
+1. Extend coordinator checkpoints to protected provider-turn/tool-batch state,
+   then implement generation adoption only for exact replay-safe read-only
+   phases and wire coalesced live batches to protected durable cursor events.
 2. Implement the consequential tool executor around the existing exact
    approval lifecycle, with a host canonical-preview builder and fresh resolver
    authorization immediately after one-shot consumption.
@@ -212,7 +224,7 @@ production-ready behavior.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 34 integration tests and 23 active
+- `cargo test --features provider-openai`: 36 integration tests and 35 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:

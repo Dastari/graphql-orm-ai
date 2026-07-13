@@ -153,8 +153,8 @@ impl AiProviderCallPlan {
         })
     }
 
-    /// Creates a provider call exposing only explicitly enabled, registered,
-    /// read-only application queries.
+    /// Creates an initial provider call exposing only explicitly enabled,
+    /// registered, read-only application queries.
     ///
     /// The supplied policy set is a current configuration snapshot, not
     /// execution authorization. Each model-requested call is reauthorized with
@@ -163,11 +163,43 @@ impl AiProviderCallPlan {
     ///
     /// # Errors
     ///
-    /// Returns [`AiError::InvalidInput`] for ordinary plan-binding failures and
+    /// Returns [`AiError::InvalidInput`] for ordinary plan-binding failures,
+    /// pre-populated continuation/tool-result input, and
     /// [`AiError::Forbidden`] unless every tool definition exactly matches an
     /// enabled read-only descriptor with no per-call approval requirement.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_tools(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        policy: &AiToolPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial provider tool plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_tools(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            policy,
+        )
+    }
+
+    fn new_with_bound_tools(
         provider_kind: ProviderKind,
         request: ModelRequest,
         budget: AiBudgetReservationRequest,
@@ -223,7 +255,7 @@ impl AiProviderCallPlan {
     ) -> Result<Self, AiError> {
         let tool_transfers = continuation.apply_with_transfers(&mut request)?;
         transfers.extend(tool_transfers);
-        Self::new_with_tools(
+        Self::new_with_bound_tools(
             provider_kind,
             request,
             budget,
@@ -232,6 +264,83 @@ impl AiProviderCallPlan {
             catalog,
             policy,
         )
+    }
+
+    /// Exact application scope bound into the atomic budget request and every
+    /// egress manifest for this turn.
+    pub fn scope(&self) -> &crate::AiScope {
+        &self.budget.scope
+    }
+
+    /// Server-authored audit correlation reference for this turn.
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    /// Returns whether this turn exposes at least one validated application
+    /// tool definition.
+    pub fn has_application_tools(&self) -> bool {
+        !self.request.tools.is_empty()
+    }
+
+    pub(crate) fn is_continuation(&self) -> bool {
+        self.request.continuation.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_plan(lease: &AiRunLease, scope: crate::AiScope, continuation: bool) -> Self {
+        let model = "coordinator-test-model".to_owned();
+        Self {
+            provider_kind: ProviderKind::OpenAi,
+            request: ModelRequest {
+                model: model.clone(),
+                instructions: Vec::new(),
+                input: continuation
+                    .then(|| crate::ModelInputBlock::ToolResult {
+                        call_id: "test-call".to_owned(),
+                        tool_id: "test.read".to_owned(),
+                        output: serde_json::json!({"test": true}),
+                    })
+                    .into_iter()
+                    .collect(),
+                continuation: continuation.then(|| ModelContinuation::ProviderResponse {
+                    response_id: "test-previous-response".to_owned(),
+                }),
+                tools: vec![crate::ModelToolDefinition {
+                    tool_id: "test.read".to_owned(),
+                    provider_name: "test_read".to_owned(),
+                    fingerprint: "test-fingerprint".to_owned(),
+                    description: "Test read".to_owned(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "additionalProperties": false
+                    }),
+                    strict: true,
+                }],
+                builtin_tools: Vec::new(),
+                output_schema: None,
+                maximum_output_tokens: Some(64),
+            },
+            budget: AiBudgetReservationRequest {
+                scope,
+                session_id: lease.session_id(),
+                run_id: lease.run_id(),
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: ProviderKind::OpenAi,
+                model,
+                pricing_policy_version: "test-pricing-v1".to_owned(),
+                estimate: AiBudgetAmounts {
+                    output_tokens: 64,
+                    runs: 1,
+                    ..AiBudgetAmounts::default()
+                },
+                idempotency_key: uuid::Uuid::new_v4().to_string(),
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(5),
+            },
+            transfers: Vec::new(),
+            correlation_id: uuid::Uuid::new_v4().to_string(),
+        }
     }
 }
 
@@ -449,6 +558,57 @@ impl AiProviderCallResult {
             .clone()
             .ok_or(AiError::ProviderFailed)?;
         Ok(ModelContinuation::ProviderResponse { response_id })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_result(
+        lease: &AiRunLease,
+        previous_response_id: Option<String>,
+        provider_response_id: &str,
+        tool_calls: Vec<(&str, &str, serde_json::Value)>,
+    ) -> Self {
+        let tool_calls = tool_calls
+            .into_iter()
+            .map(|(call_id, tool_id, arguments)| AiProviderToolCall {
+                call_id: call_id.to_owned(),
+                tool_id: crate::AiToolId::parse(tool_id)
+                    .expect("coordinator test tool ID should be valid"),
+                tool_fingerprint: "test-fingerprint".to_owned(),
+                arguments,
+            })
+            .collect();
+        Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind: ProviderKind::OpenAi,
+            provider_model: "coordinator-test-model".to_owned(),
+            events: vec![
+                ProviderEvent::TextDelta {
+                    text: "test response".to_owned(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some(provider_response_id.to_owned()),
+                },
+            ],
+            usage: AiBudgetAmounts {
+                input_tokens: 1,
+                output_tokens: 1,
+                runs: 1,
+                ..AiBudgetAmounts::default()
+            },
+            cached_input_tokens: 0,
+            provider_response_id: Some(provider_response_id.to_owned()),
+            budget_reservation_id: AiBudgetReservationId::new(),
+            previous_response_id,
+            tool_calls,
+        }
     }
 }
 
@@ -1127,6 +1287,7 @@ mod tests {
                 retry_count: 0,
                 next_attempt_at: Some(now.unix_timestamp()),
                 error_code: None,
+                latest_checkpoint_id: None,
             },
         )
         .await
@@ -1742,6 +1903,30 @@ mod tests {
             fingerprint: descriptor.fingerprint.clone(),
             enabled: true,
         });
+        let forged_base = plan(&fixture);
+        let forged_request = ModelRequest {
+            continuation: Some(ModelContinuation::ProviderResponse {
+                response_id: "tool-response-1".to_owned(),
+            }),
+            input: vec![ModelInputBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                tool_id: descriptor.id.as_str().to_owned(),
+                output: json!({"record": "forged"}),
+            }],
+            ..next_request.clone()
+        };
+        assert!(matches!(
+            AiProviderCallPlan::new_with_tools(
+                forged_base.provider_kind,
+                forged_request,
+                forged_base.budget,
+                forged_base.transfers,
+                "forged-continuation",
+                fixture.runtime.tool_catalog(),
+                &policy,
+            ),
+            Err(AiError::InvalidInput(_))
+        ));
         let base = plan(&fixture);
         let next_plan = AiProviderCallPlan::new_continuation_with_tools(
             base.provider_kind,

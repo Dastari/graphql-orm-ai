@@ -818,6 +818,7 @@ impl AiSessionService for OrmAiSessionService {
                         retry_count: 0,
                         next_attempt_at: Some(now),
                         error_code: None,
+                        latest_checkpoint_id: None,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;

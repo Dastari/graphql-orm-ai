@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(catalog.entities().len(), 36);
+    assert_eq!(catalog.entities().len(), 37);
     assert!(
         catalog
             .entities()
@@ -23,6 +23,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 entity.table_name,
                 "graphql_orm_ai_run_attempts"
                     | "graphql_orm_ai_run_attempt_outcomes"
+                    | "graphql_orm_ai_run_checkpoints"
                     | "graphql_orm_ai_skill_versions"
                     | "graphql_orm_ai_usage_entries"
                     | "graphql_orm_ai_audit_events"
@@ -66,5 +67,15 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .columns
             .iter()
             .any(|column| column.name == "attempt_id" && column.is_unique)
+    );
+    let run = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_runs")
+        .expect("run table should exist");
+    assert!(
+        run.columns
+            .iter()
+            .any(|column| column.name == "latest_checkpoint_id" && column.nullable)
     );
 }

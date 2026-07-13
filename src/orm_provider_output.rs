@@ -10,7 +10,9 @@ use serde_json::json;
 use time::Duration;
 use uuid::Uuid;
 
-use crate::orm_runs::{PreparedProviderBlock, PreparedProviderOutput};
+use crate::orm_runs::{
+    PreparedProviderBlock, PreparedProviderOutput, final_output_checkpoint_hash,
+};
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiContentProtectionPolicyResolver, AiContentProtector, AiError,
@@ -93,6 +95,15 @@ impl AiPersistedProviderOutput {
     /// Consumes the result and returns its renewed lease proof.
     pub fn into_lease(self) -> AiRunLease {
         self.lease
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_output(lease: AiRunLease) -> Self {
+        Self {
+            message_id: Uuid::new_v4(),
+            block_count: 1,
+            lease,
+        }
     }
 }
 
@@ -272,6 +283,14 @@ impl OrmAiProviderOutputService {
             )
             .await?;
         let block_count = blocks.len();
+        let checkpoint_hash = final_output_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            message_id,
+            result.provider_response_id(),
+            result.budget_reservation_id().0,
+        );
         let renewed = self
             .run_service
             .append_provider_output(
@@ -285,6 +304,9 @@ impl OrmAiProviderOutputService {
                     protected_event,
                     blocks,
                     correlation_id: result.budget_reservation_id().0.to_string(),
+                    provider_response_id: result.provider_response_id().map(str::to_owned),
+                    budget_reservation_id: result.budget_reservation_id().0,
+                    checkpoint_hash,
                     expected_owner_principal_kind: session.owner_principal_kind,
                     expected_owner_subject: session.owner_subject,
                     expected_scope_kind: scope.kind,

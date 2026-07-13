@@ -9,15 +9,16 @@ durable history under server control.
 
 This crate is an active, unpublished pre-release. The concrete session,
 configuration, subscription, fenced worker, provider-turn, protected
-read-only application-tool/result, bounded continuation, protected output, and
-security foundations compile and are tested. Protected proposal review and
-exact one-shot approval lifecycles also compile and are tested. A
-crash-resumable top-level loop, consequential tool executor, and several
-operational adapters listed below are still being implemented.
+read-only application-tool/result, bounded coordinator/continuation, protected
+output checkpoint, and security foundations compile and are tested. Protected
+proposal review and exact one-shot approval lifecycles also compile and are
+tested. Restart adoption for partially completed provider/tool batches, the
+consequential tool executor, and several operational adapters listed below are
+still being implemented.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 36 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 37 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, egress, audit, skills, and restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
@@ -57,6 +58,16 @@ operational adapters listed below are still being implemented.
   disclosure, separately authorizes and audits result egress, persists the
   protected result, renews the exact run fence, and creates bounded exact
   provider continuations.
+- A top-level `AiReadOnlyAgentCoordinator` that heartbeats the current fence
+  during provider streams, consumes only host-planned exact turns, enforces the
+  loop guard, executes each durable read query, persists final output, and
+  closes ambiguous handoffs as `RecoveryRequired` instead of replaying them.
+- Same-transaction final-output checkpoints that let expired-lease recovery
+  safely finish the exact crash window after protected message persistence but
+  before terminal run finalization.
+- UTF-8-safe live-delta coalescing primitives capped at 50 ms / 4 KiB. Durable
+  protected delta-event wiring remains gated; a batch alone is not permission
+  to disclose content.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -174,9 +185,10 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include the durable multi-turn registered-tool/approval
-coordinator, the consequential tool executor that uses consumed approvals,
-live delta coalescing, authenticated budget-policy/usage GraphQL lifecycles,
+Production blockers include restart adoption for partial multi-turn
+registered-tool batches, the consequential tool executor that uses consumed
+approvals, durable protected live-delta persistence, authenticated
+budget-policy/usage GraphQL lifecycles,
 per-item proposal review, attachment pipeline, production mutable secret
 stores/keyrings, other provider adapters,
 remote delegated credential implementation, generated resolver disclosure

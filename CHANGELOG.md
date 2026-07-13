@@ -5,9 +5,12 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
+This development line advances the pre-1.0 crate version to `0.3.0` and the AI
+schema module to `0.9.0`.
+
 ### Added
 
-- Project-agnostic AI schema module with 36 private persistence entities for
+- Project-agnostic AI schema module with 37 private persistence entities for
   configuration, sessions, protected history, fenced runs, tools, approvals,
   proposals, budgets, usage, egress, audit, and restore readiness.
 - Owner-isolated ORM-backed session/configuration services and resumable
@@ -51,6 +54,18 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 - `AiAgentLoopGuard` and exact `AiAgentContinuation` sequencing that bind a
   provider response, every requested `call_id`, every protected tool result,
   and its immutable egress manifest under hard provider-turn/tool-call limits.
+- `AiReadOnlyAgentCoordinator` with host-owned exact turn planning, periodic
+  fenced heartbeats during provider streams, bounded multi-turn/tool
+  sequencing, protected final-output persistence, terminal classification, and
+  conservative `RecoveryRequired` handling for ambiguous provider, resolver,
+  and output handoffs.
+- UTF-8-safe `AiLiveDeltaCoalescer` primitives enforcing deployment bounds no
+  weaker than 50 ms or 4 KiB while excluding tool arguments and other
+  structured provider events from visible live batches.
+- Immutable fenced run checkpoints and `latest_checkpoint_id` recovery
+  binding. Final protected assistant output and its exact redacted checkpoint
+  now commit atomically; expired-lease reconciliation can safely finalize that
+  proven crash window instead of misclassifying it as an uncertain replay.
 - Explicit provider-response continuation and `ModelInputBlock::ToolResult`;
   the OpenAI adapter maps these to Responses `previous_response_id` and
   `function_call_output` only when provider response storage is deliberately
@@ -84,6 +99,13 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
   environment, filesystem, network, or tool authority.
 
 ### Changed
+
+- `AiProviderCallPlan::new_with_tools` now accepts initial turns only and
+  rejects pre-populated provider continuation/tool-result input. Exact later
+  turns must consume `AiAgentContinuation` through
+  `new_continuation_with_tools`.
+- `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
+  `completed` counter. The AI schema module version is `0.9.0`.
 
 - Multi-repository development now uses one owning agent per repository.
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored

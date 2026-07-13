@@ -7,11 +7,12 @@ use std::sync::Arc;
 use agql_auth::{Clock, PrincipalReference};
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::StringFilter;
+use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionError,
     TransactionMode,
 };
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -152,6 +153,23 @@ impl AiRunLease {
     pub const fn retry_count(&self) -> u32 {
         self.retry_count
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_running(principal_reference: PrincipalReference) -> Self {
+        Self {
+            run_id: AiRunId::new(),
+            session_id: AiSessionId::new(),
+            input_message_id: Uuid::new_v4(),
+            principal_reference,
+            attempt_id: Uuid::new_v4(),
+            worker_id: "coordinator-test-worker".to_owned(),
+            lease_generation: 1,
+            lease_expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
+            row_version: 1,
+            state: AiRunState::Running,
+            retry_count: 0,
+        }
+    }
 }
 
 /// Server-authored immutable outcome for a claimed run attempt.
@@ -224,6 +242,9 @@ pub struct AiRunRecoveryReport {
     pub recovery_required: u32,
     /// Pre-provider claims failed because their retry ceiling was exhausted.
     pub failed: u32,
+    /// Expired attempts finalized successfully because an exact same-transaction
+    /// assistant-output checkpoint proved final protected output persistence.
+    pub completed: u32,
 }
 
 /// Durable worker queue implemented only through generated `graphql-orm`
@@ -252,6 +273,9 @@ pub(crate) struct PreparedProviderOutput {
     pub protected_event: serde_json::Value,
     pub blocks: Vec<PreparedProviderBlock>,
     pub correlation_id: String,
+    pub provider_response_id: Option<String>,
+    pub budget_reservation_id: Uuid,
+    pub checkpoint_hash: String,
     pub expected_owner_principal_kind: String,
     pub expected_owner_subject: String,
     pub expected_scope_kind: String,
@@ -585,9 +609,11 @@ impl OrmAiRunService {
     /// Reconciles a bounded window of expired active leases.
     ///
     /// A `Leased` claim is known not to have started provider orchestration and
-    /// can be requeued. `Running` and waiting states become
-    /// `RecoveryRequired`; they are never silently replayed. Malformed active
-    /// lease data fails the whole pass so startup remains closed.
+    /// can be requeued. A `Running` attempt with an exact same-transaction
+    /// protected-output checkpoint is safely finalized. Every other running or
+    /// waiting state becomes `RecoveryRequired`; it is never silently replayed.
+    /// Malformed checkpoint/active-lease data fails the whole pass so startup
+    /// remains closed.
     ///
     /// # Errors
     ///
@@ -629,41 +655,168 @@ impl OrmAiRunService {
                             continue;
                         }
                         let current_state = persisted_state(&current)?;
-                        let (next_state, outcome_code, next_retry_count, next_attempt_at) =
-                            if current_state == AiRunState::Leased {
-                                let retry_count =
-                                    u32::try_from(current.retry_count).map_err(|_| {
+                        let final_checkpoint = if let Some(checkpoint_id) =
+                            current.latest_checkpoint_id
+                        {
+                            let checkpoint = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    id: Some(UuidFilter {
+                                        eq: Some(checkpoint_id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if checkpoint.run_id != current.id
+                                || checkpoint.attempt_id != lease.attempt_id
+                                || checkpoint.lease_generation != lease.lease_generation
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            if checkpoint.checkpoint_kind == "assistant_output_persisted" {
+                                let message_id =
+                                    checkpoint.assistant_message_id.ok_or_else(|| {
                                         OrmPublicError::new(OrmErrorCode::InternalError)
                                     })?;
-                                if retry_count >= limits.maximum_run_retries {
-                                    report.failed = report.failed.saturating_add(1);
-                                    (
-                                        AiRunState::Failed,
-                                        "lease_expired_retry_exhausted",
-                                        current.retry_count,
-                                        None,
-                                    )
-                                } else {
-                                    report.requeued = report.requeued.saturating_add(1);
-                                    (
-                                        AiRunState::RetryScheduled,
-                                        "lease_expired_before_start",
-                                        current.retry_count.checked_add(1).ok_or_else(|| {
-                                            OrmPublicError::new(OrmErrorCode::InternalError)
-                                        })?,
-                                        Some(now.unix_timestamp()),
-                                    )
+                                let budget_reservation_id =
+                                    checkpoint.budget_reservation_id.ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                let reservation = tx
+                                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                if reservation.session_id != current.session_id
+                                    || reservation.run_id != current.id
+                                    || reservation.attempt_id != lease.attempt_id
+                                    || reservation.lease_generation != lease.lease_generation
+                                    || reservation.state != "committed"
+                                    || reservation.actual_runs != Some(1)
+                                    || reservation.reconciled_at.is_none()
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                                 }
+                                let expected_hash = final_output_checkpoint_hash(
+                                    lease.run_id,
+                                    lease.attempt_id,
+                                    lease.lease_generation,
+                                    message_id,
+                                    checkpoint.provider_response_id.as_deref(),
+                                    budget_reservation_id,
+                                );
+                                if checkpoint.checkpoint_hash != expected_hash {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                let message = tx
+                                    .find_by_id::<AiMessageRecord>(&message_id)
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                if message.session_id != current.session_id
+                                    || message.run_id != Some(current.id)
+                                    || message.message_role != "assistant"
+                                    || message.provider_kind.as_deref()
+                                        != Some(reservation.provider_kind.as_str())
+                                    || message.provider_model.as_deref()
+                                        != Some(reservation.provider_model.as_str())
+                                    || message.completion_state != "complete"
+                                    || message.finalized_at.is_none()
+                                    || !(1..=4_096).contains(&message.block_count)
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                let mut blocks = tx
+                                    .query::<AiMessageBlockRecord>()
+                                    .filter(AiMessageBlockRecordWhereInput {
+                                        message_id: Some(UuidFilter {
+                                            eq: Some(message_id),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .limit(message.block_count + 1)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                blocks.sort_by_key(|block| block.block_index);
+                                if i64::try_from(blocks.len()).ok() != Some(message.block_count)
+                                    || blocks.iter().enumerate().any(|(index, block)| {
+                                        i64::try_from(index).ok() != Some(block.block_index)
+                                            || block.byte_count < 0
+                                            || block.line_count < 1
+                                    })
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                Some(checkpoint.provider_response_id)
                             } else {
-                                report.recovery_required =
-                                    report.recovery_required.saturating_add(1);
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if final_checkpoint.is_some() && current_state != AiRunState::Running {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let (
+                            next_state,
+                            outcome_code,
+                            next_retry_count,
+                            next_attempt_at,
+                            provider_response_id,
+                        ) = if current_state == AiRunState::Leased {
+                            let retry_count = u32::try_from(current.retry_count)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if retry_count >= limits.maximum_run_retries {
+                                report.failed = report.failed.saturating_add(1);
                                 (
-                                    AiRunState::RecoveryRequired,
-                                    "lease_expired_after_start",
+                                    AiRunState::Failed,
+                                    "lease_expired_retry_exhausted",
                                     current.retry_count,
                                     None,
+                                    None,
                                 )
-                            };
+                            } else {
+                                report.requeued = report.requeued.saturating_add(1);
+                                (
+                                    AiRunState::RetryScheduled,
+                                    "lease_expired_before_start",
+                                    current.retry_count.checked_add(1).ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?,
+                                    Some(now.unix_timestamp()),
+                                    None,
+                                )
+                            }
+                        } else if let Some(provider_response_id) = final_checkpoint {
+                            report.completed = report.completed.saturating_add(1);
+                            (
+                                AiRunState::Completed,
+                                "lease_expired_after_output_persisted",
+                                current.retry_count,
+                                None,
+                                provider_response_id,
+                            )
+                        } else {
+                            report.recovery_required = report.recovery_required.saturating_add(1);
+                            (
+                                AiRunState::RecoveryRequired,
+                                "lease_expired_after_start",
+                                current.retry_count,
+                                None,
+                                None,
+                            )
+                        };
                         let update = tx
                             .compare_and_swap::<AiRunRecord>(
                                 &current.id,
@@ -677,7 +830,10 @@ impl OrmAiRunService {
                                     lease_heartbeat_at: Some(None),
                                     retry_count: Some(next_retry_count),
                                     next_attempt_at: Some(next_attempt_at),
-                                    error_code: Some(Some(outcome_code.to_owned())),
+                                    error_code: Some(
+                                        (next_state != AiRunState::Completed)
+                                            .then_some(outcome_code.to_owned()),
+                                    ),
                                     ..Default::default()
                                 },
                             )
@@ -691,7 +847,7 @@ impl OrmAiRunService {
                             &lease,
                             next_state,
                             outcome_code.to_owned(),
-                            None,
+                            provider_response_id,
                             now,
                         )
                         .await?;
@@ -770,6 +926,7 @@ impl OrmAiRunService {
                             UpdateAiRunRecordInput {
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                latest_checkpoint_id: Some(Some(output.message_id)),
                                 ..Default::default()
                             },
                         )
@@ -798,6 +955,19 @@ impl OrmAiRunService {
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
                         completion_state: "complete".to_owned(),
                         finalized_at: Some(now.unix_timestamp()),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                        id: output.message_id,
+                        run_id: lease.run_id.0,
+                        attempt_id: lease.attempt_id,
+                        lease_generation: lease.lease_generation,
+                        checkpoint_kind: "assistant_output_persisted".to_owned(),
+                        provider_response_id: output.provider_response_id,
+                        budget_reservation_id: Some(output.budget_reservation_id),
+                        assistant_message_id: Some(output.message_id),
+                        checkpoint_hash: output.checkpoint_hash,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -1581,6 +1751,7 @@ impl OrmAiRunService {
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
                                 next_attempt_at: Some(None),
                                 error_code: Some(None),
+                                latest_checkpoint_id: Some(None),
                                 ..Default::default()
                             },
                         )
@@ -1799,6 +1970,31 @@ fn validate_worker_id(worker_id: &str) -> Result<(), AiError> {
     Ok(())
 }
 
+pub(crate) fn final_output_checkpoint_hash(
+    run_id: AiRunId,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    message_id: Uuid,
+    provider_response_id: Option<&str>,
+    budget_reservation_id: Uuid,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(run_id.0.as_bytes());
+    hasher.update([0]);
+    hasher.update(attempt_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(lease_generation.to_be_bytes());
+    hasher.update([0]);
+    hasher.update(message_id.as_bytes());
+    hasher.update([0]);
+    if let Some(response_id) = provider_response_id {
+        hasher.update(response_id.as_bytes());
+    }
+    hasher.update([0]);
+    hasher.update(budget_reservation_id.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 fn valid_safe_code(code: &str) -> bool {
     !code.is_empty()
         && code.len() <= MAXIMUM_SAFE_CODE_BYTES
@@ -1886,11 +2082,32 @@ mod tests {
 
     async fn seed_queued(fixture: &Fixture) -> AiRunId {
         let run_id = AiRunId::new();
+        let session_id = AiSessionId::new();
+        AiSessionRecord::insert(
+            &fixture.database,
+            CreateAiSessionRecordInput {
+                id: session_id.0,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: "run-user".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                title: "Run service test".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 0,
+                last_activity_at: fixture.clock.now().unix_timestamp(),
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("test session should insert");
         AiRunRecord::insert(
             &fixture.database,
             CreateAiRunRecordInput {
                 id: run_id.0,
-                session_id: AiSessionId::new().0,
+                session_id: session_id.0,
                 input_message_id: Uuid::new_v4(),
                 principal_reference: serde_json::to_value(&fixture.principal_reference)
                     .expect("principal reference should serialize"),
@@ -1903,6 +2120,7 @@ mod tests {
                 retry_count: 0,
                 next_attempt_at: Some(fixture.clock.now().unix_timestamp()),
                 error_code: None,
+                latest_checkpoint_id: None,
             },
         )
         .await
@@ -2027,6 +2245,7 @@ mod tests {
         assert_eq!(report.requeued, 1);
         assert_eq!(report.recovery_required, 1);
         assert_eq!(report.failed, 0);
+        assert_eq!(report.completed, 0);
         assert_eq!(
             run_record(&fixture, safe_run_id).await.state,
             AiRunState::RetryScheduled.as_str()
@@ -2063,6 +2282,122 @@ mod tests {
             outcomes
                 .iter()
                 .any(|outcome| outcome.outcome_code == "lease_expired_after_start")
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_finalizes_an_exact_persisted_output_checkpoint() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-output-checkpoint")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("claim should start");
+        let message_id = Uuid::new_v4();
+        let provider_response_id = "response-checkpoint";
+        let budget_reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id: lease.session_id().0,
+                run_id: lease.run_id().0,
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: "mock".to_owned(),
+                provider_model: "checkpoint-test".to_owned(),
+                pricing_policy_version: "checkpoint-pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 0,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(0),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: "output-checkpoint-test".to_owned(),
+                state: "committed".to_owned(),
+                expires_at: (fixture.clock.now() + Duration::minutes(5)).unix_timestamp(),
+                reconciled_at: Some(fixture.clock.now().unix_timestamp()),
+            },
+        )
+        .await
+        .expect("committed test budget should insert");
+        let budget_reservation_id = budget_reservation.id;
+        let checkpoint_hash = final_output_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            message_id,
+            Some(provider_response_id),
+            budget_reservation_id,
+        );
+        fixture
+            .service
+            .append_provider_output(
+                &lease,
+                PreparedProviderOutput {
+                    message_id,
+                    event_id: Uuid::new_v4(),
+                    provider_kind: "mock".to_owned(),
+                    provider_model: "checkpoint-test".to_owned(),
+                    protected_preview: serde_json::json!({"protected": true}),
+                    protected_event: serde_json::json!({"protected": true}),
+                    blocks: vec![PreparedProviderBlock {
+                        id: Uuid::new_v4(),
+                        kind: "text".to_owned(),
+                        protected_content: serde_json::json!({"protected": true}),
+                        byte_count: 4,
+                        line_count: 1,
+                    }],
+                    correlation_id: budget_reservation_id.to_string(),
+                    provider_response_id: Some(provider_response_id.to_owned()),
+                    budget_reservation_id,
+                    checkpoint_hash,
+                    expected_owner_principal_kind: "user".to_owned(),
+                    expected_owner_subject: "run-user".to_owned(),
+                    expected_scope_kind: "tenant".to_owned(),
+                    expected_scope_id: "tenant-run".to_owned(),
+                    expected_tenant_id: Some("tenant-run".to_owned()),
+                },
+            )
+            .await
+            .expect("output and checkpoint should commit atomically");
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("exact output checkpoint should reconcile");
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.recovery_required, 0);
+        assert_eq!(run_record(&fixture, run_id).await.state, "completed");
+        let outcomes = attempt_outcomes(&fixture).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].outcome_code,
+            "lease_expired_after_output_persisted"
+        );
+        assert_eq!(
+            outcomes[0].provider_response_id.as_deref(),
+            Some(provider_response_id)
         );
     }
 
