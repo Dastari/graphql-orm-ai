@@ -4,6 +4,38 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.14.0 to 0.15.0 and attachment cleanup (crate 0.10.0 to 0.11.0)
+
+Apply AI schema module `0.15.0` before starting the new worker. The existing
+`graphql_orm_ai_attachments` table gains nullable `processing_expires_at`,
+`cleanup_generation`, `cleanup_lease_expires_at`, `cleanup_retry_count`, and
+`cleanup_next_attempt_at` columns. Lifecycle state fields become private
+maintenance filters. No entity is added or removed; blob references retain
+their backup-redaction contract.
+
+Hosts should schedule `AiAttachmentCleanupService::cleanup_once` through a
+trusted singleton or distributed worker scheduler. The service itself permits
+safe concurrency: every row gets a monotonic generation, expiring CAS claim,
+and redacted audit outcome. Do not expose it through GraphQL, delete storage
+prefixes, or clear blob references manually. Configure upload-processing time
+longer than maximum upload plus full-object scanner latency. Storage ambiguity
+enters capped retry backoff rather than being reported as deletion.
+
+`AiAttachmentServiceLimits::new` remains source-compatible and defaults the new
+processing lifetime to one hour; `with_upload_processing_ttl` can narrow or
+widen it within the documented hard bound. `OrmAiAttachmentService` adds
+`with_cleanup_limits`. Public `AiAttachmentCleanupLimits`,
+`AiAttachmentCleanupReport`, and `AiAttachmentCleanupService` are new additive
+Rust APIs. GraphQL SDL, Cargo features/defaults, and application authorization
+contracts do not change.
+
+Existing pending tickets need no rewrite. Legacy interrupted `uploading` rows
+with no processing deadline fall back to their ticket expiry; legacy
+`deleting` rows with no deadline are reclaimable. After restore, keep the
+runtime start gate closed until the module migration and normal restore
+reconciliation have completed, then run cleanup. This is an AI-owned metadata
+migration only; there is no application-domain data migration.
+
 ## Unreleased: exact attachment egress binding (crate 0.9.0 to 0.10.0)
 
 Every `ModelInputBlock::Attachment` constructor must now supply the exact

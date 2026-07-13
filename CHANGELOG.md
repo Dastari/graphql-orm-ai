@@ -5,11 +5,17 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.10.0` and the AI
-schema module to `0.14.0`.
+This development line advances the pre-1.0 crate version to `0.11.0` and the AI
+schema module to `0.15.0`.
 
 ### Added
 
+- Host-only `AiAttachmentCleanupService` and ORM implementation for bounded
+  expired-ticket, interrupted upload/removal, and orphan-reference cleanup.
+  Claims use monotonic generations, expiring row-version fences, confirmed
+  idempotent blob deletion, durable redacted audit, and bounded retry backoff.
+- Configurable upload-processing and cleanup claim lifetimes, plus a redacted
+  per-pass cleanup report suitable for deployment telemetry.
 - Project-agnostic AI schema module with 37 private persistence entities for
   configuration, sessions, protected history, fenced runs, tools, approvals,
   proposals, budgets, usage, egress, audit, and restore readiness.
@@ -141,11 +147,15 @@ schema module to `0.14.0`.
 
 ### Changed
 
+- AI schema module version is now `0.15.0`. Attachment rows add nullable
+  processing/cleanup deadlines, cleanup generation, retry count and next
+  attempt metadata; lifecycle state fields are now privately filterable for
+  bounded maintenance queries.
 - `ModelInputBlock::Attachment` now requires exact verified `byte_count` and
   lowercase `sha256`. Provider request validation rejects malformed/oversized
   attachment blocks and accounts the full attachment bytes instead of only
   the opaque ID/MIME metadata.
-- AI schema module version is now `0.14.0`. Attachment metadata supports
+- AI schema module `0.14.0` introduced attachment metadata supporting
   durable pending uploads with nullable object facts, hashed expiring one-time
   capabilities, expected size, scanner/policy versions, and redacted rejection
   state. Existing finalized attachment rows remain representable.
@@ -182,7 +192,7 @@ schema module to `0.14.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.14.0`.
+  reconciliation. The current module is `0.15.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -192,7 +202,7 @@ schema module to `0.14.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.14.0`.
+  the current module is `0.15.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts
@@ -251,6 +261,10 @@ schema module to `0.14.0`.
 
 ### Security
 
+- Expired/interrupted attachment cleanup never lists arbitrary storage
+  prefixes, reads content, or trusts a stale row. Every candidate is reloaded
+  and CAS-claimed; ambiguous deletion retains opaque references and moves to
+  bounded backoff, while expired leases are safely reclaimable.
 - Every image/file attachment capability proof must contain the exact canonical
   versioned user-provided source reference returned by
   `ModelInputBlock::attachment_egress_reference`. It binds ID, byte count,

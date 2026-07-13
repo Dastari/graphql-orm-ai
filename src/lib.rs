@@ -140,9 +140,10 @@ pub use tools::*;
 pub mod prelude {
     pub use crate::{
         AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiAttachmentAcceptancePolicy,
-        AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation,
-        AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
-        AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
+        AiAttachmentCleanupReport, AiAttachmentCleanupService, AiAttachmentScanner,
+        AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation, AiBudgetService,
+        AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema, AiEgressDecision,
+        AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
         AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
         AiProposalTypeDescriptor, AiProvider, AiRemoteAuthenticatedGraphqlAdapter,
         AiRemoteGraphqlAuthority, AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
@@ -153,10 +154,11 @@ pub mod prelude {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
         AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
-        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiAttachmentServiceLimits,
-        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
-        AiCoordinatorCheckpointLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
-        AiLiveDeltaSink, AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
+        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiAttachmentCleanupLimits,
+        AiAttachmentServiceLimits, AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder,
+        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits,
+        AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
+        AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
         AiRequestedConsequentialToolCall, AiRunServiceLimits, OrmAiApplicationToolCallService,

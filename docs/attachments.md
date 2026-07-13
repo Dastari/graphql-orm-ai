@@ -53,10 +53,13 @@ Construct `OrmAiAttachmentService` with:
 
 Install one clone as `Arc<dyn AiAttachmentService>` in the GraphQL schema and
 use the same service through `AiAttachmentUploadService` in the streaming
-handler. Deployment hard defaults are 25 MiB, 255 UTF-8 filename bytes, and a
-ten-minute ticket; validated limits may be stricter or up to the documented
-hard maxima. Scope/user quota configuration remains a future authenticated
-GraphQL policy surface and cannot widen deployment limits.
+handler. Run that service as `AiAttachmentCleanupService` from a trusted
+host-owned scheduler; it is intentionally not a GraphQL operation. Deployment
+hard defaults are 25 MiB, 255 UTF-8 filename bytes, a ten-minute ticket, and a
+one-hour uninterrupted processing lease. Cleanup defaults to 50 rows and a
+five-minute claim lease. Validated limits may be stricter or up to the
+documented hard maxima. Scope/user quota configuration remains a future
+authenticated GraphQL policy surface and cannot widen deployment limits.
 
 Compose `AiAttachmentQueryRoot` and `AiAttachmentMutationRoot`. They provide
 bounded keyset metadata, ticket creation, clean release, and unlinked removal.
@@ -82,10 +85,21 @@ closed `deleting` state for future cleanup rather than falsely claiming the
 object is gone. Once a message links an attachment, this mutation refuses to
 remove it and break transcript integrity.
 
-Interrupted `uploading` rows, expired tickets, failed/deleting rows, and stray
-quarantine/final objects require the bounded retention/orphan worker that is
-still pending. Do not manually mutate rows or list/delete arbitrary storage
-prefixes from application code.
+The bounded cleanup worker selects only durable `pending_upload`, `uploading`,
+`deleting`, or cleanup states. It reloads and CAS-claims each row with a new
+generation and expiring lease before touching either exact stored reference.
+Deletion is treated as successful only when absence is confirmed. Ambiguous
+storage errors retain the references, append a redacted failed audit fact, and
+enter capped retry backoff. A worker crash leaves a reclaimable lease; an old
+worker cannot finalize after another generation wins. Expired tickets are
+soft-deleted, while interrupted uploads remain failed metadata for owner
+inspection. The worker never lists a prefix or reads attachment content.
+
+Restore reconciliation must keep runtime startup closed until AI migrations
+are applied. Nullable legacy `uploading` rows fall back to their expired ticket
+deadline, and legacy `deleting` rows with no processing deadline are eligible
+for fenced cleanup. Do not manually mutate rows or list/delete arbitrary
+storage prefixes from application code.
 
 ## Provider boundary
 

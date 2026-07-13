@@ -407,6 +407,42 @@ pub trait AiAttachmentUploadService: Send + Sync {
     ) -> Result<AiAttachmentView, AiError>;
 }
 
+/// Bounded outcome from one host-scheduled attachment cleanup pass.
+///
+/// Counts contain no owner, filename, storage reference, or content data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AiAttachmentCleanupReport {
+    /// Candidate rows examined after bounded state queries.
+    pub examined: u32,
+    /// Rows whose referenced objects were proven absent and durably finalized.
+    pub cleaned: u32,
+    /// Rows another worker claimed or changed before this worker could fence.
+    pub deferred: u32,
+    /// Rows retained for retry because storage deletion could not be proven.
+    pub failed: u32,
+}
+
+/// Host-only maintenance boundary for expired or interrupted attachments.
+///
+/// This service is intentionally not exposed through GraphQL. Scheduling it
+/// grants authority only to delete objects already selected by durable AI
+/// lifecycle state; it grants no ability to read attachment bytes or inspect
+/// user content.
+#[async_trait]
+pub trait AiAttachmentCleanupService: Send + Sync {
+    /// Runs one bounded, lease-fenced cleanup pass.
+    ///
+    /// Storage ambiguity is reported in [`AiAttachmentCleanupReport::failed`]
+    /// and retained for a later retry. A database or query failure aborts the
+    /// pass with a safe error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe persistence error when candidates cannot be loaded,
+    /// claimed, or durably finalized.
+    async fn cleanup_once(&self) -> Result<AiAttachmentCleanupReport, AiError>;
+}
+
 /// Composable attachment query root.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AiAttachmentQueryRoot;

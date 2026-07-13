@@ -21,8 +21,11 @@ isolation, and the final mutations that apply reviewed proposals.
 Attachment metadata and lifecycle state are AI-owned; bytes use the reviewed
 provider-neutral `graphql-orm-storage::BlobStore` boundary. Random quarantine
 and final keys, scanning, acceptance, and release remain inside the attachment
-service. Application resolvers receive only an authorized AI attachment ID and
-decide independently whether it may be linked to domain data.
+service. A host-scheduled maintenance boundary deletes only exact references
+selected and fenced through durable attachment lifecycle state; it never lists
+storage prefixes or reads content. Application resolvers receive only an
+authorized AI attachment ID and decide independently whether it may be linked
+to domain data.
 
 ## Execution topologies
 

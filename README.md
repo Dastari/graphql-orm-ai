@@ -97,6 +97,9 @@ adapters listed below are still being implemented.
 - Exact attachment model-input binding: ID, MIME, verified bytes and SHA-256
   must match a separately authorized image/file manifest source before any
   provider adapter can start transport.
+- A host-only, bounded attachment maintenance worker that fences cleanup
+  generations, expires abandoned tickets/processing, confirms idempotent blob
+  deletion, audits outcomes, and backs off safely on ambiguous storage errors.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 

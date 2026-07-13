@@ -122,6 +122,13 @@ ID, MIME type, byte count, SHA-256 checksum, provider, model, and capability;
 swapping any of those values invalidates the egress decision. See the
 [attachment guide](attachments.md).
 
+Attachment maintenance is a host-only delete capability over exact opaque
+references already selected by durable lifecycle state. Each row is freshly
+CAS-claimed with a generation and expiring lease. Storage absence must be
+confirmed before references are cleared; ambiguity is audited and backed off,
+and a reclaimed generation fences every stale finalizer. Cleanup never lists
+storage prefixes, reads content, or bypasses owner-facing resolver policy.
+
 The read-only coordinator accepts only exact enabled idempotent queries with no
 approval requirement. The separate supervised service accepts only exact
 enabled application mutations at `SupervisedWrite` maturity with one-shot

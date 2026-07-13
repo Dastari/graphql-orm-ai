@@ -755,9 +755,21 @@ pub(crate) struct AiAttachmentRecord {
     #[backup(redact)]
     pub upload_token_hash: Option<String>,
     pub upload_expires_at: Option<i64>,
+    #[filterable(type = "string")]
     pub quarantine_state: String,
     pub scan_state: String,
+    #[filterable(type = "string")]
     pub processing_state: String,
+    /// Deadline after which an interrupted upload/scanner may be reclaimed.
+    pub processing_expires_at: Option<i64>,
+    /// Monotonic maintenance claim generation.
+    pub cleanup_generation: Option<i64>,
+    /// Deadline after which another cleanup worker may reclaim the row.
+    pub cleanup_lease_expires_at: Option<i64>,
+    /// Failed cleanup attempts used for bounded retry backoff.
+    pub cleanup_retry_count: Option<i64>,
+    /// Earliest retry time after an ambiguous storage operation.
+    pub cleanup_next_attempt_at: Option<i64>,
     pub scanner_version: Option<String>,
     pub acceptance_policy_version: Option<String>,
     pub rejection_code: Option<String>,
@@ -1651,7 +1663,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.14.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.15.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

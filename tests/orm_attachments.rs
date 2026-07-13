@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, SessionContext, SystemClock};
+use agql_auth::{
+    AccessTokenMetadata, AuthPrincipal, AuthUser, Clock, FixedClock, SessionContext, SystemClock,
+};
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
@@ -107,11 +109,16 @@ impl AiAttachmentScanner for TestScanner {
 #[derive(Default)]
 struct MemoryBlobStore {
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
+    fail_deletes: Mutex<bool>,
 }
 
 impl MemoryBlobStore {
     fn count(&self) -> usize {
         self.blobs.lock().expect("blob lock").len()
+    }
+
+    fn set_fail_deletes(&self, fail: bool) {
+        *self.fail_deletes.lock().expect("delete failure lock") = fail;
     }
 }
 
@@ -239,6 +246,13 @@ impl BlobStore for MemoryBlobStore {
     }
 
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
+        if *self.fail_deletes.lock().expect("delete failure lock") {
+            return Err(StorageError::Provider {
+                backend: "test".to_owned(),
+                message: "injected delete failure".to_owned(),
+                retryable: true,
+            });
+        }
         self.blobs.lock().expect("blob lock").remove(key);
         Ok(())
     }
@@ -265,6 +279,10 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_clock(Arc::new(SystemClock)).await
+}
+
+async fn fixture_with_clock(clock: Arc<dyn Clock>) -> Fixture {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
         .await
         .expect("in-memory SQLite should open");
@@ -298,7 +316,7 @@ async fn fixture() -> Fixture {
         blobs.clone(),
         Arc::new(TestScanner),
         Arc::new(AllowCleanImages),
-        Arc::new(SystemClock),
+        clock,
     );
     Fixture {
         session_service,
@@ -506,4 +524,140 @@ async fn scanner_rejection_never_promotes_or_releases_bytes() {
             .await,
         Err(AiError::Conflict)
     ));
+}
+
+#[tokio::test]
+async fn cleanup_expires_tickets_once_and_hides_deleted_metadata() {
+    let clock = FixedClock::new(
+        time::OffsetDateTime::from_unix_timestamp(2_000_000_000)
+            .expect("fixed timestamp should be valid"),
+    );
+    let fixture = fixture_with_clock(Arc::new(clock.clone())).await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "eventually-expired.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: 16,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    clock.advance_seconds(601);
+
+    let first = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("expired ticket cleanup should complete");
+    assert_eq!(first.examined, 1);
+    assert_eq!(first.cleaned, 1);
+    assert_eq!(first.failed, 0);
+    let second = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("cleanup retry should be idempotent");
+    assert_eq!(second.cleaned, 0);
+    let visible = fixture
+        .attachment_service
+        .attachments(&owner, AiSessionId(session.id), page())
+        .await
+        .expect("owner list should remain available");
+    assert!(visible.edges.is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_cleanup_workers_finalize_one_expired_ticket_once() {
+    let clock = FixedClock::new(
+        time::OffsetDateTime::from_unix_timestamp(2_000_000_000)
+            .expect("fixed timestamp should be valid"),
+    );
+    let fixture = fixture_with_clock(Arc::new(clock.clone())).await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "raced-expiry.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: 16,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    clock.advance_seconds(601);
+
+    let (left, right) = tokio::join!(
+        fixture.attachment_service.cleanup_once(),
+        fixture.attachment_service.cleanup_once()
+    );
+    let left = left.expect("left cleanup worker should converge");
+    let right = right.expect("right cleanup worker should converge");
+    assert_eq!(left.cleaned + right.cleaned, 1);
+    assert_eq!(left.failed + right.failed, 0);
+}
+
+#[tokio::test]
+async fn cleanup_retains_ambiguous_storage_deletes_and_retries_safely() {
+    let clock = FixedClock::new(
+        time::OffsetDateTime::from_unix_timestamp(2_000_000_000)
+            .expect("fixed timestamp should be valid"),
+    );
+    let fixture = fixture_with_clock(Arc::new(clock.clone())).await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let bytes = b"MZcleanup-retry".to_vec();
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "rejected.exe".to_owned(),
+                declared_mime: Some("application/octet-stream".to_owned()),
+                expected_byte_count: bytes.len() as i64,
+            },
+        )
+        .await
+        .expect("ticket should create");
+    fixture.blobs.set_fail_deletes(true);
+    assert!(matches!(
+        fixture
+            .attachment_service
+            .upload(
+                &owner,
+                ticket.attachment().id,
+                SecretString::from(ticket.secret().expose_secret().to_owned()),
+                StorageByteStream::from_bytes(bytes),
+            )
+            .await,
+        Err(AiError::Forbidden)
+    ));
+    assert_eq!(fixture.blobs.count(), 1);
+
+    let failed = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("ambiguous storage deletion should remain a reportable retry");
+    assert_eq!(failed.failed, 1);
+    assert_eq!(fixture.blobs.count(), 1);
+    fixture.blobs.set_fail_deletes(false);
+    clock.advance_seconds(121);
+    let recovered = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("later cleanup retry should converge");
+    assert_eq!(recovered.cleaned, 1);
+    assert_eq!(fixture.blobs.count(), 0);
 }

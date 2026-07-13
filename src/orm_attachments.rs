@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agql_auth::{AuthPrincipal, Clock};
@@ -25,12 +26,13 @@ use uuid::Uuid;
 
 use crate::persistence::*;
 use crate::{
-    AiAccessPolicy, AiAttachmentAcceptancePolicy, AiAttachmentCandidate, AiAttachmentConnection,
-    AiAttachmentEdge, AiAttachmentScanRequest, AiAttachmentScanVerdict, AiAttachmentScanner,
-    AiAttachmentService, AiAttachmentUploadService, AiAttachmentUploadTicket, AiAttachmentView,
-    AiContentProtectionPolicy, AiContentProtectionPolicyResolver, AiContentProtector, AiError,
-    AiScope, AiSessionAction, AiSessionId, AiSessionWakeup, ContentProtectionContext,
-    CreateAiAttachmentUploadInput, valid_mime, valid_safe_reference, valid_sha256,
+    AiAccessPolicy, AiAttachmentAcceptancePolicy, AiAttachmentCandidate, AiAttachmentCleanupReport,
+    AiAttachmentCleanupService, AiAttachmentConnection, AiAttachmentEdge, AiAttachmentScanRequest,
+    AiAttachmentScanVerdict, AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService,
+    AiAttachmentUploadTicket, AiAttachmentView, AiContentProtectionPolicy,
+    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiScope, AiSessionAction,
+    AiSessionId, AiSessionWakeup, ContentProtectionContext, CreateAiAttachmentUploadInput,
+    valid_mime, valid_safe_reference, valid_sha256,
 };
 
 /// Deployment hard limits for attachment intake.
@@ -39,6 +41,7 @@ pub struct AiAttachmentServiceLimits {
     maximum_attachment_bytes: u64,
     maximum_filename_bytes: usize,
     upload_ticket_ttl: Duration,
+    upload_processing_ttl: Duration,
 }
 
 impl AiAttachmentServiceLimits {
@@ -67,7 +70,28 @@ impl AiAttachmentServiceLimits {
             maximum_attachment_bytes,
             maximum_filename_bytes,
             upload_ticket_ttl,
+            upload_processing_ttl: Duration::hours(1),
         })
+    }
+
+    /// Overrides the maximum uninterrupted upload/scanner phase.
+    ///
+    /// Once this deadline passes, a cleanup worker may fence the row and
+    /// delete its quarantine objects. Active deployments should choose a value
+    /// longer than their maximum accepted upload and scanner latency.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the duration is
+    /// positive and no more than 24 hours.
+    pub fn with_upload_processing_ttl(mut self, ttl: Duration) -> Result<Self, AiError> {
+        if !ttl.is_positive() || ttl > Duration::hours(24) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid attachment processing lifetime".to_owned(),
+            ));
+        }
+        self.upload_processing_ttl = ttl;
+        Ok(self)
     }
 
     /// Maximum exact bytes for one attachment.
@@ -84,6 +108,11 @@ impl AiAttachmentServiceLimits {
     pub const fn upload_ticket_ttl(self) -> Duration {
         self.upload_ticket_ttl
     }
+
+    /// Maximum uninterrupted upload/scanner lifetime.
+    pub const fn upload_processing_ttl(self) -> Duration {
+        self.upload_processing_ttl
+    }
 }
 
 impl Default for AiAttachmentServiceLimits {
@@ -92,6 +121,56 @@ impl Default for AiAttachmentServiceLimits {
             maximum_attachment_bytes: 25 * 1024 * 1024,
             maximum_filename_bytes: 255,
             upload_ticket_ttl: Duration::minutes(10),
+            upload_processing_ttl: Duration::hours(1),
+        }
+    }
+}
+
+/// Bounded host-scheduled cleanup worker limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiAttachmentCleanupLimits {
+    maximum_batch_size: u32,
+    cleanup_lease_ttl: Duration,
+}
+
+impl AiAttachmentCleanupLimits {
+    /// Creates validated cleanup limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the batch is in
+    /// `1..=200` and the claim lifetime is positive and no more than one hour.
+    pub fn new(maximum_batch_size: u32, cleanup_lease_ttl: Duration) -> Result<Self, AiError> {
+        if !(1..=200).contains(&maximum_batch_size)
+            || !cleanup_lease_ttl.is_positive()
+            || cleanup_lease_ttl > Duration::hours(1)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid attachment cleanup limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_batch_size,
+            cleanup_lease_ttl,
+        })
+    }
+
+    /// Maximum candidate rows considered in one pass.
+    pub const fn maximum_batch_size(self) -> u32 {
+        self.maximum_batch_size
+    }
+
+    /// Reclaimable cleanup claim lifetime.
+    pub const fn cleanup_lease_ttl(self) -> Duration {
+        self.cleanup_lease_ttl
+    }
+}
+
+impl Default for AiAttachmentCleanupLimits {
+    fn default() -> Self {
+        Self {
+            maximum_batch_size: 50,
+            cleanup_lease_ttl: Duration::minutes(5),
         }
     }
 }
@@ -112,6 +191,7 @@ pub struct OrmAiAttachmentService {
     acceptance_policy: Arc<dyn AiAttachmentAcceptancePolicy>,
     clock: Arc<dyn Clock>,
     limits: AiAttachmentServiceLimits,
+    cleanup_limits: AiAttachmentCleanupLimits,
 }
 
 struct RejectedUploadFacts {
@@ -146,6 +226,7 @@ impl OrmAiAttachmentService {
             acceptance_policy,
             clock,
             limits: AiAttachmentServiceLimits::default(),
+            cleanup_limits: AiAttachmentCleanupLimits::default(),
         }
     }
 
@@ -153,6 +234,13 @@ impl OrmAiAttachmentService {
     #[must_use]
     pub fn with_limits(mut self, limits: AiAttachmentServiceLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Overrides bounded cleanup worker limits.
+    #[must_use]
+    pub fn with_cleanup_limits(mut self, limits: AiAttachmentCleanupLimits) -> Self {
+        self.cleanup_limits = limits;
         self
     }
 
@@ -254,6 +342,11 @@ impl OrmAiAttachmentService {
         let subject = subject.to_owned();
         let token_hash = token_hash(token.expose_secret());
         let now = self.clock.now().unix_timestamp();
+        let processing_expires_at = now
+            .checked_add(self.limits.upload_processing_ttl.whole_seconds())
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("attachment processing expiry overflow".to_owned())
+            })?;
         let updated = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -288,6 +381,7 @@ impl OrmAiAttachmentService {
                                 upload_token_hash: Some(None),
                                 quarantine_state: Some("uploading".to_owned()),
                                 processing_state: Some("scanning".to_owned()),
+                                processing_expires_at: Some(Some(processing_expires_at)),
                                 ..Default::default()
                             },
                         )
@@ -366,6 +460,7 @@ impl OrmAiAttachmentService {
                     }
                     .to_owned(),
                 ),
+                processing_expires_at: Some(None),
                 scanner_version: Some(facts.scanner_version),
                 acceptance_policy_version: Some(facts.policy_version),
                 rejection_code: Some(Some(safe_reason(&facts.reason_code))),
@@ -404,12 +499,271 @@ impl OrmAiAttachmentService {
                     }
                     .to_owned(),
                 ),
+                processing_expires_at: Some(None),
                 rejection_code: Some(Some(safe_reason(reason_code))),
                 ..Default::default()
             },
         )
         .await?;
         Ok(())
+    }
+
+    async fn cleanup_candidates(&self, now: i64) -> Result<Vec<AiAttachmentRecord>, AiError> {
+        let limit = i64::from(self.cleanup_limits.maximum_batch_size);
+        let queries = [
+            AiAttachmentRecordWhereInput {
+                quarantine_state: Some(StringFilter {
+                    eq: Some("pending_upload".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            AiAttachmentRecordWhereInput {
+                quarantine_state: Some(StringFilter {
+                    eq: Some("uploading".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            AiAttachmentRecordWhereInput {
+                quarantine_state: Some(StringFilter {
+                    eq: Some("deleting".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            AiAttachmentRecordWhereInput {
+                processing_state: Some(StringFilter {
+                    in_list: Some(vec![
+                        "cleanup_required".to_owned(),
+                        "cleanup_backoff".to_owned(),
+                        "cleanup_in_progress".to_owned(),
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+        let mut candidates = BTreeMap::new();
+        for query in queries {
+            if candidates.len() >= self.cleanup_limits.maximum_batch_size as usize {
+                break;
+            }
+            let connection = AiAttachmentRecord::keyset_connection_page(
+                &self.database,
+                query,
+                KeysetConnectionInput {
+                    last: Some(limit),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_orm)?;
+            for edge in connection.edges {
+                if is_cleanup_eligible(&edge.node, now) {
+                    candidates.entry(edge.node.id).or_insert(edge.node);
+                }
+            }
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| (candidate.created_at, candidate.id));
+        candidates.truncate(self.cleanup_limits.maximum_batch_size as usize);
+        Ok(candidates)
+    }
+
+    async fn claim_cleanup(
+        &self,
+        candidate: &AiAttachmentRecord,
+        now: i64,
+    ) -> Result<Option<AiAttachmentRecord>, AiError> {
+        let id = candidate.id;
+        let cleanup_expires_at = now
+            .checked_add(self.cleanup_limits.cleanup_lease_ttl.whole_seconds())
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("attachment cleanup expiry overflow".to_owned())
+            })?;
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let Some(current) = tx
+                        .find_by_id::<AiAttachmentRecord>(&id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    else {
+                        return Ok(None);
+                    };
+                    if !is_cleanup_eligible(&current, now) {
+                        return Ok(None);
+                    }
+                    let generation = current
+                        .cleanup_generation
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let outcome = tx
+                        .compare_and_swap::<AiAttachmentRecord>(
+                            &id,
+                            current.row_version,
+                            AiAttachmentRecordWhereInput::default(),
+                            UpdateAiAttachmentRecordInput {
+                                upload_token_hash: Some(None),
+                                processing_state: Some("cleanup_in_progress".to_owned()),
+                                processing_expires_at: Some(None),
+                                cleanup_generation: Some(Some(generation)),
+                                cleanup_lease_expires_at: Some(Some(cleanup_expires_at)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    match outcome {
+                        ConditionalUpdateOutcome::Updated(record) => Ok(Some(record)),
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            Ok(None)
+                        }
+                    }
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    async fn delete_blob_if_present(&self, reference: &str) -> bool {
+        match self.blob_store.blob_exists(reference).await {
+            Ok(false) => true,
+            Ok(true) => match self.blob_store.delete_blob(reference).await {
+                Ok(()) => self
+                    .blob_store
+                    .blob_exists(reference)
+                    .await
+                    .is_ok_and(|exists| !exists),
+                Err(_) => self
+                    .blob_store
+                    .blob_exists(reference)
+                    .await
+                    .is_ok_and(|exists| !exists),
+            },
+            Err(_) => false,
+        }
+    }
+
+    async fn finish_cleanup(
+        &self,
+        claimed: &AiAttachmentRecord,
+        storage_deleted: bool,
+        now: i64,
+    ) -> Result<bool, AiError> {
+        let id = claimed.id;
+        let expected_version = claimed.row_version;
+        let generation = claimed
+            .cleanup_generation
+            .ok_or(AiError::PersistenceFailed)?;
+        let retry = if storage_deleted {
+            None
+        } else {
+            let next_retry_count = claimed
+                .cleanup_retry_count
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or(AiError::PersistenceFailed)?;
+            let retry_shift = u32::try_from(next_retry_count.min(6)).unwrap_or(6);
+            let retry_delay_seconds = 60_i64.checked_shl(retry_shift).unwrap_or(3_600).min(3_600);
+            let next_attempt_at = now
+                .checked_add(retry_delay_seconds)
+                .ok_or(AiError::PersistenceFailed)?;
+            Some((next_retry_count, next_attempt_at))
+        };
+        let correlation_id = format!("attachment-cleanup:{id}:{generation}");
+        let original_state = claimed.quarantine_state.clone();
+        let existing_reason = claimed.rejection_code.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let (update, outcome, reason_code) = if storage_deleted {
+                        let mut update = UpdateAiAttachmentRecordInput {
+                            blob_reference: Some(None),
+                            quarantine_blob_reference: Some(None),
+                            upload_token_hash: Some(None),
+                            processing_state: Some("complete".to_owned()),
+                            processing_expires_at: Some(None),
+                            cleanup_lease_expires_at: Some(None),
+                            cleanup_next_attempt_at: Some(None),
+                            ..Default::default()
+                        };
+                        let reason_code = match original_state.as_str() {
+                            "pending_upload" => {
+                                update.quarantine_state = Some("expired".to_owned());
+                                update.scan_state = Some("failed".to_owned());
+                                update.rejection_code =
+                                    Some(Some("upload_ticket_expired".to_owned()));
+                                update.deleted_at = Some(Some(now));
+                                "upload_ticket_expired"
+                            }
+                            "uploading" => {
+                                update.quarantine_state = Some("failed".to_owned());
+                                update.scan_state = Some("failed".to_owned());
+                                update.rejection_code =
+                                    Some(Some("upload_processing_expired".to_owned()));
+                                "upload_processing_expired"
+                            }
+                            "deleting" => {
+                                update.quarantine_state = Some("deleted".to_owned());
+                                update.deleted_at = Some(Some(now));
+                                "attachment_deleted"
+                            }
+                            _ => "orphan_objects_deleted",
+                        };
+                        (update, "succeeded", reason_code.to_owned())
+                    } else {
+                        let (next_retry_count, next_attempt_at) =
+                            retry.expect("failed deletion has retry facts");
+                        (
+                            UpdateAiAttachmentRecordInput {
+                                processing_state: Some("cleanup_backoff".to_owned()),
+                                cleanup_lease_expires_at: Some(None),
+                                cleanup_retry_count: Some(Some(next_retry_count)),
+                                cleanup_next_attempt_at: Some(Some(next_attempt_at)),
+                                rejection_code: Some(Some(
+                                    existing_reason
+                                        .unwrap_or_else(|| "storage_cleanup_failed".to_owned()),
+                                )),
+                                ..Default::default()
+                            },
+                            "failed",
+                            "storage_cleanup_unconfirmed".to_owned(),
+                        )
+                    };
+                    let result = tx
+                        .compare_and_swap::<AiAttachmentRecord>(
+                            &id,
+                            expected_version,
+                            AiAttachmentRecordWhereInput::default(),
+                            update,
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(result, ConditionalUpdateOutcome::Updated(_)) {
+                        return Ok(false);
+                    }
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "system".to_owned(),
+                        actor_subject: "attachment-cleanup".to_owned(),
+                        action: "cleanup_attachment_objects".to_owned(),
+                        resource_kind: "ai_attachment".to_owned(),
+                        resource_reference: id.to_string(),
+                        outcome: outcome.to_owned(),
+                        reason_code,
+                        correlation_id,
+                        causation_id: Some(id.to_string()),
+                        policy_version: Some("attachment-cleanup-v1".to_owned()),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(true)
+                })
+            })
+            .await
+            .map_err(map_transaction)
     }
 }
 
@@ -593,6 +947,11 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             quarantine_state: "pending_upload".to_owned(),
                             scan_state: "pending".to_owned(),
                             processing_state: "pending".to_owned(),
+                            processing_expires_at: None,
+                            cleanup_generation: None,
+                            cleanup_lease_expires_at: None,
+                            cleanup_retry_count: None,
+                            cleanup_next_attempt_at: None,
                             scanner_version: None,
                             acceptance_policy_version: None,
                             rejection_code: None,
@@ -709,6 +1068,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
                             UpdateAiAttachmentRecordInput {
                                 quarantine_state: Some("released".to_owned()),
                                 processing_state: Some("complete".to_owned()),
+                                processing_expires_at: Some(None),
                                 finalized_at: Some(Some(now)),
                                 ..Default::default()
                             },
@@ -794,6 +1154,12 @@ impl AiAttachmentService for OrmAiAttachmentService {
             )
             .await?;
         let expected_version = attachment.row_version;
+        let now = self.clock.now().unix_timestamp();
+        let deletion_expires_at = now
+            .checked_add(self.limits.upload_processing_ttl.whole_seconds())
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("attachment deletion expiry overflow".to_owned())
+            })?;
         let deleting = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -807,6 +1173,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
                                 upload_token_hash: Some(None),
                                 quarantine_state: Some("deleting".to_owned()),
                                 processing_state: Some("deleting".to_owned()),
+                                processing_expires_at: Some(Some(deletion_expires_at)),
                                 ..Default::default()
                             },
                         )
@@ -846,7 +1213,6 @@ impl AiAttachmentService for OrmAiAttachmentService {
         let owner_subject = owner_subject.to_owned();
         let session_id = session.id;
         let deleting_version = deleting.row_version;
-        let now = self.clock.now().unix_timestamp();
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
@@ -875,6 +1241,7 @@ impl AiAttachmentService for OrmAiAttachmentService {
                                 quarantine_blob_reference: Some(None),
                                 quarantine_state: Some("deleted".to_owned()),
                                 processing_state: Some("complete".to_owned()),
+                                processing_expires_at: Some(None),
                                 deleted_at: Some(Some(now)),
                                 ..Default::default()
                             },
@@ -922,6 +1289,42 @@ impl AiAttachmentService for OrmAiAttachmentService {
             .await
             .map_err(map_transaction)?;
         Ok(true)
+    }
+}
+
+#[async_trait]
+impl AiAttachmentCleanupService for OrmAiAttachmentService {
+    async fn cleanup_once(&self) -> Result<AiAttachmentCleanupReport, AiError> {
+        let now = self.clock.now().unix_timestamp();
+        let candidates = self.cleanup_candidates(now).await?;
+        let mut report = AiAttachmentCleanupReport {
+            examined: u32::try_from(candidates.len()).unwrap_or(u32::MAX),
+            ..Default::default()
+        };
+        for candidate in candidates {
+            let Some(claimed) = self.claim_cleanup(&candidate, now).await? else {
+                report.deferred = report.deferred.saturating_add(1);
+                continue;
+            };
+            let mut storage_deleted = true;
+            for reference in [
+                claimed.blob_reference.as_deref(),
+                claimed.quarantine_blob_reference.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                storage_deleted &= self.delete_blob_if_present(reference).await;
+            }
+            if !self.finish_cleanup(&claimed, storage_deleted, now).await? {
+                report.deferred = report.deferred.saturating_add(1);
+            } else if storage_deleted {
+                report.cleaned = report.cleaned.saturating_add(1);
+            } else {
+                report.failed = report.failed.saturating_add(1);
+            }
+        }
+        Ok(report)
     }
 }
 
@@ -1128,6 +1531,7 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
                     quarantine_state: Some("failed".to_owned()),
                     scan_state: Some("failed".to_owned()),
                     processing_state: Some("cleanup_required".to_owned()),
+                    processing_expires_at: Some(None),
                     rejection_code: Some(Some("quarantine_cleanup_failed".to_owned())),
                     ..Default::default()
                 },
@@ -1147,6 +1551,7 @@ impl AiAttachmentUploadService for OrmAiAttachmentService {
                     quarantine_state: Some("ready".to_owned()),
                     scan_state: Some("clean".to_owned()),
                     processing_state: Some("ready".to_owned()),
+                    processing_expires_at: Some(None),
                     scanner_version: Some(Some(report.scanner_version().to_owned())),
                     acceptance_policy_version: Some(Some(decision.policy_version)),
                     rejection_code: Some(None),
@@ -1206,6 +1611,34 @@ fn attachment_view(record: &AiAttachmentRecord) -> AiAttachmentView {
         rejection_code: record.rejection_code.clone(),
         created_at: record.created_at,
         finalized_at: record.finalized_at,
+    }
+}
+
+fn is_cleanup_eligible(record: &AiAttachmentRecord, now: i64) -> bool {
+    if record.message_id.is_some() || record.deleted_at.is_some() {
+        return false;
+    }
+    match record.processing_state.as_str() {
+        "cleanup_required" => true,
+        "cleanup_backoff" => record
+            .cleanup_next_attempt_at
+            .is_some_and(|next_attempt_at| next_attempt_at <= now),
+        "cleanup_in_progress" => record
+            .cleanup_lease_expires_at
+            .is_some_and(|expires_at| expires_at <= now),
+        _ => match record.quarantine_state.as_str() {
+            "pending_upload" => record
+                .upload_expires_at
+                .is_some_and(|expires_at| expires_at <= now),
+            "uploading" => record
+                .processing_expires_at
+                .or(record.upload_expires_at)
+                .is_some_and(|expires_at| expires_at <= now),
+            "deleting" => record
+                .processing_expires_at
+                .is_none_or(|expires_at| expires_at <= now),
+            _ => false,
+        },
     }
 }
 

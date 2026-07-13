@@ -7,7 +7,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Security model](security.md)
 - [Durable worker and provider turn](worker-provider-turn.md)
 - [Protected live streaming](live-streaming.md)
-- [Attachment intake and quarantine](attachments.md)
+- [Attachment intake, quarantine, and cleanup](attachments.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)
 - [Protected coordinator checkpoints](coordinator-checkpoints.md)
 - [Supervised mutation and approval execution](supervised-tool-loop.md)
