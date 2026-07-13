@@ -4,6 +4,74 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: authenticated budget-policy management (crate/schema 0.17.0 to 0.18.0)
+
+Apply AI schema module `0.18.0` while provider workers, configuration writes,
+budget reservations, backups, and restore callbacks are closed. Do not run
+0.18.0 code against module 0.17.0. The managed schema adds required indexed
+`scope_key` to `graphql_orm_ai_budget_policies`; the module still owns 38
+private entities.
+
+Backfill every existing budget policy with `ai_scope_key` computed from its
+stored `scope_kind`, `scope_id`, and optional `tenant_id`. This is a
+deterministic non-secret lookup identity, not authorization. Reject or repair
+rows with invalid scopes, unpaired principal kind/subject, unknown intervals,
+negative/no ceilings, duplicate/corrupt IDs, or a key that does not exactly
+match those stored scope fields. Do not infer a tenant or principal. No
+consumer-owned application/domain data migration is needed.
+The helper is now exported for every backend, including schema-only MSSQL
+builds; its availability does not imply MSSQL write-service parity.
+
+`AiConfigurationAction` gains `ReadBudgetPolicies` and
+`ManageBudgetPolicies`. `AiConfigurationService` gains `budget_policies` and
+`upsert_budget_policy`; every custom implementation must add both methods.
+Composed configuration GraphQL schemas gain `aiBudgetPolicies` and
+`upsertAiBudgetPolicy` (or coherent PascalCase names), the
+`AiBudgetIntervalInput` enum, input, and redacted view.
+
+The ORM configuration service leaves mutations closed until the host calls
+`with_budget_policy_management(AiBudgetPolicyManagementLimits)`. These
+deployment bounds cap every GraphQL-configurable token/tool/image/cost/run
+ceiling and allow at most 100 policies per exact scope. They do not grant
+configuration authority and do not replace the independent per-call
+`AiBudgetServiceLimits`. Choose the per-scope management bound together with
+the budget service's maximum-applicable-policy bound so exact plus
+tenant-wildcard policy sets remain executable.
+
+Reads require the host's exact-scope `ReadBudgetPolicies` decision and return
+at most 100 records. Mutations require a user principal with recent MFA, the
+host's `ManageBudgetPolicies` decision, validated deployment ceilings, a
+create/update identity pairing, and exact CAS. Create accepts an optional exact
+principal kind/subject pair. On update the scope, tenant, principal pair, and
+interval are immutable; create a replacement and disable the old policy to
+change those bindings. There is no delete operation. Each successful mutation
+appends a redacted audit event in the same state-machine transaction.
+
+The reservation service now selects policies by the exact deterministic scope
+key plus the matching tenant-wildcard key, then verifies the stored key and
+scope fields before applying principal filters. Missing, excessive, corrupt,
+or ceiling-free effective policies remain fail-closed. Existing counters keep
+their committed/reserved values across ceiling changes; new reservations use
+the current policy row version and a disabled policy no longer participates in
+new reservations.
+
+Restore fact collectors must populate the new
+`AiRestoreSnapshotFacts::invalid_budget_policy_count`. Any nonzero value adds
+fatal `AI_RESTORE_BUDGET_POLICY_INVALID` and keeps readiness closed. Validate
+scope-key integrity, principal pairing, interval, non-negative bounded
+ceilings, and policy/counter version relationships before reporting zero.
+
+This is a pre-1.0 public Rust API, GraphQL SDL, authorization, configuration,
+persistence, migration, backup/restore, and behavioral contract change.
+
+The crate root no longer glob-reexports macro-generated types from the private
+persistence module. These types were an accidental compile-visible leak and
+were never a supported application CRUD surface. Replace any use with
+`AiSchemaModule` for migrations and the authenticated configuration, budget,
+usage, session, run, proposal, approval, attachment, or worker service traits.
+`AiSchemaModule`, `AI_SCHEMA_MODULE_ID`, `AI_SCHEMA_MODULE_VERSION`, and
+`AI_TABLE_NAMESPACE` remain public.
+
 ## Unreleased: authoritative usage ledger and reporting (crate/schema 0.16.0 to 0.17.0)
 
 Apply AI schema module `0.17.0` while provider workers, budget reconciliation,

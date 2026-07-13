@@ -27,6 +27,10 @@ pub enum AiConfigurationAction {
     ReadRetention,
     /// Change scope retention and purge settings.
     ManageRetention,
+    /// Read redacted budget policies.
+    ReadBudgetPolicies,
+    /// Create, alter, enable, or disable budget policies.
+    ManageBudgetPolicies,
 }
 
 /// Host-owned administrative authorization for GraphQL-managed AI settings.
@@ -166,6 +170,74 @@ pub struct AiRetentionPolicyView {
     pub updated_at: i64,
 }
 
+/// Stable budget reset interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+pub enum AiBudgetIntervalInput {
+    /// Fixed UTC-aligned minute.
+    Minute,
+    /// Fixed UTC-aligned hour.
+    Hour,
+    /// Fixed UTC-aligned day.
+    Day,
+    /// UTC calendar month.
+    Month,
+    /// Never resets automatically.
+    Lifetime,
+}
+
+impl AiBudgetIntervalInput {
+    /// Stable persistence value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minute => "minute",
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Month => "month",
+            Self::Lifetime => "lifetime",
+        }
+    }
+}
+
+/// Redacted scope/principal budget ceiling.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiBudgetPolicyView {
+    /// Policy ID.
+    pub id: Uuid,
+    /// Exact scope kind.
+    pub scope_kind: String,
+    /// Exact scope ID.
+    pub scope_id: String,
+    /// Optional tenant boundary. Absence is a tenant wildcard for matching
+    /// scope kind/ID and requires host authorization to manage.
+    pub tenant_id: Option<String>,
+    /// Optional exact principal kind; present only with principal subject.
+    pub principal_kind: Option<String>,
+    /// Optional exact principal subject; present only with principal kind.
+    pub principal_subject: Option<String>,
+    /// Stable reset interval.
+    pub interval_kind: String,
+    /// Maximum total input tokens.
+    pub maximum_input_tokens: Option<i64>,
+    /// Maximum output tokens.
+    pub maximum_output_tokens: Option<i64>,
+    /// Maximum tool units.
+    pub maximum_tool_units: Option<i64>,
+    /// Maximum image units.
+    pub maximum_image_units: Option<i64>,
+    /// Maximum deployment-defined cost microunits.
+    pub maximum_cost_microunits: Option<i64>,
+    /// Maximum provider runs/calls.
+    pub maximum_runs: Option<i64>,
+    /// Whether this policy participates in new reservations.
+    pub enabled: bool,
+    /// CAS version.
+    pub row_version: i64,
+    /// Update time in Unix seconds.
+    pub updated_at: i64,
+}
+
 /// Provider profile CAS upsert.
 #[derive(InputObject)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -251,6 +323,39 @@ pub struct SetAiRetentionPolicyInput {
     pub expected_version: Option<i64>,
 }
 
+/// Budget-policy CAS create/update input.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct UpsertAiBudgetPolicyInput {
+    /// Existing policy ID, or absent to create.
+    pub id: Option<Uuid>,
+    /// Exact owning scope. On update this immutable binding must match.
+    pub scope: AiScopeInput,
+    /// Optional exact principal kind. Kind and subject must be supplied or
+    /// omitted together and are immutable after creation.
+    pub principal_kind: Option<String>,
+    /// Optional exact principal subject.
+    pub principal_subject: Option<String>,
+    /// Reset interval, immutable after creation.
+    pub interval: AiBudgetIntervalInput,
+    /// Optional total input-token ceiling.
+    pub maximum_input_tokens: Option<i64>,
+    /// Optional output-token ceiling.
+    pub maximum_output_tokens: Option<i64>,
+    /// Optional tool-unit ceiling.
+    pub maximum_tool_units: Option<i64>,
+    /// Optional image-unit ceiling.
+    pub maximum_image_units: Option<i64>,
+    /// Optional deployment-defined cost ceiling in microunits.
+    pub maximum_cost_microunits: Option<i64>,
+    /// Optional provider run/call ceiling.
+    pub maximum_runs: Option<i64>,
+    /// Whether this policy participates in new reservations.
+    pub enabled: bool,
+    /// Expected CAS version for an update; absent on create.
+    pub expected_version: Option<i64>,
+}
+
 /// GraphQL content-protection mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
@@ -275,7 +380,8 @@ impl From<AiContentProtectionModeInput> for AiContentProtectionMode {
 /// Implementations must enforce administrative authorization and scope/tenant
 /// isolation for every method. Mutations must use CAS, append a redacted audit
 /// event, and require current recent MFA for credential, content-protection,
-/// and retention changes. A failed audit append fails the mutation.
+/// retention, and budget-policy changes. A failed audit append fails the
+/// mutation.
 #[async_trait]
 pub trait AiConfigurationService: Send + Sync {
     /// Lists at most 100 visible redacted profiles for a scope.
@@ -298,6 +404,13 @@ pub trait AiConfigurationService: Send + Sync {
         principal: &AuthPrincipal,
         scope: AiScope,
     ) -> Result<Option<AiRetentionPolicyView>, AiError>;
+
+    /// Lists at most 100 redacted budget policies for one exact scope.
+    async fn budget_policies(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<Vec<AiBudgetPolicyView>, AiError>;
 
     /// Creates or CAS-updates a provider profile and audits the change.
     async fn upsert_provider_profile(
@@ -336,6 +449,14 @@ pub trait AiConfigurationService: Send + Sync {
         principal: &AuthPrincipal,
         input: SetAiRetentionPolicyInput,
     ) -> Result<AiRetentionPolicyView, AiError>;
+
+    /// Creates or CAS-updates a budget policy and appends a redacted audit in
+    /// the same transaction.
+    async fn upsert_budget_policy(
+        &self,
+        principal: &AuthPrincipal,
+        input: UpsertAiBudgetPolicyInput,
+    ) -> Result<AiBudgetPolicyView, AiError>;
 }
 
 /// Composable redacted configuration query root.
@@ -392,6 +513,26 @@ impl AiConfigurationQueryRoot {
             .retention_policy(&principal, scope.into())
             .await
             .map_err(extend)
+    }
+
+    /// Lists bounded redacted budget policies for one exact scope.
+    async fn ai_budget_policies(
+        &self,
+        context: &Context<'_>,
+        scope: AiScopeInput,
+    ) -> async_graphql::Result<Vec<AiBudgetPolicyView>> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        let policies = configuration_service(context)?
+            .budget_policies(&principal, scope.into())
+            .await
+            .map_err(extend)?;
+        if policies.len() > 100 {
+            return Err(AiError::InvalidConfiguration(
+                "configuration service returned an unbounded budget-policy list".to_owned(),
+            )
+            .extend());
+        }
+        Ok(policies)
     }
 }
 
@@ -473,6 +614,19 @@ impl AiConfigurationMutationRoot {
         let principal = agql_auth::principal_from_ctx(context)?;
         configuration_service(context)?
             .set_retention_policy(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Creates or CAS-updates a budget policy.
+    async fn upsert_ai_budget_policy(
+        &self,
+        context: &Context<'_>,
+        input: UpsertAiBudgetPolicyInput,
+    ) -> async_graphql::Result<AiBudgetPolicyView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        configuration_service(context)?
+            .upsert_budget_policy(&principal, input)
             .await
             .map_err(extend)
     }

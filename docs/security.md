@@ -56,6 +56,15 @@ estimate and is still committed truthfully; this can exhaust a policy but must
 not be hidden. Only proven unused capacity is released. Ordinary workers cannot
 release a reservation already classified as uncertain.
 
+Budget-policy GraphQL management is a separate administrative capability.
+Reads and writes have distinct host decisions; writes additionally require a
+current user with recent MFA, deployment hard ceilings, immutable
+scope/principal/interval bindings, exact CAS, and a same-transaction redacted
+audit. No delete exists. The persisted non-secret scope key is validated before
+use and is never authorization. Runtime lookup deliberately includes only the
+exact scope and its explicit tenant-wildcard counterpart, then rechecks every
+stored field before applying a policy.
+
 An authoritative commit appends one immutable usage fact in the same
 transaction and binds it uniquely to the reservation. Idempotent replay cannot
 duplicate spend. Usage reporting is not inferred from tool or session access:

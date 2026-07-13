@@ -333,6 +333,9 @@ pub(crate) struct AiBudgetPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    /// Stable non-secret exact scope identity.
+    #[filterable(type = "string")]
+    pub scope_key: String,
     #[filterable(type = "string")]
     pub scope_kind: String,
     #[filterable(type = "string")]
@@ -1734,7 +1737,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.17.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.18.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

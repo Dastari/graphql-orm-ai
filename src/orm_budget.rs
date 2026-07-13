@@ -127,6 +127,12 @@ impl OrmAiBudgetService {
         let principal_reference = principal.reference().clone();
         let canonical_expiry = canonical_second(request.expires_at);
         let scope = request.scope.clone();
+        let mut policy_scope_keys = vec![crate::ai_scope_key(&scope)];
+        if scope.tenant_id.is_some() {
+            let mut tenant_wildcard_scope = scope.clone();
+            tenant_wildcard_scope.tenant_id = None;
+            policy_scope_keys.push(crate::ai_scope_key(&tenant_wildcard_scope));
+        }
         let idempotency_key = request.idempotency_key.clone();
         let database = self.database.clone();
 
@@ -203,12 +209,8 @@ impl OrmAiBudgetService {
                     let policies = tx
                         .query::<AiBudgetPolicyRecord>()
                         .filter(AiBudgetPolicyRecordWhereInput {
-                            scope_kind: Some(StringFilter {
-                                eq: Some(scope.kind.clone()),
-                                ..Default::default()
-                            }),
-                            scope_id: Some(StringFilter {
-                                eq: Some(scope.id.clone()),
+                            scope_key: Some(StringFilter {
+                                in_list: Some(policy_scope_keys),
                                 ..Default::default()
                             }),
                             enabled: Some(BoolFilter {
@@ -224,6 +226,14 @@ impl OrmAiBudgetService {
                     if policies.len() > limits.maximum_applicable_policies {
                         return Ok(Err(AiError::InvalidConfiguration(
                             "too many AI budget policies for one scope".to_owned(),
+                        )));
+                    }
+                    if policies
+                        .iter()
+                        .any(|policy| !policy_scope_integrity(policy, &scope))
+                    {
+                        return Ok(Err(AiError::InvalidConfiguration(
+                            "invalid AI budget policy scope binding".to_owned(),
                         )));
                     }
                     let policies = policies
@@ -835,7 +845,7 @@ fn policy_applies(
     principal_kind: &str,
     principal_subject: &str,
 ) -> bool {
-    (policy.tenant_id.is_none() || policy.tenant_id == scope.tenant_id)
+    policy_scope_integrity(policy, scope)
         && policy
             .principal_kind
             .as_deref()
@@ -844,6 +854,18 @@ fn policy_applies(
             .principal_subject
             .as_deref()
             .is_none_or(|subject| subject == principal_subject)
+}
+
+fn policy_scope_integrity(policy: &AiBudgetPolicyRecord, scope: &AiScope) -> bool {
+    policy.scope_key
+        == crate::ai_scope_key(&AiScope {
+            kind: policy.scope_kind.clone(),
+            id: policy.scope_id.clone(),
+            tenant_id: policy.tenant_id.clone(),
+        })
+        && policy.scope_kind == scope.kind
+        && policy.scope_id == scope.id
+        && (policy.tenant_id.is_none() || policy.tenant_id == scope.tenant_id)
 }
 
 fn validate_policy_capacity(
@@ -1425,9 +1447,10 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &database,
             CreateAiBudgetPolicyRecordInput {
+                scope_key: crate::ai_scope_key(&AiScope::new("tenant", TENANT)),
                 scope_kind: "tenant".to_owned(),
                 scope_id: TENANT.to_owned(),
-                tenant_id: Some(TENANT.to_owned()),
+                tenant_id: None,
                 principal_kind: None,
                 principal_subject: None,
                 interval_kind: "day".to_owned(),
@@ -1660,6 +1683,9 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &fixture.database,
             CreateAiBudgetPolicyRecordInput {
+                scope_key: crate::ai_scope_key(
+                    &AiScope::new("tenant", TENANT).with_tenant_id(TENANT),
+                ),
                 scope_kind: "tenant".to_owned(),
                 scope_id: TENANT.to_owned(),
                 tenant_id: Some(TENANT.to_owned()),

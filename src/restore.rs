@@ -52,6 +52,9 @@ pub struct AiRestoreSnapshotFacts {
     /// Usage facts that fail reservation, scope, principal, provider, or
     /// non-negative/cached-subset integrity validation.
     pub invalid_usage_fact_count: u64,
+    /// Budget policies with invalid scope keys, principal pairs, intervals, or
+    /// ceilings.
+    pub invalid_budget_policy_count: u64,
     /// Duplicate durable stream sequence count.
     pub duplicate_stream_sequence_count: u64,
     /// Retention/known stream gap count.
@@ -185,6 +188,13 @@ impl AiRestoreReconciler {
         if facts.invalid_usage_fact_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_USAGE_FACT_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_budget_policy_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_BUDGET_POLICY_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

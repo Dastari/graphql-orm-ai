@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.17.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.18.0");
     assert_eq!(catalog.entities().len(), 38);
     assert!(
         catalog
@@ -40,6 +40,23 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         .iter()
         .find(|table| table.table_name == "graphql_orm_ai_budget_counters")
         .expect("budget counter table should exist");
+    let budget_policy = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_budget_policies")
+        .expect("budget policy table should exist");
+    assert!(
+        budget_policy
+            .columns
+            .iter()
+            .any(|column| { column.name == "scope_key" && !column.nullable })
+    );
+    assert!(
+        budget_policy
+            .indexes
+            .iter()
+            .any(|index| { index.columns == ["scope_key"] && !index.is_unique })
+    );
     assert!(
         counter.composite_unique_indexes.iter().any(|columns| {
             columns == &["budget_policy_id".to_owned(), "period_key".to_owned()]

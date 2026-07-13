@@ -32,6 +32,33 @@ validated subset, not an additional amount. Deployment pricing can calculate
 cached and uncached rates from those two facts while preserving the provider's
 authoritative total.
 
+## Budget-policy management
+
+Budget policies are managed only through `AiConfigurationQueryRoot` and
+`AiConfigurationMutationRoot`; private generated CRUD is not an application
+surface. The host authorizes `ReadBudgetPolicies` and `ManageBudgetPolicies`
+separately. Mutations also require a current user principal with recent MFA.
+
+Before enabling mutations, the deployment must call
+`OrmAiConfigurationService::with_budget_policy_management` with
+`AiBudgetPolicyManagementLimits`. Those hard bounds cap every configurable
+token, tool, image, cost, and run value and the number of policies per exact
+scope. They are independent from, and should be no broader than, the provider
+call and operational spend limits.
+
+`upsertAiBudgetPolicy`/`UpsertAiBudgetPolicy` creates or exact-CAS updates a
+policy and appends its redacted audit fact atomically. At least one
+non-negative ceiling is required. Optional principal kind and subject must be
+provided together. Scope, tenant, principal target, and interval are immutable
+after creation; create a replacement and disable the old policy to change
+them. There is no delete mutation.
+
+A tenant-absent policy is an explicit wildcard for matching scope kind and ID.
+Runtime lookup requests only the exact tenant scope and that wildcard scope,
+then verifies the deterministic scope key and every stored scope field before
+applying principal filters. The scope key is a bounded lookup aid, never
+authorization.
+
 ## Reporting authorization
 
 Compose `AiQueryRoot` (or `AiUsageQueryRoot` separately) and install
@@ -90,10 +117,13 @@ failure closes the query.
 
 ## Migration, backup, and restore
 
-Apply schema module `0.17.0` with workers and readers closed. Unsupported legacy
-private usage rows must be proven from complete committed reservation evidence
-or removed; never fabricate a binding. Existing committed reservations are not
-automatically treated as historical usage.
+The usage ledger was introduced by schema module `0.17.0`; current deployments
+apply module `0.18.0`, which additionally indexes deterministic budget-policy
+scope keys. Keep workers, configuration writes, and readers closed during each
+managed migration. Unsupported legacy private usage rows must be proven from
+complete committed reservation evidence or removed; never fabricate a binding.
+Existing committed reservations are not automatically treated as historical
+usage.
 
 Backups preserve usage facts as append-only records. Before reopening after a
 restore, validate unique reservation linkage, committed reservation state,
@@ -101,4 +131,5 @@ matching scope/principal/provider/model, non-negative amounts, and cached input
 not exceeding total input. Set
 `AiRestoreSnapshotFacts::invalid_usage_fact_count` to the number of failures;
 any nonzero value is fatal. Reporting must remain closed until restore
-reconciliation succeeds.
+reconciliation succeeds. Budget-policy validation similarly populates
+`invalid_budget_policy_count`; a nonzero value is fatal.

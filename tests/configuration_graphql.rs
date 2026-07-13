@@ -56,6 +56,14 @@ impl AiConfigurationService for ConfigurationService {
         Ok(None)
     }
 
+    async fn budget_policies(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: AiScope,
+    ) -> Result<Vec<AiBudgetPolicyView>, AiError> {
+        Ok(Vec::new())
+    }
+
     async fn upsert_provider_profile(
         &self,
         _principal: &AuthPrincipal,
@@ -125,6 +133,31 @@ impl AiConfigurationService for ConfigurationService {
             updated_at: 1,
         })
     }
+
+    async fn upsert_budget_policy(
+        &self,
+        _principal: &AuthPrincipal,
+        input: UpsertAiBudgetPolicyInput,
+    ) -> Result<AiBudgetPolicyView, AiError> {
+        Ok(AiBudgetPolicyView {
+            id: input.id.unwrap_or_else(Uuid::new_v4),
+            scope_kind: input.scope.kind,
+            scope_id: input.scope.id,
+            tenant_id: input.scope.tenant_id,
+            principal_kind: input.principal_kind,
+            principal_subject: input.principal_subject,
+            interval_kind: input.interval.as_str().to_owned(),
+            maximum_input_tokens: input.maximum_input_tokens,
+            maximum_output_tokens: input.maximum_output_tokens,
+            maximum_tool_units: input.maximum_tool_units,
+            maximum_image_units: input.maximum_image_units,
+            maximum_cost_microunits: input.maximum_cost_microunits,
+            maximum_runs: input.maximum_runs,
+            enabled: input.enabled,
+            row_version: 0,
+            updated_at: 1,
+        })
+    }
 }
 
 fn principal() -> AuthPrincipal {
@@ -173,11 +206,15 @@ async fn credential_mutation_returns_only_redacted_state() {
     {
         assert!(schema.sdl().contains("aiRetentionPolicy(scope:"));
         assert!(schema.sdl().contains("setAiRetentionPolicy(input:"));
+        assert!(schema.sdl().contains("aiBudgetPolicies(scope:"));
+        assert!(schema.sdl().contains("upsertAiBudgetPolicy(input:"));
     }
     #[cfg(feature = "graphql-case-pascal")]
     {
         assert!(schema.sdl().contains("AiRetentionPolicy(Scope:"));
         assert!(schema.sdl().contains("SetAiRetentionPolicy(Input:"));
+        assert!(schema.sdl().contains("AiBudgetPolicies(Scope:"));
+        assert!(schema.sdl().contains("UpsertAiBudgetPolicy(Input:"));
     }
 }
 
@@ -198,4 +235,53 @@ async fn configuration_roots_fail_closed_without_authentication() {
         .await;
 
     assert!(!response.errors.is_empty());
+}
+
+#[tokio::test]
+async fn budget_policy_mutation_uses_the_configured_case_and_redacted_view() {
+    let service: Arc<dyn AiConfigurationService> = Arc::new(ConfigurationService {
+        expected_secret_received: AtomicBool::new(false),
+    });
+    let schema = Schema::build(
+        AiConfigurationQueryRoot,
+        AiConfigurationMutationRoot,
+        EmptySubscription,
+    )
+    .data(service)
+    .finish();
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let document = r#"
+        mutation {
+            upsertAiBudgetPolicy(input: {
+                scope: { kind: "project", id: "project-1", tenantId: "tenant-1" }
+                principalKind: "user"
+                principalSubject: "member-7"
+                interval: MONTH
+                maximumInputTokens: 50000
+                maximumRuns: 100
+                enabled: true
+            }) { id intervalKind maximumInputTokens maximumRuns rowVersion }
+        }
+    "#;
+    #[cfg(feature = "graphql-case-pascal")]
+    let document = r#"
+        mutation {
+            UpsertAiBudgetPolicy(Input: {
+                Scope: { Kind: "project", Id: "project-1", TenantId: "tenant-1" }
+                PrincipalKind: "user"
+                PrincipalSubject: "member-7"
+                Interval: Month
+                MaximumInputTokens: 50000
+                MaximumRuns: 100
+                Enabled: true
+            }) { Id IntervalKind MaximumInputTokens MaximumRuns RowVersion }
+        }
+    "#;
+    let response = schema
+        .execute(Request::new(document).data(principal()))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let serialized = serde_json::to_string(&response.data).expect("response should serialize");
+    assert!(!serialized.contains("principalSubject"));
+    assert!(!serialized.contains("PrincipalSubject"));
 }

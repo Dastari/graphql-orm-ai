@@ -52,7 +52,11 @@ camelCase to PascalCase.
 9. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.
-10. Apply/validate migrations and restore reconciliation, then open the runtime
+10. Opt into budget-policy mutations with
+   `OrmAiConfigurationService::with_budget_policy_management`, using deployment
+   ceilings no broader than operational spend policy. Authorize reads and
+   writes independently; writes require recent MFA.
+11. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
@@ -163,7 +167,7 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
-upload/search/deletion, attachment quotas/derivatives, budget-policy/pricing GraphQL
+upload/search/deletion, attachment quotas/derivatives, pricing-catalog GraphQL
 management, per-session live-delta retention, provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in

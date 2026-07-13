@@ -169,6 +169,20 @@ async fn service() -> (
         },
         Arc::new(FixedClock::new(now)),
         secrets.clone(),
+    )
+    .with_budget_policy_management(
+        AiBudgetPolicyManagementLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                tool_units: 10_000,
+                image_units: 10_000,
+                cost_microunits: 1_000_000_000,
+                runs: 100_000,
+            },
+            10,
+        )
+        .expect("budget management limits should validate"),
     );
     (service, secrets, now)
 }
@@ -409,6 +423,135 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
         .await
         .expect("pending policy remains inspectable");
     assert!(!resolved.ready);
+}
+
+#[tokio::test]
+async fn budget_policies_are_recent_mfa_bounded_cas_managed_and_scope_exact() {
+    let (service, _secrets, now) = service().await;
+    let create = || UpsertAiBudgetPolicyInput {
+        id: None,
+        scope: scope_input(),
+        principal_kind: Some("user".to_owned()),
+        principal_subject: Some("member-7".to_owned()),
+        interval: AiBudgetIntervalInput::Month,
+        maximum_input_tokens: Some(50_000),
+        maximum_output_tokens: Some(10_000),
+        maximum_tool_units: Some(100),
+        maximum_image_units: Some(20),
+        maximum_cost_microunits: Some(5_000_000),
+        maximum_runs: Some(100),
+        enabled: true,
+        expected_version: None,
+    };
+    assert!(matches!(
+        service
+            .upsert_budget_policy(&no_mfa_principal(), create())
+            .await,
+        Err(AiError::RecentMfaRequired)
+    ));
+    let principal = recent_principal(now);
+    let policy = service
+        .upsert_budget_policy(&principal, create())
+        .await
+        .expect("budget policy should create under recent MFA");
+    assert_eq!(policy.row_version, 0);
+    assert_eq!(policy.principal_subject.as_deref(), Some("member-7"));
+
+    let policies = service
+        .budget_policies(&principal, scope())
+        .await
+        .expect("exact scope policies should be visible");
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].id, policy.id);
+
+    let updated = service
+        .upsert_budget_policy(
+            &principal,
+            UpsertAiBudgetPolicyInput {
+                id: Some(policy.id),
+                expected_version: Some(0),
+                maximum_runs: Some(50),
+                enabled: false,
+                ..create()
+            },
+        )
+        .await
+        .expect("exact CAS update should succeed");
+    assert_eq!(updated.row_version, 1);
+    assert_eq!(updated.maximum_runs, Some(50));
+    assert!(!updated.enabled);
+
+    assert!(matches!(
+        service
+            .upsert_budget_policy(
+                &principal,
+                UpsertAiBudgetPolicyInput {
+                    id: Some(policy.id),
+                    expected_version: Some(0),
+                    ..create()
+                },
+            )
+            .await,
+        Err(AiError::Conflict)
+    ));
+    assert!(matches!(
+        service
+            .upsert_budget_policy(
+                &principal,
+                UpsertAiBudgetPolicyInput {
+                    id: Some(policy.id),
+                    expected_version: Some(1),
+                    interval: AiBudgetIntervalInput::Day,
+                    ..create()
+                },
+            )
+            .await,
+        Err(AiError::NotFound)
+    ));
+    assert!(matches!(
+        service
+            .upsert_budget_policy(
+                &principal,
+                UpsertAiBudgetPolicyInput {
+                    maximum_input_tokens: Some(1_000_001),
+                    ..create()
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        service
+            .upsert_budget_policy(
+                &principal,
+                UpsertAiBudgetPolicyInput {
+                    principal_subject: None,
+                    ..create()
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+    let one_policy_service = service.clone().with_budget_policy_management(
+        AiBudgetPolicyManagementLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                tool_units: 10_000,
+                image_units: 10_000,
+                cost_microunits: 1_000_000_000,
+                runs: 100_000,
+            },
+            1,
+        )
+        .expect("single-policy limit should validate"),
+    );
+    assert!(matches!(
+        one_policy_service
+            .upsert_budget_policy(&principal, create())
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
 }
 
 #[tokio::test]

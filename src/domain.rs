@@ -1,6 +1,7 @@
 //! Project-agnostic scope and identifier types.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Application-defined scope boundary for sessions, policy, and egress.
@@ -29,6 +30,31 @@ impl AiScope {
         self.tenant_id = Some(tenant_id.into());
         self
     }
+}
+
+/// Returns the stable non-secret persistence identity for an AI scope.
+///
+/// This value supports dependency-owned lookup and migration diagnostics. It
+/// proves neither scope validity nor caller authorization and must never be
+/// used in place of host access policy.
+pub fn ai_scope_key(scope: &AiScope) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"graphql-orm-ai/scope/v1\0");
+    for value in [
+        Some(scope.kind.as_str()),
+        Some(scope.id.as_str()),
+        scope.tenant_id.as_deref(),
+    ] {
+        match value {
+            Some(value) => {
+                hash.update([1]);
+                hash.update((value.len() as u64).to_be_bytes());
+                hash.update(value.as_bytes());
+            }
+            None => hash.update([0]),
+        }
+    }
+    hex::encode(hash.finalize())
 }
 
 macro_rules! uuid_id {

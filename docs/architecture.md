@@ -96,6 +96,12 @@ principal/idempotency binding, and reconciles every counter exactly once.
 Unknown external outcomes retain their full reservation; the ordinary worker
 path cannot release uncertain capacity.
 
+Budget-policy administration uses the existing configuration subgraph rather
+than private generated CRUD. Exact-scope reads and recent-MFA/CAS/audited
+mutations are host-authorized independently. A deterministic scope key keeps
+queries bounded while preserving explicit tenant-wildcard policy semantics;
+the key is checked against stored scope fields and never treated as authority.
+
 Authoritative reconciliation appends one immutable usage fact in that same
 transaction, uniquely bound to the reservation. Reporting is a separate
 authenticated projection: host policy selects exact current-principal or

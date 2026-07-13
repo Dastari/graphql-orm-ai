@@ -136,7 +136,9 @@ pub use orm_subscriptions::*;
 pub use orm_tools::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_usage::*;
-pub use persistence::*;
+pub use persistence::{
+    AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
+};
 pub use proposals::*;
 pub use provider::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -154,6 +156,7 @@ pub use usage::*;
 
 /// Common imports for host integrations.
 pub mod prelude {
+    pub use crate::ai_scope_key;
     pub use crate::{
         AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiAttachmentAcceptancePolicy,
         AiAttachmentCleanupReport, AiAttachmentCleanupService, AiAttachmentScanner,
@@ -184,7 +187,7 @@ pub mod prelude {
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
         OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
         OrmAiLiveDeltaService, OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
-        OrmAiUsageService, ai_scope_key,
+        OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

@@ -235,7 +235,8 @@ session and configuration services, resumable session events, durable run
 claim/heartbeat/retry/recovery, OpenAI and mock provider contracts, immutable
 egress audit, protected windowed assistant-output persistence, content
 protection, egress proofs, logical GraphQL target contracts, static disclosure
-validation, an atomic ORM-backed budget reservation/reconciliation service,
+validation, authenticated recent-MFA/CAS/audited budget-policy management, an
+atomic ORM-backed budget reservation/reconciliation service,
 an exactly-once append-only usage ledger with authenticated bounded reporting,
 exact approval binding, proposal schemas, fenced state transitions, and restore
 planning. Protected proposal creation/review/outcome linkage and canonical-
@@ -243,8 +244,8 @@ preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
-top-level supervised approval-wait coordinator, authenticated budget-policy
-and immutable pricing-catalog GraphQL lifecycles, privileged uncertain-call
+top-level supervised approval-wait coordinator, an authenticated immutable
+pricing-catalog GraphQL lifecycle, privileged uncertain-call
 recovery, and per-session live-delta retention/purge,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret

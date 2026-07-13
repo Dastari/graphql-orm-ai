@@ -1847,6 +1847,7 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &database,
             CreateAiBudgetPolicyRecordInput {
+                scope_key: crate::ai_scope_key(&scope),
                 scope_kind: scope.kind.clone(),
                 scope_id: scope.id.clone(),
                 tenant_id: scope.tenant_id.clone(),

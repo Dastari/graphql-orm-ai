@@ -5,10 +5,16 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.17.0` and the AI
-schema module to `0.17.0`.
+This development line advances the pre-1.0 crate version to `0.18.0` and the AI
+schema module to `0.18.0`.
 
 ### Added
+
+- Authenticated GraphQL budget-policy reads and recent-MFA-protected CAS
+  create/update/enable/disable through the existing configuration service.
+  Deployment management limits cap every configurable dimension and policies
+  per exact scope; scope/principal/interval bindings are immutable, and every
+  mutation appends a redacted audit fact in the same transaction.
 
 - An append-only authoritative usage ledger written exactly once in the same
   state-machine transaction that commits a budget reservation. Each fact has a
@@ -196,6 +202,17 @@ schema module to `0.17.0`.
 
 ### Changed
 
+- Budget policies now carry an indexed deterministic non-secret `scope_key`.
+  Runtime reservation queries cover the exact tenant scope plus an explicitly
+  tenant-wildcard scope, validate every stored binding, and remain default-deny
+  for absent, corrupt, or excessive policy sets.
+- `ai_scope_key` is now backend-neutral and available to schema-only/MSSQL
+  builds as well as SQLite/PostgreSQL migration and configuration code.
+- The crate root no longer accidentally reexports macro-generated private ORM
+  record inputs, filters, mutations, subscriptions, or repositories. Supported
+  public persistence API remains `AiSchemaModule` and its module constants;
+  consumers continue through authenticated service/GraphQL contracts.
+
 - Provider-neutral request validation now bounds instruction/text/JSON/output-
   schema/custom-tool-schema metadata, output-token ceilings, and built-in tool
   cardinality/configuration, with a 64-MiB aggregate metadata ceiling. Built-in
@@ -280,7 +297,7 @@ schema module to `0.17.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.17.0`.
+  reconciliation. The current module is `0.18.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -290,7 +307,7 @@ schema module to `0.17.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.17.0`.
+  the current module is `0.18.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts

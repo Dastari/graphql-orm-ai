@@ -14,19 +14,63 @@ use graphql_orm::graphql::orm::{
 };
 use secrecy::SecretString;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
 use crate::persistence::*;
 use crate::{
-    AiConfigurationAccessPolicy, AiConfigurationAction, AiConfigurationService,
-    AiContentProtectionMode, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
-    AiContentProtectionPolicyView, AiError, AiProviderEndpointPolicy, AiProviderKindInput,
-    AiProviderProfileView, AiRetentionPolicyView, AiScope, AiSecretStore,
-    RemoveAiProviderCredentialInput, SecretRef, SetAiContentProtectionPolicyInput,
-    SetAiRetentionPolicyInput, UpsertAiProviderProfileInput,
+    AiBudgetAmounts, AiBudgetPolicyView, AiConfigurationAccessPolicy, AiConfigurationAction,
+    AiConfigurationService, AiContentProtectionMode, AiContentProtectionPolicy,
+    AiContentProtectionPolicyResolver, AiContentProtectionPolicyView, AiError,
+    AiProviderEndpointPolicy, AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView,
+    AiScope, AiSecretStore, RemoveAiProviderCredentialInput, SecretRef,
+    SetAiContentProtectionPolicyInput, SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput,
+    UpsertAiProviderProfileInput,
 };
+
+/// Deployment hard bounds for GraphQL-managed budget policies.
+///
+/// GraphQL values may only narrow these ceilings. This type does not grant
+/// configuration authority and does not replace the transactional provider
+/// reservation limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiBudgetPolicyManagementLimits {
+    maximum_ceiling: AiBudgetAmounts,
+    maximum_policies_per_scope: usize,
+}
+
+impl AiBudgetPolicyManagementLimits {
+    /// Creates validated deployment management bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the per-scope policy
+    /// count is in `1..=100`.
+    pub fn new(
+        maximum_ceiling: AiBudgetAmounts,
+        maximum_policies_per_scope: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=100).contains(&maximum_policies_per_scope) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid budget-policy management limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_ceiling,
+            maximum_policies_per_scope,
+        })
+    }
+
+    /// Returns the greatest ceiling GraphQL may configure in each dimension.
+    pub const fn maximum_ceiling(self) -> AiBudgetAmounts {
+        self.maximum_ceiling
+    }
+
+    /// Returns the maximum number of policies for one exact scope.
+    pub const fn maximum_policies_per_scope(self) -> usize {
+        self.maximum_policies_per_scope
+    }
+}
 
 /// Durable configuration backend using generated ORM APIs and a compensating
 /// secret-reference saga. Secret plaintext never enters an ORM input.
@@ -38,6 +82,7 @@ pub struct OrmAiConfigurationService {
     recent_mfa_policy: RecentMfaPolicy,
     clock: Arc<dyn Clock>,
     secret_store: Arc<dyn AiSecretStore>,
+    budget_policy_limits: Option<AiBudgetPolicyManagementLimits>,
 }
 
 impl OrmAiConfigurationService {
@@ -57,7 +102,17 @@ impl OrmAiConfigurationService {
             recent_mfa_policy,
             clock,
             secret_store,
+            budget_policy_limits: None,
         }
+    }
+
+    /// Enables GraphQL budget-policy management under deployment hard bounds.
+    ///
+    /// Without this explicit opt-in, budget-policy reads remain independently
+    /// authorized but mutations fail closed as invalid configuration.
+    pub fn with_budget_policy_management(mut self, limits: AiBudgetPolicyManagementLimits) -> Self {
+        self.budget_policy_limits = Some(limits);
+        self
     }
 
     /// Returns the underlying ORM database handle for host schema wiring.
@@ -187,6 +242,51 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .await?
             .as_ref()
             .map(retention_policy_view))
+    }
+
+    async fn budget_policies(
+        &self,
+        principal: &AuthPrincipal,
+        scope: AiScope,
+    ) -> Result<Vec<AiBudgetPolicyView>, AiError> {
+        self.require_access(principal, &scope, AiConfigurationAction::ReadBudgetPolicies)
+            .await?;
+        let exact_scope_key = scope_key(&scope);
+        let rows = self
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetPolicyRecord>()
+                        .filter(AiBudgetPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(exact_scope_key),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(101)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        if rows.len() > 100 {
+            return Err(AiError::InvalidConfiguration(
+                "budget-policy scope exceeds the bounded read limit".to_owned(),
+            ));
+        }
+        if rows.iter().any(|record| {
+            record.scope_key != exact_scope_key_for_record(record)
+                || record.scope_kind != scope.kind
+                || record.scope_id != scope.id
+                || record.tenant_id != scope.tenant_id
+        }) {
+            return Err(AiError::PersistenceFailed);
+        }
+        Ok(rows.iter().map(budget_policy_view).collect())
     }
 
     async fn upsert_provider_profile(
@@ -761,6 +861,146 @@ impl AiConfigurationService for OrmAiConfigurationService {
             .map_err(map_transaction)?;
         Ok(retention_policy_view(&record))
     }
+
+    async fn upsert_budget_policy(
+        &self,
+        principal: &AuthPrincipal,
+        mut input: UpsertAiBudgetPolicyInput,
+    ) -> Result<AiBudgetPolicyView, AiError> {
+        self.require_recent_mfa(principal)?;
+        let scope: AiScope = input.scope.clone().into();
+        self.require_access(
+            principal,
+            &scope,
+            AiConfigurationAction::ManageBudgetPolicies,
+        )
+        .await?;
+        let limits = self.budget_policy_limits.ok_or_else(|| {
+            AiError::InvalidConfiguration("budget-policy management is not enabled".to_owned())
+        })?;
+        normalize_and_validate_budget_policy_input(&mut input, limits.maximum_ceiling())?;
+        let exact_scope_key = scope_key(&scope);
+        let actor_kind = principal_kind(principal);
+        let actor_subject = principal.subject().to_owned();
+        let id = input.id;
+        let expected_version = input.expected_version;
+        let maximum_policies = i64::try_from(limits.maximum_policies_per_scope())
+            .map_err(|_| AiError::InvalidConfiguration("invalid policy limit".to_owned()))?;
+        let record = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let record = match (id, expected_version) {
+                        (None, None) => {
+                            let count = tx
+                                .query::<AiBudgetPolicyRecord>()
+                                .filter(AiBudgetPolicyRecordWhereInput {
+                                    scope_key: Some(StringFilter {
+                                        eq: Some(exact_scope_key.clone()),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .count()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if count >= maximum_policies {
+                                return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+                            }
+                            tx.insert::<AiBudgetPolicyRecord>(CreateAiBudgetPolicyRecordInput {
+                                scope_key: exact_scope_key,
+                                scope_kind: scope.kind,
+                                scope_id: scope.id,
+                                tenant_id: scope.tenant_id,
+                                principal_kind: input.principal_kind,
+                                principal_subject: input.principal_subject,
+                                interval_kind: input.interval.as_str().to_owned(),
+                                maximum_input_tokens: input.maximum_input_tokens,
+                                maximum_output_tokens: input.maximum_output_tokens,
+                                maximum_tool_units: input.maximum_tool_units,
+                                maximum_image_units: input.maximum_image_units,
+                                maximum_cost_microunits: input.maximum_cost_microunits,
+                                maximum_runs: input.maximum_runs,
+                                enabled: input.enabled,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        }
+                        (Some(id), Some(expected_version)) if expected_version >= 0 => {
+                            let current = tx
+                                .find_by_id::<AiBudgetPolicyRecord>(&id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if current.scope_key != exact_scope_key
+                                || current.scope_kind != scope.kind
+                                || current.scope_id != scope.id
+                                || current.tenant_id != scope.tenant_id
+                                || current.principal_kind != input.principal_kind
+                                || current.principal_subject != input.principal_subject
+                                || current.interval_kind != input.interval.as_str()
+                            {
+                                return Err(OrmPublicError::not_found());
+                            }
+                            match tx
+                                .compare_and_swap::<AiBudgetPolicyRecord>(
+                                    &id,
+                                    expected_version,
+                                    AiBudgetPolicyRecordWhereInput {
+                                        scope_key: Some(StringFilter {
+                                            eq: Some(exact_scope_key),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    UpdateAiBudgetPolicyRecordInput {
+                                        maximum_input_tokens: Some(input.maximum_input_tokens),
+                                        maximum_output_tokens: Some(input.maximum_output_tokens),
+                                        maximum_tool_units: Some(input.maximum_tool_units),
+                                        maximum_image_units: Some(input.maximum_image_units),
+                                        maximum_cost_microunits: Some(
+                                            input.maximum_cost_microunits,
+                                        ),
+                                        maximum_runs: Some(input.maximum_runs),
+                                        enabled: Some(input.enabled),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?
+                            {
+                                ConditionalUpdateOutcome::Updated(record) => record,
+                                ConditionalUpdateOutcome::NotFound => {
+                                    return Err(OrmPublicError::not_found());
+                                }
+                                ConditionalUpdateOutcome::Conflict => {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            }
+                        }
+                        _ => return Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    };
+                    insert_audit(
+                        tx,
+                        AuditFact {
+                            actor_principal_kind: &actor_kind,
+                            actor_subject: &actor_subject,
+                            action: "ai.budget_policy.upsert",
+                            resource_kind: "budget_policy",
+                            resource_reference: &record.id.to_string(),
+                            outcome: "allowed",
+                            reason_code: "budget_policy_updated",
+                            policy_version: Some(record.row_version.to_string()),
+                        },
+                    )
+                    .await?;
+                    Ok(record)
+                })
+            })
+            .await
+            .map_err(map_transaction)?;
+        Ok(budget_policy_view(&record))
+    }
 }
 
 #[async_trait]
@@ -938,6 +1178,35 @@ fn retention_policy_view(record: &AiRetentionPolicyRecord) -> AiRetentionPolicyV
     }
 }
 
+fn budget_policy_view(record: &AiBudgetPolicyRecord) -> AiBudgetPolicyView {
+    AiBudgetPolicyView {
+        id: record.id,
+        scope_kind: record.scope_kind.clone(),
+        scope_id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+        principal_kind: record.principal_kind.clone(),
+        principal_subject: record.principal_subject.clone(),
+        interval_kind: record.interval_kind.clone(),
+        maximum_input_tokens: record.maximum_input_tokens,
+        maximum_output_tokens: record.maximum_output_tokens,
+        maximum_tool_units: record.maximum_tool_units,
+        maximum_image_units: record.maximum_image_units,
+        maximum_cost_microunits: record.maximum_cost_microunits,
+        maximum_runs: record.maximum_runs,
+        enabled: record.enabled,
+        row_version: record.row_version,
+        updated_at: record.updated_at,
+    }
+}
+
+fn exact_scope_key_for_record(record: &AiBudgetPolicyRecord) -> String {
+    scope_key(&AiScope {
+        kind: record.scope_kind.clone(),
+        id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+    })
+}
+
 fn profile_scope(record: &AiProviderProfileRecord) -> AiScope {
     AiScope {
         kind: record.scope_kind.clone(),
@@ -947,32 +1216,7 @@ fn profile_scope(record: &AiProviderProfileRecord) -> AiScope {
 }
 
 pub(crate) fn scope_key(scope: &AiScope) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"graphql-orm-ai/scope/v1\0");
-    for value in [
-        Some(scope.kind.as_str()),
-        Some(scope.id.as_str()),
-        scope.tenant_id.as_deref(),
-    ] {
-        match value {
-            Some(value) => {
-                hash.update([1]);
-                hash.update((value.len() as u64).to_be_bytes());
-                hash.update(value.as_bytes());
-            }
-            None => hash.update([0]),
-        }
-    }
-    hex::encode(hash.finalize())
-}
-
-/// Returns the stable non-secret persistence identity for an AI scope.
-///
-/// This value supports dependency-owned migration diagnostics and exact
-/// configuration matching. It proves neither scope validity nor caller
-/// authorization and must never be used in place of host access policy.
-pub fn ai_scope_key(scope: &AiScope) -> String {
-    scope_key(scope)
+    crate::ai_scope_key(scope)
 }
 
 fn validate_retention_input(input: &SetAiRetentionPolicyInput) -> Result<(), AiError> {
@@ -994,6 +1238,68 @@ fn validate_retention_input(input: &SetAiRetentionPolicyInput) -> Result<(), AiE
     {
         return Err(AiError::InvalidInput(
             "invalid AI retention policy bounds".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_and_validate_budget_policy_input(
+    input: &mut UpsertAiBudgetPolicyInput,
+    maximum: AiBudgetAmounts,
+) -> Result<(), AiError> {
+    if input.id.is_some_and(|id| id.is_nil())
+        || input.expected_version.is_some_and(|version| version < 0)
+        || input.id.is_some() != input.expected_version.is_some()
+        || input.principal_kind.is_some() != input.principal_subject.is_some()
+    {
+        return Err(AiError::InvalidInput(
+            "invalid AI budget policy identity".to_owned(),
+        ));
+    }
+    if let (Some(kind), Some(subject)) = (
+        input.principal_kind.as_mut(),
+        input.principal_subject.as_mut(),
+    ) {
+        *kind = kind.trim().to_owned();
+        *subject = subject.trim().to_owned();
+        let api_token_kind = kind.strip_prefix("api_token:");
+        let valid_kind = kind == "user"
+            || api_token_kind.is_some_and(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'_' | b'-')
+                    })
+            });
+        if !valid_kind
+            || subject.is_empty()
+            || subject.len() > 512
+            || subject.chars().any(char::is_control)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid AI budget policy principal".to_owned(),
+            ));
+        }
+    }
+    let configured = [
+        (input.maximum_input_tokens, maximum.input_tokens),
+        (input.maximum_output_tokens, maximum.output_tokens),
+        (input.maximum_tool_units, maximum.tool_units),
+        (input.maximum_image_units, maximum.image_units),
+        (input.maximum_cost_microunits, maximum.cost_microunits),
+        (input.maximum_runs, maximum.runs),
+    ];
+    if !configured.iter().any(|(value, _)| value.is_some())
+        || configured.into_iter().any(|(value, hard_maximum)| {
+            value.is_some_and(|value| {
+                u64::try_from(value).map_or(true, |value| value > hard_maximum)
+            })
+        })
+    {
+        return Err(AiError::InvalidInput(
+            "invalid AI budget policy ceilings".to_owned(),
         ));
     }
     Ok(())
