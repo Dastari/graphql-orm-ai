@@ -6,14 +6,15 @@
 cargo fmt --check
 cargo test --features provider-openai
 cargo clippy --all-targets --features provider-openai -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai --no-deps
+RUSTDOCFLAGS="-D warnings -D missing_docs" \
+  cargo doc --features provider-openai --no-deps
 ```
 
 Check the optional naming contract independently:
 
 ```bash
 cargo test --features graphql-case-pascal --test graphql_naming
-RUSTDOCFLAGS="-D warnings" \
+RUSTDOCFLAGS="-D warnings -D missing_docs" \
   cargo doc --features graphql-case-pascal --no-deps
 ```
 
@@ -36,9 +37,10 @@ database URL is never accepted. No current check needs a PostgreSQL server.
 
 ## Rustdoc
 
-The crate denies rustdoc warnings in CI. Public APIs need useful documentation,
-not placeholder comments. Fallible methods document `# Errors`; proof types
-explain the exact binding they establish and any checks that still remain.
+The crate denies rustdoc warnings and missing public documentation in CI.
+Public APIs need useful documentation, not placeholder comments. Fallible
+methods document `# Errors`; proof types explain the exact binding they
+establish and any checks that still remain.
 
 Private ORM derive output is kept in the private persistence module and is the
 only scoped exception to generated missing-doc warnings.

@@ -31,8 +31,9 @@ release/base branch. Persistent schema changes also require a new
 1. Confirm one exact reviewed dependency universe and full Git revisions for
    unpublished sibling crates.
 2. Run `scripts/check-release-policy.sh <release-base>`.
-3. Run formatting, tests, warnings-denied Clippy and rustdoc, PascalCase SDL,
-   and compile-only backend checks from `docs/development.md`.
+3. Run formatting, tests, warnings-denied Clippy, warnings- and
+   missing-docs-denied Rustdoc, PascalCase SDL, and compile-only backend checks
+   from `docs/development.md`.
 4. Run `cargo-semver-checks` against the reviewed baseline.
 5. Review GraphQL SDL, schema-module metadata/fingerprint, migration and restore
    behavior, backup inclusion, and public error changes.

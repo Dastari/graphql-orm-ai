@@ -35,8 +35,8 @@ jobs:
       - run: cargo check --no-default-features --features postgres
       - run: cargo check --no-default-features --features mssql
       - run: cargo clippy --all-targets --features provider-openai -- -D warnings
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai --no-deps
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --features graphql-case-pascal --no-deps
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features provider-openai --no-deps
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features graphql-case-pascal --no-deps
 
   release-policy:
     if: github.event_name == 'pull_request'

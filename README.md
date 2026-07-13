@@ -232,8 +232,8 @@ Every user-visible change updates [CHANGELOG.md](CHANGELOG.md). Every public
 Rust/GraphQL/configuration/security/persistence/restore contract change also
 updates [MIGRATION.md](MIGRATION.md), even when no data migration is required.
 CI enforces those files, crate/schema version movement, `cargo-semver-checks`,
-warnings-denied Rustdoc, and the PascalCase SDL contract. Repository rules are
-recorded in [AGENTS.md](AGENTS.md).
+warnings- and missing-docs-denied Rustdoc, and the PascalCase SDL contract.
+Repository rules are recorded in [AGENTS.md](AGENTS.md).
 
 ## License
 
