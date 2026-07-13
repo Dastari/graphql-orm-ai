@@ -1,0 +1,8 @@
+/target/
+*.profraw
+.env
+.env.*
+!.env.example
+*.key
+*-key.txt
+credentials*.json

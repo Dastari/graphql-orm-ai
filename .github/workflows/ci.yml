@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-and-compile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: graphql-orm-ai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: graphql-orm-ai
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/graphql-orm
+          path: graphql-orm
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/agql-auth
+          path: agql-auth
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo test --features provider-openai
+      - run: cargo test --features graphql-case-pascal --test graphql_naming
+      - run: cargo check --no-default-features --features postgres
+      - run: cargo check --no-default-features --features mssql
+      - run: cargo clippy --all-targets --features provider-openai -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --features graphql-case-pascal --no-deps
+
+  release-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: graphql-orm-ai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: graphql-orm-ai
+          fetch-depth: 0
+      - run: scripts/check-release-policy.sh "${{ github.event.pull_request.base.sha }}"
+
+  semver:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: graphql-orm-ai
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/graphql-orm
+          path: graphql-orm
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/agql-auth
+          path: agql-auth
+      - name: Create baseline worktree
+        run: git -C graphql-orm-ai worktree add ../graphql-orm-ai-baseline "${{ github.event.pull_request.base.sha }}"
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          manifest-path: graphql-orm-ai/Cargo.toml
+          baseline-root: graphql-orm-ai-baseline
+          feature-group: default-features
