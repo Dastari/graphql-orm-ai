@@ -82,11 +82,12 @@ redacted.
 
 The concrete worker also binds attempt ID, owner, expiry, state, and row version
 on every child or terminal write. Lease expiry before `Running` is safe to
-requeue. After start, only an exact linked final-output checkpoint may change
-the ordinary `RecoveryRequired` result: recovery verifies its hash,
-attempt/generation, budget reference, and complete protected assistant message
-before finalizing. Successful model output, bounded blocks, event, checkpoint,
-and renewed run fence commit atomically.
+requeue. After start, an exact linked final-output checkpoint may be finalized,
+and an exact completed read-only tool batch may be requeued for one current-
+authority adoption. Recovery verifies hashes, original attempt/generation,
+settled budget, and the corresponding complete durable rows. Successful model
+output, bounded blocks, event, checkpoint, and renewed run fence commit
+atomically.
 
 The read-only coordinator heartbeats the current fence while provider
 transport is pending and stops immediately when that proof is lost. Provider,
@@ -95,9 +96,11 @@ After a provider result is accepted, its settled budget, normalized content,
 tool calls, scope/route, and loop state are protected and checkpointed before
 tool/output consumption. A complete tool batch is checkpointed only after one
 transaction verifies every protected result and exact egress audit. These
-checkpoints remain bound to the original attempt/generation; until the separate
-adoption proof exists, expired non-final work still becomes
-`RecoveryRequired`.
+checkpoints remain bound to the original attempt/generation. A replacement
+worker can adopt only a complete tool batch after reopening every protected
+value and validating the original durable evidence under current access. It
+must atomically consume that link before provider transport. Provider-turn and
+partial-batch work still becomes `RecoveryRequired`.
 Live-delta batches contain sensitive plaintext inside the trusted process;
 coalescing supplies only UTF-8/time/byte bounds and never authorizes delivery.
 Until protected fenced delta-event persistence is wired, batches must not be

@@ -2294,6 +2294,26 @@ mod tests {
             .expect("checkpoint should exist");
         assert_eq!(checkpoint.checkpoint_kind, "tool_batch_persisted");
         assert!(checkpoint.protected_state.is_some());
+        let adopted = checkpoint_service
+            .adopt_tool_batch(&batch_lease)
+            .await
+            .expect("current authority should validate the exact tool batch")
+            .expect("linked tool batch should be adoptable");
+        assert_eq!(adopted.checkpoint_id(), checkpoint_id);
+        assert_eq!(adopted.provider_turns(), 1);
+        assert_eq!(adopted.total_tool_calls(), 1);
+        assert_eq!(adopted.scope(), &fixture.scope);
+        let batch_lease = checkpoint_service
+            .consume_before_provider(&batch_lease, adopted.checkpoint_id())
+            .await
+            .expect("validated checkpoint should be consumed once");
+        assert_eq!(batch_lease.latest_checkpoint_id(), None);
+        assert!(matches!(
+            checkpoint_service
+                .consume_before_provider(&batch_lease, checkpoint_id)
+                .await,
+            Err(AiError::Conflict)
+        ));
         let descriptor = fixture
             .runtime
             .tool_catalog()

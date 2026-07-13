@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReference};
@@ -85,8 +86,8 @@ impl AiRunServiceLimits {
 ///
 /// Fields are private so callers cannot manufacture a lease. The value alone
 /// does not authorize a write: every service operation re-reads the run and
-/// verifies its run ID, attempt ID, generation, owner, expiry, state, and row
-/// version in a state-machine transaction.
+/// verifies its run ID, attempt ID, generation, owner, expiry, state, linked
+/// checkpoint, and row version in a state-machine transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiRunLease {
     run_id: AiRunId,
@@ -100,6 +101,7 @@ pub struct AiRunLease {
     row_version: i64,
     state: AiRunState,
     retry_count: u32,
+    latest_checkpoint_id: Option<Uuid>,
 }
 
 impl AiRunLease {
@@ -154,6 +156,14 @@ impl AiRunLease {
         self.retry_count
     }
 
+    /// Latest fenced coordinator checkpoint linked to this lease, if any.
+    ///
+    /// A checkpoint ID alone is not resume authority. It must be validated and
+    /// adopted by the protected checkpoint service under the current fence.
+    pub const fn latest_checkpoint_id(&self) -> Option<Uuid> {
+        self.latest_checkpoint_id
+    }
+
     #[cfg(test)]
     pub(crate) fn test_running(principal_reference: PrincipalReference) -> Self {
         Self {
@@ -168,7 +178,22 @@ impl AiRunLease {
             row_version: 1,
             state: AiRunState::Running,
             retry_count: 0,
+            latest_checkpoint_id: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_checkpoint(&self, checkpoint_id: Uuid) -> Self {
+        let mut lease = self.clone();
+        lease.latest_checkpoint_id = Some(checkpoint_id);
+        lease
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_without_checkpoint(&self) -> Self {
+        let mut lease = self.clone();
+        lease.latest_checkpoint_id = None;
+        lease
     }
 }
 
@@ -237,6 +262,9 @@ impl AiRunCompletion {
 pub struct AiRunRecoveryReport {
     /// Claims that expired before provider execution and were safely requeued.
     pub requeued: u32,
+    /// Expired running attempts whose exact completed read-only tool batch was
+    /// retained for current-principal validation and one fenced adoption.
+    pub checkpoint_requeued: u32,
     /// Claims moved to manual/privileged recovery because external execution
     /// may have happened.
     pub recovery_required: u32,
@@ -636,10 +664,13 @@ impl OrmAiRunService {
     ///
     /// A `Leased` claim is known not to have started provider orchestration and
     /// can be requeued. A `Running` attempt with an exact same-transaction
-    /// protected-output checkpoint is safely finalized. Every other running or
-    /// waiting state becomes `RecoveryRequired`; it is never silently replayed.
-    /// Malformed checkpoint/active-lease data fails the whole pass so startup
-    /// remains closed.
+    /// protected-output checkpoint is safely finalized. An exact completed
+    /// read-only tool-batch checkpoint can be requeued for protected adoption;
+    /// it remains unusable until current-principal revalidation and is consumed
+    /// before the next provider call. Every other running or waiting state
+    /// becomes `RecoveryRequired`; it is never silently replayed. Malformed
+    /// checkpoint/active-lease data fails the whole pass so startup remains
+    /// closed.
     ///
     /// # Errors
     ///
@@ -681,7 +712,7 @@ impl OrmAiRunService {
                             continue;
                         }
                         let current_state = persisted_state(&current)?;
-                        let final_checkpoint = if let Some(checkpoint_id) =
+                        let (final_checkpoint, adoptable_tool_batch) = if let Some(checkpoint_id) =
                             current.latest_checkpoint_id
                         {
                             let checkpoint = tx
@@ -784,14 +815,132 @@ impl OrmAiRunService {
                                 {
                                     return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                                 }
-                                Some(checkpoint.provider_response_id)
+                                (Some(checkpoint.provider_response_id), false)
+                            } else if checkpoint.checkpoint_kind == "tool_batch_persisted" {
+                                let provider_response_id = checkpoint
+                                    .provider_response_id
+                                    .as_deref()
+                                    .filter(|value| valid_provider_reference(value))
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                let budget_reservation_id =
+                                    checkpoint.budget_reservation_id.ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                let protected_state = checkpoint
+                                    .protected_state
+                                    .as_ref()
+                                    .filter(|state| {
+                                        serde_json::to_vec(state)
+                                            .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
+                                    })
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                if checkpoint.assistant_message_id.is_some() {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                let reservation = tx
+                                    .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                if reservation.session_id != current.session_id
+                                    || reservation.run_id != current.id
+                                    || reservation.attempt_id != lease.attempt_id
+                                    || reservation.lease_generation != lease.lease_generation
+                                    || reservation.state != "committed"
+                                    || reservation.actual_runs != Some(1)
+                                    || reservation.reconciled_at.is_none()
+                                    || reservation.provider_kind.trim().is_empty()
+                                    || reservation.provider_model.trim().is_empty()
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                let expected_hash = coordinator_checkpoint_hash(
+                                    lease.run_id,
+                                    lease.attempt_id,
+                                    lease.lease_generation,
+                                    checkpoint.id,
+                                    &checkpoint.checkpoint_kind,
+                                    &reservation.provider_kind,
+                                    &reservation.provider_model,
+                                    Some(provider_response_id),
+                                    budget_reservation_id,
+                                    protected_state,
+                                )
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                                if checkpoint.checkpoint_hash != expected_hash {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                let calls = tx
+                                    .query::<AiToolCallRecord>()
+                                    .filter(AiToolCallRecordWhereInput {
+                                        run_id: Some(UuidFilter {
+                                            eq: Some(current.id),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .limit(4_097)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                let relevant = calls
+                                    .iter()
+                                    .filter(|call| {
+                                        call.lease_generation == lease.lease_generation
+                                            && call.provider_response_id.as_deref()
+                                                == Some(provider_response_id)
+                                            && call.budget_reservation_id
+                                                == Some(budget_reservation_id)
+                                    })
+                                    .collect::<Vec<_>>();
+                                if relevant.is_empty()
+                                    || relevant.len() > 4_096
+                                    || relevant.iter().any(|call| {
+                                        !matches!(
+                                            call.state.as_str(),
+                                            "completed" | "execution_failed"
+                                        ) || call.protected_result.is_none()
+                                            || call.result_egress_decision_id.is_none()
+                                            || call.result_egress_manifest_hash.is_none()
+                                            || call.completed_at.is_none()
+                                    })
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                for call in relevant {
+                                    let step = tx
+                                        .find_by_id::<AiRunStepRecord>(&call.id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                        .ok_or_else(|| {
+                                            OrmPublicError::new(OrmErrorCode::InternalError)
+                                        })?;
+                                    if step.run_id != current.id
+                                        || step.lease_generation != lease.lease_generation
+                                        || step.state != call.state
+                                        || step.finished_at.is_none()
+                                    {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    }
+                                }
+                                (None, true)
                             } else {
-                                None
+                                (None, false)
                             }
                         } else {
-                            None
+                            (None, false)
                         };
-                        if final_checkpoint.is_some() && current_state != AiRunState::Running {
+                        if (final_checkpoint.is_some() || adoptable_tool_batch)
+                            && current_state != AiRunState::Running
+                        {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                         let (
@@ -833,6 +982,32 @@ impl OrmAiRunService {
                                 None,
                                 provider_response_id,
                             )
+                        } else if adoptable_tool_batch {
+                            let retry_count = u32::try_from(current.retry_count)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if retry_count >= limits.maximum_run_retries {
+                                report.recovery_required =
+                                    report.recovery_required.saturating_add(1);
+                                (
+                                    AiRunState::RecoveryRequired,
+                                    "checkpoint_adoption_retry_exhausted",
+                                    current.retry_count,
+                                    None,
+                                    None,
+                                )
+                            } else {
+                                report.checkpoint_requeued =
+                                    report.checkpoint_requeued.saturating_add(1);
+                                (
+                                    AiRunState::RetryScheduled,
+                                    "checkpoint_adoption_ready",
+                                    current.retry_count.checked_add(1).ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?,
+                                    Some(now.unix_timestamp()),
+                                    None,
+                                )
+                            }
                         } else {
                             report.recovery_required = report.recovery_required.saturating_add(1);
                             (
@@ -1115,6 +1290,40 @@ impl OrmAiRunService {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                     }
+                    if checkpoint.checkpoint_kind == "tool_batch_persisted" {
+                        let expected_ids = checkpoint
+                            .completed_tools
+                            .iter()
+                            .map(|tool| tool.id)
+                            .collect::<BTreeSet<_>>();
+                        let calls = tx
+                            .query::<AiToolCallRecord>()
+                            .filter(AiToolCallRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    eq: Some(lease.run_id.0),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(4_097)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let actual_ids = calls
+                            .iter()
+                            .filter(|call| {
+                                call.lease_generation == lease.lease_generation
+                                    && call.provider_response_id.as_deref()
+                                        == checkpoint.provider_response_id.as_deref()
+                                    && call.budget_reservation_id
+                                        == Some(checkpoint.budget_reservation_id)
+                            })
+                            .map(|call| call.id)
+                            .collect::<BTreeSet<_>>();
+                        if actual_ids != expected_ids {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
                     let expiry = now
                         .checked_add(lease_ttl)
                         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -1153,6 +1362,75 @@ impl OrmAiRunService {
                     .await
                     .map_err(OrmPublicError::from)?;
                     lease_from_record(&updated_run)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn consume_adoption_checkpoint(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<AiRunLease, AiError> {
+        let now = canonical_second(self.clock.now());
+        let lease_ttl = self.limits.lease_ttl;
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || current.latest_checkpoint_id != Some(checkpoint_id)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let checkpoint = tx
+                        .query::<AiRunCheckpointRecord>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(checkpoint_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_one()
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if checkpoint.run_id != current.id
+                        || checkpoint.checkpoint_kind != "tool_batch_persisted"
+                        || checkpoint.provider_response_id.is_none()
+                        || checkpoint.budget_reservation_id.is_none()
+                        || checkpoint.assistant_message_id.is_some()
+                        || checkpoint.protected_state.is_none()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let expiry = now
+                        .checked_add(lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let update = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(AiRunState::Running.as_str()),
+                            UpdateAiRunRecordInput {
+                                latest_checkpoint_id: Some(None),
+                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    match update {
+                        ConditionalUpdateOutcome::Updated(updated) => lease_from_record(&updated),
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                        }
+                    }
                 })
             })
             .await
@@ -1872,6 +2150,8 @@ impl OrmAiRunService {
                         || current.attempt_id.is_some()
                         || current.lease_owner.is_some()
                         || current.lease_expires_at.is_some()
+                        || (current.error_code.as_deref() == Some("checkpoint_adoption_ready")
+                            && current.latest_checkpoint_id.is_none())
                     {
                         return Ok(Err(AiError::PersistenceFailed));
                     }
@@ -1909,7 +2189,12 @@ impl OrmAiRunService {
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
                                 next_attempt_at: Some(None),
                                 error_code: Some(None),
-                                latest_checkpoint_id: Some(None),
+                                latest_checkpoint_id: Some(
+                                    (current.error_code.as_deref()
+                                        == Some("checkpoint_adoption_ready"))
+                                    .then_some(current.latest_checkpoint_id)
+                                    .flatten(),
+                                ),
                                 ..Default::default()
                             },
                         )
@@ -2047,6 +2332,7 @@ async fn load_and_validate_active_lease(
         || current.row_version != lease.row_version
         || state != lease.state
         || current.retry_count != i64::from(lease.retry_count)
+        || current.latest_checkpoint_id != lease.latest_checkpoint_id
         || current
             .lease_expires_at
             .is_none_or(|expires_at| expires_at <= now.unix_timestamp())
@@ -2087,6 +2373,7 @@ fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmPublicError>
         state: persisted_state(record)?,
         retry_count: u32::try_from(record.retry_count)
             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
+        latest_checkpoint_id: record.latest_checkpoint_id,
     })
 }
 
@@ -2128,6 +2415,12 @@ fn validate_worker_id(worker_id: &str) -> Result<(), AiError> {
     Ok(())
 }
 
+fn valid_provider_reference(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAXIMUM_PROVIDER_REFERENCE_BYTES
+        && value.bytes().all(|byte| !byte.is_ascii_control())
+}
+
 pub(crate) fn final_output_checkpoint_hash(
     run_id: AiRunId,
     attempt_id: Uuid,
@@ -2151,6 +2444,46 @@ pub(crate) fn final_output_checkpoint_hash(
     hasher.update([0]);
     hasher.update(budget_reservation_id.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn coordinator_checkpoint_hash(
+    run_id: AiRunId,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    checkpoint_id: Uuid,
+    kind: &str,
+    provider_kind: &str,
+    provider_model: &str,
+    provider_response_id: Option<&str>,
+    budget_reservation_id: Uuid,
+    protected_state: &serde_json::Value,
+) -> Result<String, AiError> {
+    let provider_kind_hash_value = match provider_kind {
+        "openai" => "open_ai",
+        "openai_compatible" => "open_ai_compatible",
+        "anthropic" | "xai" | "ollama" => provider_kind,
+        _ => return Err(AiError::PersistenceFailed),
+    };
+    let protected_state_hash = hex::encode(Sha256::digest(
+        serde_json::to_vec(protected_state).map_err(|_| AiError::PersistenceFailed)?,
+    ));
+    let redacted = serde_json::json!({
+        "checkpointId": checkpoint_id,
+        "runId": run_id.0,
+        "attemptId": attempt_id,
+        "leaseGeneration": lease_generation,
+        "kind": kind,
+        // Preserve the Serde representation used by the original 0.6.0
+        // checkpoint writer, while persistence/configuration use `as_str()`.
+        "providerKind": provider_kind_hash_value,
+        "providerModel": provider_model,
+        "providerResponseId": provider_response_id,
+        "budgetReservationId": budget_reservation_id,
+        "protectedStateHash": protected_state_hash,
+    });
+    let encoded = serde_json::to_vec(&redacted).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 fn valid_safe_code(code: &str) -> bool {
@@ -2557,6 +2890,183 @@ mod tests {
             outcomes[0].provider_response_id.as_deref(),
             Some(provider_response_id)
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_requeues_and_preserves_an_exact_completed_tool_batch() {
+        let fixture = fixture().await;
+        let run_id = seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("worker-tool-checkpoint")
+            .await
+            .expect("claim should succeed")
+            .expect("run should be eligible");
+        let lease = fixture
+            .service
+            .start(&lease)
+            .await
+            .expect("claim should start");
+        let provider_response_id = "response-tool-checkpoint";
+        let reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id: lease.session_id().0,
+                run_id: lease.run_id().0,
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: "openai".to_owned(),
+                provider_model: "checkpoint-test".to_owned(),
+                pricing_policy_version: "checkpoint-pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 1,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(1),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: "tool-checkpoint-test".to_owned(),
+                state: "committed".to_owned(),
+                expires_at: (fixture.clock.now() + Duration::minutes(5)).unix_timestamp(),
+                reconciled_at: Some(fixture.clock.now().unix_timestamp()),
+            },
+        )
+        .await
+        .expect("committed test budget should insert");
+        let tool_call_id = Uuid::new_v4();
+        AiRunStepRecord::insert(
+            &fixture.database,
+            CreateAiRunStepRecordInput {
+                id: tool_call_id,
+                run_id: lease.run_id().0,
+                step_index: 0,
+                step_kind: "application_tool".to_owned(),
+                state: "completed".to_owned(),
+                lease_generation: lease.lease_generation(),
+                started_at: Some(fixture.clock.now().unix_timestamp()),
+                finished_at: Some(fixture.clock.now().unix_timestamp()),
+                error_code: None,
+            },
+        )
+        .await
+        .expect("completed tool step should insert");
+        AiToolCallRecord::insert(
+            &fixture.database,
+            CreateAiToolCallRecordInput {
+                id: tool_call_id,
+                run_id: lease.run_id().0,
+                provider_call_key: "tool-checkpoint-call-key".to_owned(),
+                provider_call_id: "call-tool-checkpoint".to_owned(),
+                provider_kind: Some("openai".to_owned()),
+                provider_model: Some("checkpoint-test".to_owned()),
+                provider_response_id: Some(provider_response_id.to_owned()),
+                budget_reservation_id: Some(reservation.id),
+                provider_turn_index: 0,
+                tool_call_index: 0,
+                tool_id: "records.read".to_owned(),
+                tool_fingerprint: "tool-fingerprint".to_owned(),
+                protected_arguments: serde_json::json!({"protected": true}),
+                argument_hash: "argument-hash".to_owned(),
+                protected_result: Some(serde_json::json!({"protected": true})),
+                risk: "read_only".to_owned(),
+                authorization_code: Some("allowed".to_owned()),
+                authorization_policy_version: Some("tool-policy-v1".to_owned()),
+                authorization_state_digest: Some("authorization-state".to_owned()),
+                disclosure_schema_fingerprint: Some("disclosure-v1".to_owned()),
+                result_classification: Some("internal".to_owned()),
+                result_egress_decision_id: Some(Uuid::new_v4()),
+                result_egress_manifest_hash: Some("manifest-hash".to_owned()),
+                application_audit_ref: Some("application-audit".to_owned()),
+                approval_id: None,
+                idempotency_key: None,
+                correlation_id: Some("tool-checkpoint-correlation".to_owned()),
+                causation_id: Some(lease.input_message_id().to_string()),
+                delegation_reference: None,
+                lease_generation: lease.lease_generation(),
+                state: "completed".to_owned(),
+                completed_at: Some(fixture.clock.now().unix_timestamp()),
+            },
+        )
+        .await
+        .expect("completed tool call should insert");
+        let checkpoint_id = Uuid::new_v4();
+        let protected_state = serde_json::json!({
+            "protection": "database_managed",
+            "value": {"bounded": true},
+        });
+        let checkpoint_hash = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            checkpoint_id,
+            "tool_batch_persisted",
+            "openai",
+            "checkpoint-test",
+            Some(provider_response_id),
+            reservation.id,
+            &protected_state,
+        )
+        .expect("checkpoint hash should encode");
+        let checkpointed = fixture
+            .service
+            .append_coordinator_checkpoint(
+                &lease,
+                PreparedCoordinatorCheckpoint {
+                    id: checkpoint_id,
+                    checkpoint_kind: "tool_batch_persisted".to_owned(),
+                    provider_kind: "openai".to_owned(),
+                    provider_model: "checkpoint-test".to_owned(),
+                    provider_response_id: Some(provider_response_id.to_owned()),
+                    budget_reservation_id: reservation.id,
+                    protected_state,
+                    checkpoint_hash,
+                    completed_tools: vec![PreparedCoordinatorCheckpointTool {
+                        id: tool_call_id,
+                        provider_call_id: "call-tool-checkpoint".to_owned(),
+                        tool_id: "records.read".to_owned(),
+                        result_egress_manifest_hash: "manifest-hash".to_owned(),
+                    }],
+                },
+            )
+            .await
+            .expect("tool batch checkpoint should commit");
+        assert_eq!(checkpointed.latest_checkpoint_id(), Some(checkpoint_id));
+
+        fixture.clock.advance_seconds(61);
+        let report = fixture
+            .service
+            .recover_expired_leases()
+            .await
+            .expect("exact tool checkpoint should requeue for adoption");
+        assert_eq!(report.checkpoint_requeued, 1);
+        assert_eq!(report.recovery_required, 0);
+        let retry = run_record(&fixture, run_id).await;
+        assert_eq!(retry.state, AiRunState::RetryScheduled.as_str());
+        assert_eq!(retry.latest_checkpoint_id, Some(checkpoint_id));
+        assert_eq!(
+            retry.error_code.as_deref(),
+            Some("checkpoint_adoption_ready")
+        );
+
+        let replacement = fixture
+            .service
+            .claim_next("worker-tool-adopter")
+            .await
+            .expect("replacement claim should succeed")
+            .expect("checkpoint retry should be eligible");
+        assert_eq!(replacement.lease_generation(), 2);
+        assert_eq!(replacement.latest_checkpoint_id(), Some(checkpoint_id));
     }
 
     #[tokio::test]

@@ -84,13 +84,14 @@ trusted `AiReadOnlyAgentTurnPlanner` that constructs initial turns with
 `new_with_tools` and consumes exact later `AiAgentContinuation` values with
 `new_continuation_with_tools`. Configure its heartbeat interval comfortably
 shorter than the run-service lease TTL. Also supply an
-`OrmAiCoordinatorCheckpointService` as the required
-`AiAgentCheckpointWriter`, using the same principal/access/protection
-boundaries as transcript persistence. A successful coordinator outcome means
+`OrmAiCoordinatorCheckpointService` as both the required
+`AiAgentCheckpointWriter` and `AiAgentCheckpointAdopter`, using the same
+principal/access/protection boundaries as transcript persistence. A successful coordinator outcome means
 the terminal/recovery state was durably committed; a lost fence returns an
-error and must not be followed by another write from that worker. Protected
-non-final checkpoints are not yet cross-generation resume authority; see the
-[checkpoint guide](coordinator-checkpoints.md).
+error and must not be followed by another write from that worker. Only an exact
+completed read-only tool-batch checkpoint has cross-generation adoption
+authority, and only after fresh protected validation; see the [checkpoint
+guide](coordinator-checkpoints.md).
 
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run
@@ -110,7 +111,7 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Attachment handling,
-budget/usage GraphQL management, partial-batch restart adoption, durable live
+budget/usage GraphQL management, provider-turn/partial-batch restart adoption, durable live
 delta persistence, and top-level approval-wait coordination remain under
 implementation. The proposal/approval GraphQL lifecycles and consequential
 executor are implemented; approval consumption is always followed by fresh

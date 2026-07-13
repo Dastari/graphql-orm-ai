@@ -13,9 +13,10 @@ read-only application-tool/result, bounded coordinator/continuation, protected
 output/provider-turn/tool-batch checkpoints, supervised consequential-tool, and
 private remote GraphQL adapter foundations compile and are tested. Protected
 proposal review and exact one-shot approval lifecycles also compile and are
-tested. Cross-generation adoption for exact checkpoints, a top-level
-approval-wait coordinator, and several operational adapters listed below are
-still being implemented.
+tested. Exact completed read-only tool batches can also be adopted across a
+new fenced generation under current authority. Provider-turn/partial-batch
+adoption, a top-level approval-wait coordinator, and several operational
+adapters listed below are still being implemented.
 
 ## What it provides
 
@@ -80,6 +81,11 @@ still being implemented.
   provider turn and complete model-visible read-only tool batch. They bind
   settled usage, loop state, scope/route, exact outputs, and continuation;
   failed checkpoint handoff requires recovery and does not trigger replay.
+- One-shot cross-generation adoption for an exact completed read-only tool
+  batch. Recovery preserves only a hash- and budget-bound complete batch; the
+  new worker freshly reauthorizes, reopens and validates every durable result
+  and egress proof, reconstructs bounded continuation state, and consumes the
+  checkpoint before the next provider transport.
 - UTF-8-safe live-delta coalescing primitives capped at 50 ms / 4 KiB. Durable
   protected delta-event wiring remains gated; a batch alone is not permission
   to disclose content.
@@ -203,8 +209,8 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include cross-generation adoption of validated protected
-provider/tool checkpoints, a top-level supervised approval-wait coordinator,
+Production blockers include provider-turn and partial-tool-batch adoption, a
+top-level supervised approval-wait coordinator,
 durable protected live-delta persistence, authenticated budget-policy/usage
 GraphQL lifecycles,
 per-item proposal review, attachment pipeline, production mutable secret

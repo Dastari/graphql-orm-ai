@@ -39,21 +39,38 @@ has a protected result, has completed unambiguously, and has an exact persisted
 egress decision and manifest hash. Missing, reordered, duplicated, denied, or
 partially executing calls fail closed.
 
-## Recovery boundary
+## Exact completed-batch adoption
 
 `protected_state` is private ORM data and is never exposed through generated
 GraphQL reads. The checkpoint hash binds the run, attempt, generation, kind,
 provider/model/response, budget reservation, checkpoint ID, and protected
 envelope hash.
 
-The current implementation still moves an expired non-final attempt to
-`RecoveryRequired`. A checkpoint proves durable state under its original
-fence; it does not permit a new attempt/generation to adopt that state. Safe
-adoption requires a separate reader to validate the protected payload, original
-budget and tool rows, current principal/policy, new fence, loop counts, and
-provider continuation semantics before issuing a new in-memory proof. Until
-that reader exists, operators must not decrypt/reconstruct a continuation or
-manually requeue an active checkpoint.
+Expired recovery may requeue one `tool_batch_persisted` checkpoint only after
+its redacted hash, committed/reconciled budget, complete protected tool rows,
+and finished run steps validate under the old fence. The replacement lease
+retains the immutable checkpoint ID but receives a new attempt and generation.
+
+`AiAgentCheckpointAdopter` then rehydrates the current principal, rechecks
+session/scope access, resolves the current ready protection policy, and opens
+the checkpoint plus every protected argument/result. The ORM implementation
+compares the original provider result, ordered calls, canonical arguments,
+descriptor fingerprints, disclosure-validated model blocks, exact manifests,
+immutable allow-audit records, counters, scope, and response chain. It resolves
+the principal/policy again after opening before returning the opaque
+`AiAdoptedReadOnlyToolBatch`.
+
+The host planner must build a fresh continuation plan, including new budget and
+egress proofs. Immediately before transport the coordinator atomically clears
+the linked checkpoint through the current row-version fence. A crash before
+that consume can be reconsidered within the retry ceiling; a crash after it is
+conservative external-boundary recovery. The append-only checkpoint remains in
+history, but no longer grants adoption eligibility.
+
+Provider-turn checkpoints, incomplete batches, consequential mutations,
+missing/denied egress, malformed protected state, retry exhaustion, and any
+changed current access/policy remain `RecoveryRequired`. Operators must never
+manually relink a checkpoint or reconstruct a continuation.
 
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already

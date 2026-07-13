@@ -4,6 +4,53 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.11.0 to 0.12.0 and exact tool-batch adoption (crate 0.6.0 to 0.7.0)
+
+This pre-1.0 release makes the read-only coordinator constructor deliberately
+breaking: `AiReadOnlyAgentCoordinator::new` now requires an
+`AiAgentCheckpointAdopter` in addition to `AiAgentCheckpointWriter`. Use the
+same `OrmAiCoordinatorCheckpointService` value for both boundaries unless a
+conforming wrapper preserves its current-principal, protection, durable-record,
+and one-shot consumption checks.
+
+Expired `Running` attempts are now requeued only when their linked checkpoint
+is an exact `tool_batch_persisted` record with a valid protected-envelope hash,
+committed/reconciled provider budget, and complete fenced tool/step rows. The
+replacement claim retains that one checkpoint ID. Before planning or transport,
+the adopter:
+
+- rehydrates the current principal and rechecks session/scope access;
+- reopens the protected checkpoint, tool arguments, and tool results under an
+  unchanged ready protection policy;
+- validates the original attempt/generation, provider response, budget,
+  ordered call IDs, descriptor fingerprints, canonical arguments, disclosure
+  outputs, egress manifests and immutable allow audits;
+- reconstructs the loop counters and exact opaque continuation under the new
+  fence; and
+- atomically clears the linked checkpoint before the next provider call.
+
+If a worker dies before consumption, the exact checkpoint can be considered by
+bounded recovery again. If it dies after consumption or while the next provider
+call may have started, ordinary conservative recovery applies. Provider-turn
+checkpoints, partial tool batches, supervised mutations, exhausted adoption
+retries, and malformed or missing records are never adopted automatically.
+`AiRunRecoveryReport` adds the public `checkpoint_requeued` counter; update
+exhaustive struct construction and report handling.
+
+Advance `AiSchemaModule` to `0.12.0` through the managed `graphql-orm` schema
+manager while workers and provider starts remain closed. There is no physical
+entity, field, index, or constraint change, but the module version must record
+the new persistent meaning of `latest_checkpoint_id`, the
+`checkpoint_adoption_ready` retry marker, and one-shot checkpoint consumption.
+The managed migration may therefore be structurally empty; do not skip its
+module-version/readiness record or relabel an applied `0.11.0` module.
+
+This adds no GraphQL root/SDL or Cargo feature/default. Existing completed
+history needs no rewrite, and existing active provider-turn/partial/malformed
+checkpoints remain closed. No AI row rewrite or application-domain data
+migration is required. Restore reconciliation must validate module `0.12.0`
+before reopening workers.
+
 ## Unreleased: schema module 0.10.0 to 0.11.0
 
 Apply `AiSchemaModule` through the managed `graphql-orm` schema manager with
@@ -23,12 +70,13 @@ verify every protected result, egress decision/manifest hash, run step, provider
 response, and fence in the same transaction. A checkpoint failure after
 external execution becomes `RecoveryRequired`.
 
-These checkpoints do not yet permit cross-generation adoption. Existing active
-pre-`0.11.0` runs and malformed/absent checkpoints must continue through
-privileged recovery; never infer provider output or tool results, replay a
-provider call, or backfill protected state manually. Historical completed runs
-and final-output checkpoints need no rewrite. No application-domain data
-migration is required.
+This schema revision alone does not permit cross-generation adoption. Adoption
+is supplied by the later `0.7.0` runtime contract above and is restricted to
+exact complete read-only tool batches. Existing active pre-`0.11.0` runs and
+malformed/absent checkpoints must continue through privileged recovery; never
+infer provider output or tool results, replay a provider call, or backfill
+protected state manually. Historical completed runs and final-output
+checkpoints need no rewrite. No application-domain data migration is required.
 
 This adds no public GraphQL root or client-visible SDL and changes no Cargo
 feature/default. The AI schema migration is nullable/additive, but the runtime

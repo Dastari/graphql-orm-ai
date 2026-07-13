@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.11.0`) and 37 private records
+- AI schema-module identity (currently version `0.12.0`) and 37 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -85,8 +85,12 @@ production-ready behavior.
 - Protected provider-turn and exact completed-tool-batch checkpoints with
   current principal/policy revalidation, bounded protected state, committed
   budget verification, complete tool/result/egress transaction checks, and
-  coordinator-required persistence before phase handoff. Cross-generation
-  adoption is still closed.
+  coordinator-required persistence before phase handoff.
+- Cross-generation adoption for exact completed read-only tool batches. The
+  ORM adopter reopens and validates original protected arguments/results,
+  budget, ordered tool/step rows, disclosure blocks and immutable egress allow
+  audits under current authority, reconstructs bounded continuation state, and
+  consumes the checkpoint before provider transport.
 - UTF-8-safe visible text/reasoning-summary coalescer primitives enforcing a
   maximum 50 ms / 4 KiB batch and excluding structured/tool events. The
   primitive performs no persistence or disclosure by itself.
@@ -199,12 +203,12 @@ production-ready behavior.
   catalog validation, privileged uncertain-call recovery, retention/purge, and
   telemetry sinks. The ordinary transactional reservation/reconciliation path
   is implemented.
-- Cross-generation adoption for validated protected provider-turn or completed
-  tool-batch checkpoints, partially completed application-tool recovery,
-  ORM-backed protected live-delta persistence, and provider-independent
-  stateless continuation. The bounded coordinator, protected exact stateful
-  checkpoints/continuation, live batching primitive, and final-output crash
-  reconciliation are implemented; all other ambiguous resume remains closed.
+- Cross-generation adoption for validated provider-turn or partially completed
+  application-tool checkpoints, ORM-backed protected live-delta persistence,
+  and provider-independent stateless continuation. Exact completed read-only
+  tool-batch adoption, the bounded coordinator, protected stateful checkpoints/
+  continuation, live batching primitive, and final-output crash reconciliation
+  are implemented; all other ambiguous resume remains closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -223,9 +227,9 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Implement generation adoption only for exact validated replay-safe
-   read-only checkpoints and wire coalesced live batches to protected durable
-   cursor events.
+1. Wire coalesced live batches to protected durable cursor events, while
+   keeping provider-turn and partial-batch adoption closed until provider-
+   specific replay semantics can be proven.
 2. Add the attachment quarantine/scanning/storage pipeline and connect its
    authorized image/file resolution to provider adapters.
 3. Add the per-principal inbox stream and retention/pruning worker, then the

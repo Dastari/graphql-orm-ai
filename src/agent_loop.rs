@@ -74,6 +74,67 @@ impl AiAgentContinuation {
         })
     }
 
+    pub(crate) fn from_checkpoint_value(value: serde_json::Value) -> Result<Self, AiError> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Snapshot {
+            format_version: u32,
+            continuation: ModelContinuation,
+            input: Vec<ModelInputBlock>,
+            transfers: Vec<AiEgressManifest>,
+        }
+
+        let snapshot: Snapshot =
+            serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
+        if snapshot.format_version != 1
+            || snapshot.input.is_empty()
+            || snapshot.input.len() > 4_096
+            || snapshot.input.len() != snapshot.transfers.len()
+        {
+            return Err(AiError::Conflict);
+        }
+        let mut call_ids = BTreeSet::new();
+        for (input, transfer) in snapshot.input.iter().zip(&snapshot.transfers) {
+            let ModelInputBlock::ToolResult {
+                call_id, tool_id, ..
+            } = input
+            else {
+                return Err(AiError::Conflict);
+            };
+            if !valid_provider_reference(call_id)
+                || tool_id.trim().is_empty()
+                || tool_id.len() > 1_024
+                || !call_ids.insert(call_id)
+                || transfer.capability != crate::AiEgressCapability::ToolResult
+            {
+                return Err(AiError::Conflict);
+            }
+        }
+        let ModelContinuation::ProviderResponse { response_id } = &snapshot.continuation;
+        if !valid_provider_reference(response_id) {
+            return Err(AiError::Conflict);
+        }
+        Ok(Self {
+            continuation: snapshot.continuation,
+            input: snapshot.input,
+            transfers: snapshot.transfers,
+        })
+    }
+
+    pub(crate) fn previous_response_id(&self) -> &str {
+        match &self.continuation {
+            ModelContinuation::ProviderResponse { response_id } => response_id,
+        }
+    }
+
+    pub(crate) fn input(&self) -> &[ModelInputBlock] {
+        &self.input
+    }
+
+    pub(crate) fn transfers(&self) -> &[AiEgressManifest] {
+        &self.transfers
+    }
+
     pub(crate) fn apply_with_transfers(
         self,
         request: &mut ModelRequest,
@@ -128,6 +189,38 @@ impl AiAgentLoopGuard {
             output_transfers: BTreeMap::new(),
             terminal: false,
         }
+    }
+
+    pub(crate) fn resume_after_tool_batch(
+        lease: &AiRunLease,
+        limits: AiAgentLoopLimits,
+        provider_turns: u32,
+        total_tool_calls: u32,
+        previous_response_id: &str,
+    ) -> Result<Self, AiError> {
+        if provider_turns == 0
+            || provider_turns > limits.maximum_provider_turns
+            || total_tool_calls == 0
+            || total_tool_calls > limits.maximum_total_tool_calls
+            || !valid_provider_reference(previous_response_id)
+        {
+            return Err(AiError::Conflict);
+        }
+        Ok(Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            limits,
+            provider_turns,
+            total_tool_calls,
+            expected_previous_response_id: Some(previous_response_id.to_owned()),
+            pending_order: Vec::new(),
+            pending_tools: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            output_transfers: BTreeMap::new(),
+            terminal: false,
+        })
     }
 
     /// Accepts the next exactly chained provider result.
@@ -280,4 +373,10 @@ impl AiAgentLoopGuard {
     pub const fn total_tool_calls(&self) -> u32 {
         self.total_tool_calls
     }
+}
+
+fn valid_provider_reference(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 1_024
+        && value.bytes().all(|byte| !byte.is_ascii_control())
 }

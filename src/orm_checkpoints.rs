@@ -8,19 +8,74 @@ use std::sync::Arc;
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReferenceKind, ResolvedPrincipal};
 use async_trait::async_trait;
 use graphql_orm::graphql::errors::OrmPublicError;
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::Duration;
 use uuid::Uuid;
 
-use crate::orm_runs::{PreparedCoordinatorCheckpoint, PreparedCoordinatorCheckpointTool};
+use crate::orm_runs::{
+    PreparedCoordinatorCheckpoint, PreparedCoordinatorCheckpointTool, coordinator_checkpoint_hash,
+};
 use crate::persistence::*;
 use crate::{
-    AiAccessPolicy, AiAgentCheckpointWriter, AiAgentContinuation, AiContentProtectionPolicy,
-    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiPersistedApplicationToolCall,
+    AiAccessPolicy, AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
+    AiAgentContinuation, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
+    AiContentProtector, AiEgressManifest, AiError, AiPersistedApplicationToolCall,
     AiProviderCallResult, AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute,
-    ContentProtectionContext, OrmAiRunService,
+    ContentProtectionContext, ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope,
+    ProviderKind,
 };
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CoordinatorCheckpointPayload {
+    format_version: u32,
+    checkpoint_kind: String,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    correlation_id: String,
+    result_egress_route: serde_json::Value,
+    provider_result: ProviderResultSnapshot,
+    completed_tools: Vec<ToolResultSnapshot>,
+    continuation: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderResultSnapshot {
+    format_version: u32,
+    session_id: Uuid,
+    run_id: Uuid,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    provider_kind: ProviderKind,
+    provider_model: String,
+    provider_response_id: Option<String>,
+    budget_reservation_id: Uuid,
+    previous_response_id: Option<String>,
+    tool_calls: Vec<ProviderToolSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderToolSnapshot {
+    call_id: String,
+    tool_id: String,
+    tool_fingerprint: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ToolResultSnapshot {
+    id: Uuid,
+    provider_call_id: String,
+    state: String,
+    model_input: ModelInputBlock,
+    egress_manifest: AiEgressManifest,
+}
 
 /// Deployment bounds for one protected coordinator checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,11 +282,16 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::ReauthorizationFailed);
         }
-        let checkpoint_hash = checkpoint_hash(
-            lease,
-            checkpoint_kind,
-            result,
+        let checkpoint_hash = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
             checkpoint_id,
+            checkpoint_kind,
+            result.provider_kind().as_str(),
+            result.provider_model(),
+            result.provider_response_id(),
+            result.budget_reservation_id().0,
             &protected_state,
         )?;
         self.run_service
@@ -315,6 +375,302 @@ impl OrmAiCoordinatorCheckpointService {
             })?;
         serde_json::to_value(envelope).map_err(|_| AiError::PersistenceFailed)
     }
+
+    async fn open(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: ContentProtectionContext,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, AiError> {
+        let envelope: ProtectedContentEnvelope =
+            serde_json::from_value(value.clone()).map_err(|_| AiError::PersistenceFailed)?;
+        self.content_protector
+            .open(policy, &context, &envelope)
+            .await
+            .map_err(|error| match error {
+                crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
+                _ => AiError::PersistenceFailed,
+            })
+    }
+
+    async fn adopt(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<AiAdoptedReadOnlyToolBatch, AiError> {
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let scope = AiScope {
+            kind: session.scope_kind.clone(),
+            id: session.scope_id.clone(),
+            tenant_id: session.tenant_id.clone(),
+        };
+        validate_session_binding(&session, lease, &scope)?;
+        let (principal, policy) = self.current_policy(lease, &scope).await?;
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let provider_response_id = checkpoint
+            .provider_response_id
+            .as_deref()
+            .filter(|value| valid_reference(value))
+            .ok_or(AiError::Conflict)?;
+        let budget_reservation_id = checkpoint.budget_reservation_id.ok_or(AiError::Conflict)?;
+        let protected_state = checkpoint
+            .protected_state
+            .as_ref()
+            .ok_or(AiError::Conflict)?;
+        if checkpoint.run_id != lease.run_id().0
+            || checkpoint.checkpoint_kind != "tool_batch_persisted"
+            || checkpoint.assistant_message_id.is_some()
+        {
+            return Err(AiError::Conflict);
+        }
+        enforce_size(protected_state, self.limits.maximum_state_bytes)?;
+        let reservation = AiBudgetReservationRecord::find_by_id(
+            self.run_service.database(),
+            &budget_reservation_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        if reservation.session_id != lease.session_id().0
+            || reservation.run_id != lease.run_id().0
+            || reservation.attempt_id != checkpoint.attempt_id
+            || reservation.lease_generation != checkpoint.lease_generation
+            || reservation.state != "committed"
+            || reservation.actual_runs != Some(1)
+            || reservation.reconciled_at.is_none()
+            || reservation.provider_kind.trim().is_empty()
+            || reservation.provider_model.trim().is_empty()
+        {
+            return Err(AiError::Conflict);
+        }
+        let expected_hash = coordinator_checkpoint_hash(
+            crate::AiRunId(checkpoint.run_id),
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            checkpoint.id,
+            &checkpoint.checkpoint_kind,
+            &reservation.provider_kind,
+            &reservation.provider_model,
+            Some(provider_response_id),
+            budget_reservation_id,
+            protected_state,
+        )?;
+        if checkpoint.checkpoint_hash != expected_hash {
+            return Err(AiError::Conflict);
+        }
+        let opened = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_run_checkpoints".to_owned(),
+                    row_id: checkpoint_id.to_string(),
+                    field: "protected_state".to_owned(),
+                    scope: scope.clone(),
+                },
+                protected_state,
+            )
+            .await?;
+        enforce_size(&opened, self.limits.maximum_state_bytes)?;
+        let payload: CoordinatorCheckpointPayload =
+            serde_json::from_value(opened).map_err(|_| AiError::PersistenceFailed)?;
+        if payload.format_version != 1
+            || payload.checkpoint_kind != "tool_batch_persisted"
+            || payload.scope != scope
+            || !valid_reference(&payload.correlation_id)
+            || payload.provider_turns == 0
+            || payload.total_tool_calls == 0
+            || payload.completed_tools.is_empty()
+            || payload.completed_tools.len() > 4_096
+            || payload.completed_tools.len() != payload.provider_result.tool_calls.len()
+        {
+            return Err(AiError::Conflict);
+        }
+        let provider = &payload.provider_result;
+        if provider.format_version != 1
+            || provider.session_id != lease.session_id().0
+            || provider.run_id != lease.run_id().0
+            || provider.attempt_id != checkpoint.attempt_id
+            || provider.lease_generation != checkpoint.lease_generation
+            || provider.provider_kind.as_str() != reservation.provider_kind
+            || provider.provider_model != reservation.provider_model
+            || provider.provider_response_id.as_deref() != Some(provider_response_id)
+            || provider.budget_reservation_id != budget_reservation_id
+            || provider.tool_calls.is_empty()
+            || provider
+                .previous_response_id
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+        {
+            return Err(AiError::Conflict);
+        }
+        let route = AiToolResultEgressRoute::from_checkpoint_value(payload.result_egress_route)?;
+        let continuation = AiAgentContinuation::from_checkpoint_value(
+            payload.continuation.ok_or(AiError::Conflict)?,
+        )?;
+        if continuation.previous_response_id() != provider_response_id
+            || continuation.input().len() != payload.completed_tools.len()
+            || continuation.transfers().len() != payload.completed_tools.len()
+        {
+            return Err(AiError::Conflict);
+        }
+        let expected_turn_index = i64::from(
+            payload
+                .provider_turns
+                .checked_sub(1)
+                .ok_or(AiError::Conflict)?,
+        );
+        let mut durable_ids = BTreeSet::new();
+        let mut provider_call_ids = BTreeSet::new();
+        for (index, (((tool, provider_tool), input), transfer)) in payload
+            .completed_tools
+            .iter()
+            .zip(&provider.tool_calls)
+            .zip(continuation.input())
+            .zip(continuation.transfers())
+            .enumerate()
+        {
+            if !durable_ids.insert(tool.id)
+                || !provider_call_ids.insert(tool.provider_call_id.as_str())
+                || tool.provider_call_id != provider_tool.call_id
+                || tool.model_input != *input
+                || tool.egress_manifest != *transfer
+            {
+                return Err(AiError::Conflict);
+            }
+            let ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            } = input
+            else {
+                return Err(AiError::Conflict);
+            };
+            if call_id != &provider_tool.call_id
+                || tool_id != &provider_tool.tool_id
+                || !route.matches_manifest(
+                    transfer,
+                    lease,
+                    &scope,
+                    &reservation.provider_kind,
+                    &reservation.provider_model,
+                )
+                || transfer.sources.len() != 1
+                || transfer.sources[0].kind != "application_tool_result"
+                || transfer.sources[0].reference != tool.id.to_string()
+            {
+                return Err(AiError::EgressDenied);
+            }
+            let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+            let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+            let manifest_hash = transfer.stable_hash();
+            let classification = classification_value(transfer.maximum_classification());
+            if call.run_id != lease.run_id().0
+                || call.lease_generation != checkpoint.lease_generation
+                || call.provider_call_id != provider_tool.call_id
+                || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
+                || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
+                || call.provider_response_id.as_deref() != Some(provider_response_id)
+                || call.budget_reservation_id != Some(budget_reservation_id)
+                || call.provider_turn_index != expected_turn_index
+                || usize::try_from(call.tool_call_index).ok() != Some(index)
+                || call.tool_id != provider_tool.tool_id
+                || call.tool_fingerprint != provider_tool.tool_fingerprint
+                || call.argument_hash != canonical_json_hash(&provider_tool.arguments)?
+                || call.state != tool.state
+                || !matches!(call.state.as_str(), "completed" | "execution_failed")
+                || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
+                || call.result_egress_decision_id.is_none()
+                || call.authorization_code.is_none()
+                || call.disclosure_schema_fingerprint.is_none()
+                || call.result_classification.as_deref() != Some(classification)
+                || (call.state == "completed"
+                    && (call.authorization_policy_version.is_none()
+                        || call.authorization_state_digest.is_none()))
+                || call.completed_at.is_none()
+                || call.correlation_id.as_deref() != Some(payload.correlation_id.as_str())
+                || step.run_id != lease.run_id().0
+                || step.lease_generation != checkpoint.lease_generation
+                || step.state != call.state
+                || step.finished_at.is_none()
+            {
+                return Err(AiError::Conflict);
+            }
+            let arguments = self
+                .open(
+                    &policy,
+                    ContentProtectionContext {
+                        entity: "graphql_orm_ai_tool_calls".to_owned(),
+                        row_id: tool.id.to_string(),
+                        field: "protected_arguments".to_owned(),
+                        scope: scope.clone(),
+                    },
+                    &call.protected_arguments,
+                )
+                .await?;
+            let result = self
+                .open(
+                    &policy,
+                    ContentProtectionContext {
+                        entity: "graphql_orm_ai_tool_calls".to_owned(),
+                        row_id: tool.id.to_string(),
+                        field: "protected_result".to_owned(),
+                        scope: scope.clone(),
+                    },
+                    call.protected_result.as_ref().ok_or(AiError::Conflict)?,
+                )
+                .await?;
+            if arguments != provider_tool.arguments || result != *output {
+                return Err(AiError::Conflict);
+            }
+            let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
+            let event = AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+            if event.run_id != Some(lease.run_id().0)
+                || event.principal_subject != lease.principal_reference().subject
+                || event.scope_kind != scope.kind
+                || event.scope_id != scope.id
+                || event.manifest_hash != manifest_hash
+                || event.destination != transfer.destination
+                || event.capability != "tool_result"
+                || event.classification != classification
+                || event.outcome != "allow"
+                || u64::try_from(event.estimated_bytes).ok() != Some(transfer.estimated_bytes)
+                || u64::try_from(event.estimated_tokens).ok() != Some(transfer.estimated_tokens)
+            {
+                return Err(AiError::EgressDenied);
+            }
+        }
+        let (current, current_policy) = self.current_policy(lease, &scope).await?;
+        if current_policy != policy
+            || principal.reference() != lease.principal_reference()
+            || current.reference() != lease.principal_reference()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        Ok(AiAdoptedReadOnlyToolBatch::new(
+            checkpoint_id,
+            payload.provider_turns,
+            payload.total_tool_calls,
+            scope,
+            continuation,
+        ))
+    }
 }
 
 #[async_trait]
@@ -372,30 +728,27 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
     }
 }
 
-fn checkpoint_hash(
-    lease: &AiRunLease,
-    kind: &str,
-    result: &AiProviderCallResult,
-    checkpoint_id: Uuid,
-    protected_state: &serde_json::Value,
-) -> Result<String, AiError> {
-    let protected_state_hash = hex::encode(Sha256::digest(
-        serde_json::to_vec(protected_state).map_err(|_| AiError::PersistenceFailed)?,
-    ));
-    let redacted = json!({
-        "checkpointId": checkpoint_id,
-        "runId": lease.run_id().0,
-        "attemptId": lease.attempt_id(),
-        "leaseGeneration": lease.lease_generation(),
-        "kind": kind,
-        "providerKind": result.provider_kind(),
-        "providerModel": result.provider_model(),
-        "providerResponseId": result.provider_response_id(),
-        "budgetReservationId": result.budget_reservation_id().0,
-        "protectedStateHash": protected_state_hash,
-    });
-    let encoded = serde_json::to_vec(&redacted).map_err(|_| AiError::PersistenceFailed)?;
-    Ok(hex::encode(Sha256::digest(encoded)))
+#[async_trait]
+impl AiAgentCheckpointAdopter for OrmAiCoordinatorCheckpointService {
+    async fn adopt_tool_batch(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
+        match lease.latest_checkpoint_id() {
+            Some(checkpoint_id) => self.adopt(lease, checkpoint_id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn consume_before_provider(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<AiRunLease, AiError> {
+        self.run_service
+            .consume_adoption_checkpoint(lease, checkpoint_id)
+            .await
+    }
 }
 
 fn enforce_size(value: &serde_json::Value, maximum: usize) -> Result<(), AiError> {
@@ -409,6 +762,37 @@ fn enforce_size(value: &serde_json::Value, maximum: usize) -> Result<(), AiError
         ));
     }
     Ok(())
+}
+
+fn canonical_json_hash(value: &serde_json::Value) -> Result<String, AiError> {
+    let encoded =
+        serde_json::to_vec(&canonical_json(value)).map_err(|_| AiError::PersistenceFailed)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+const fn classification_value(value: crate::DataClassification) -> &'static str {
+    match value {
+        crate::DataClassification::Public => "public",
+        crate::DataClassification::Internal => "internal",
+        crate::DataClassification::Confidential => "confidential",
+        crate::DataClassification::Restricted => "restricted",
+        crate::DataClassification::Secret => "secret",
+    }
 }
 
 fn validate_session_binding(

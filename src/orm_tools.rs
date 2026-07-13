@@ -151,7 +151,8 @@ impl AiApplicationToolCallContext {
 /// Provider kind and model are derived from the completed provider turn and
 /// cannot be supplied here. The service also derives exact source,
 /// classification, byte count, session, run, and scope bindings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AiToolResultEgressRoute {
     provider_profile_id: String,
     destination: String,
@@ -164,6 +165,11 @@ pub struct AiToolResultEgressRoute {
 }
 
 impl AiToolResultEgressRoute {
+    pub(crate) fn from_checkpoint_value(value: serde_json::Value) -> Result<Self, AiError> {
+        let route: Self = serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
+        route.validate()?;
+        Ok(route)
+    }
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
             "providerProfileId": self.provider_profile_id,

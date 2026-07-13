@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.6.0` and the AI
-schema module to `0.11.0`.
+This development line advances the pre-1.0 crate version to `0.7.0` and the AI
+schema module to `0.12.0`.
 
 ### Added
 
@@ -117,17 +117,27 @@ schema module to `0.11.0`.
   completed-tool-batch checkpoints. The same transaction verifies committed
   provider usage and every protected/egress-audited tool row before advancing
   the run's latest checkpoint.
+- `AiAgentCheckpointAdopter` and opaque `AiAdoptedReadOnlyToolBatch` proofs for
+  current-authority cross-generation adoption of exact completed read-only
+  tool batches. Adoption reopens protected arguments/results, validates the
+  original budget, tool, step, disclosure and egress records, reconstructs the
+  bounded loop guard, and atomically consumes the checkpoint before transport.
 
 ### Changed
 
-- `AiReadOnlyAgentCoordinator::new` now requires an
-  `AiAgentCheckpointWriter`. Accepted provider results are checkpointed before
-  tool/output consumption, and a completed tool batch is checkpointed before
-  the next continuation plan. Checkpoint failure closes the run for recovery.
-- AI schema module version is now `0.11.0`; run checkpoints add nullable,
+- `AiReadOnlyAgentCoordinator::new` now requires both an
+  `AiAgentCheckpointWriter` and `AiAgentCheckpointAdopter`. Accepted provider
+  results are checkpointed before tool/output consumption, and a completed
+  tool batch is checkpointed before the next continuation plan. Exact adopted
+  batches are consumed before the following provider call. Any checkpoint or
+  adoption ambiguity closes the run for recovery.
+- AI schema module `0.11.0` added nullable,
   private `protected_state`. Existing final-output checkpoints remain valid
   with no protected state, while older active runs gain no inferred resume
   authority.
+- AI schema module version is now `0.12.0` for the new persistent semantics of
+  checkpoint adoption eligibility, cross-generation checkpoint retention, and
+  one-shot pre-provider consumption. The entity shape is unchanged.
 - `GraphqlRequestContextFactory::build` now receives the complete validated
   `ToolGraphqlRequest` instead of only `GraphqlInvocationContext`, allowing a
   remote issuer to bind delegated authority to the exact server-authored
@@ -139,7 +149,7 @@ schema module to `0.11.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.11.0`.
+  reconciliation. The current module is `0.12.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -149,7 +159,11 @@ schema module to `0.11.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.11.0`.
+  the current module is `0.12.0`.
+- `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
+  requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
+  provider-turn, partial, malformed, consumed, or exhausted adoption attempts
+  remain closed as `RecoveryRequired`.
 
 - Multi-repository development now uses one owning agent per repository.
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
@@ -208,7 +222,9 @@ schema module to `0.11.0`.
   unchanged ready protection policy around asynchronous protection. Payloads
   bind the exact attempt/generation, provider result, loop counts, scope,
   result route, completed tool outputs/manifests, and continuation. They are
-  persistence proofs only; cross-generation adoption remains closed.
+  persistence proofs only. Only a complete read-only tool batch can become an
+  adoption proof, after fresh reopening and durable-record validation; provider
+  turns and partial batches remain non-replayable.
 - Remote GraphQL execution now rejects local/unregistered targets, stale or
   expired principals, expired delegated authority, changed documents or
   canonical variables, changed operation/projection/disclosure/audit bindings,

@@ -83,10 +83,12 @@ the newly returned value. A cloned older value is expected to fail with
   malformed application-tool events, or worker loss does not optimistically
   release that capacity.
 - An expired `Leased` claim is safe to requeue because provider orchestration
-  has not started. An expired `Running` attempt is finalized only when its
-  linked same-transaction checkpoint, hash, attempt/generation, settled budget
-  reference, and complete protected assistant message all match. Every other
-  running/waiting claim becomes `RecoveryRequired` and is never replayed.
+  has not started. An expired `Running` attempt is finalized when its exact
+  final-output proof matches, or requeued for adoption when its exact completed
+  read-only tool-batch hash, settled budget and finished durable rows match.
+  The replacement still must freshly open/validate and consume the batch before
+  transport. Every other running/waiting claim becomes `RecoveryRequired` and
+  is never replayed.
 - Recovery writes append an immutable attempt-outcome fact and invalidate the
   old worker fence.
 
@@ -118,11 +120,12 @@ tool-result egress decision, persists the protected outcome, and renews the
 fence. `AiAgentLoopGuard` binds each result to its opaque provider `call_id`
 before `new_continuation_with_tools` can construct the next request.
 
-The coordinator is not yet restart-adoptable across generations. Provider-turn
-and completed-tool-batch checkpoints are durable inputs to a future adoption
-proof, not permission to reconstruct a lost guard today. A partial batch,
-unknown provider response, expired fence without the exact final-output
-checkpoint, or restore state remains closed for reconciliation.
+The coordinator is restart-adoptable across generations only for an exact
+completed read-only tool batch. The protected adopter—not host code—rebuilds
+the guard and continuation after current-authority and durable-evidence checks,
+then consumes the checkpoint before transport. A provider-turn checkpoint,
+partial batch, unknown provider response, consumed link, or malformed restore
+state remains closed for reconciliation.
 Consequential, mutation, proposal, approval-required, and non-idempotent
 descriptors remain rejected
 until canonical preview, one-shot approval persistence, post-approval fresh

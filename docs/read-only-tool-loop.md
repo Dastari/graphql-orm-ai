@@ -86,17 +86,19 @@ immutable manifests produced for those exact results as one unit. The normal
 provider executor still reserves a fresh atomic budget and freshly authorizes
 and audits the model-inference and result transfers before transport.
 
-The top-level coordinator additionally requires an `AiAgentCheckpointWriter`.
-It protects and fences the accepted provider result before executing tools,
-then protects the exact complete tool batch and opaque continuation before the
-next plan. Checkpoint persistence failure after either external boundary closes
-the run for recovery and never replays the provider or resolver.
+The top-level coordinator additionally requires an `AiAgentCheckpointWriter`
+and `AiAgentCheckpointAdopter`. The ORM checkpoint service implements both. It
+protects and fences the accepted provider result before executing tools, then
+protects the exact complete tool batch and opaque continuation before the next
+plan. Checkpoint persistence failure after either external boundary closes the
+run for recovery and never replays the provider or resolver.
 
-Do not reconstruct a guard to resume an ambiguous partial loop. A protected
-checkpoint is bound to its original attempt/generation and is not yet adoption
-authority. A lost worker, partially completed batch, expired lease, unknown
-provider response, or restore snapshot stays closed for reconciliation/operator
-review.
+Do not reconstruct a guard yourself. Recovery can retain only an exact complete
+tool-batch checkpoint; the adopter must freshly authorize, open and validate
+all durable evidence, construct the opaque proof, and consume the checkpoint
+before the following transport. A provider-turn checkpoint, partially
+completed batch, consumed link, unknown response, or malformed restore state
+stays closed for reconciliation/operator review.
 
 ## OpenAI continuation and retention
 
@@ -122,10 +124,9 @@ or turn retention on.
   descriptor can enter this loop. Use the separate
   [supervised service](supervised-tool-loop.md) for exact one-shot application
   mutations; it is not yet owned by this coordinator.
-- Cross-generation adoption remains unimplemented. Provider turns and complete
-  model-visible tool batches now have protected exact checkpoints, but expired
-  recovery still closes them; only the final-output checkpoint can currently
-  be finalized automatically.
+- Cross-generation adoption is intentionally limited to exact completed
+  read-only tool batches. Provider-turn, partial-batch, consequential, and
+  provider-independent stateless continuation adoption remain unimplemented.
 - `AiLiveDeltaCoalescer` bounds visible text/reasoning-summary batches to no
   more than 50 ms / 4 KiB and excludes structured/tool events, but protected
   durable session-event persistence is not wired yet. A raw batch is not an

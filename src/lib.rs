@@ -141,8 +141,9 @@ pub mod prelude {
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
-        AiAgentCheckpointWriter, AiApplicationToolCallLimits, AiApprovalServiceLimits,
-        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
+        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
+        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
         AiCoordinatorCheckpointLimits, AiProposalServiceLimits, AiProviderCallExecutor,
         AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
         AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,

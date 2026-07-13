@@ -304,6 +304,88 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
     ) -> Result<AiRunLease, AiError>;
 }
 
+/// Protected state recovered from one exact completed read-only tool batch.
+///
+/// Fields are private so a host cannot manufacture resume counters, response
+/// chaining, or model-visible tool results. Adoption proves the prior batch's
+/// durable integrity under current access and protection policy; it does not
+/// authorize the next provider request, budget, or egress decision.
+#[derive(Clone, Debug)]
+pub struct AiAdoptedReadOnlyToolBatch {
+    checkpoint_id: Uuid,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    continuation: AiAgentContinuation,
+}
+
+impl AiAdoptedReadOnlyToolBatch {
+    pub(crate) fn new(
+        checkpoint_id: Uuid,
+        provider_turns: u32,
+        total_tool_calls: u32,
+        scope: AiScope,
+        continuation: AiAgentContinuation,
+    ) -> Self {
+        Self {
+            checkpoint_id,
+            provider_turns,
+            total_tool_calls,
+            scope,
+            continuation,
+        }
+    }
+
+    /// Immutable checkpoint selected for one-shot adoption.
+    pub const fn checkpoint_id(&self) -> Uuid {
+        self.checkpoint_id
+    }
+
+    /// Number of accepted provider turns preceding the adopted batch.
+    pub const fn provider_turns(&self) -> u32 {
+        self.provider_turns
+    }
+
+    /// Number of resolved application-tool calls preceding the adopted batch.
+    pub const fn total_tool_calls(&self) -> u32 {
+        self.total_tool_calls
+    }
+
+    /// Application-defined scope reauthorized during adoption.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+}
+
+/// Current-authority adoption and one-shot consumption of protected tool
+/// checkpoints.
+#[async_trait]
+pub trait AiAgentCheckpointAdopter: Send + Sync {
+    /// Opens and validates the linked completed tool batch, when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale fencing, current access/protection
+    /// denial, malformed protected state, or any mismatch with durable budget,
+    /// tool, step, disclosure, or egress records.
+    async fn adopt_tool_batch(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError>;
+
+    /// Atomically consumes one validated checkpoint before provider transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the checkpoint remains linked to the exact
+    /// current lease and can be cleared through its row-version fence.
+    async fn consume_before_provider(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<AiRunLease, AiError>;
+}
+
 #[async_trait]
 impl AiAgentProviderOutputWriter for OrmAiProviderOutputService {
     async fn persist_output(
@@ -365,27 +447,32 @@ pub enum AiReadOnlyAgentRunOutcome {
 /// The coordinator starts and heartbeats the exact lease, asks a trusted host
 /// planner for each turn, executes provider calls, resolves every custom query
 /// through the protected ORM tool service, constructs exact continuations,
-/// persists final output, and commits a terminal outcome. Any ambiguous
-/// provider/tool/output handoff becomes `RecoveryRequired`; the coordinator
-/// never reconstructs or silently replays uncertain state.
+/// persists final output, and commits a terminal outcome. It can adopt only an
+/// opaque, freshly validated complete read-only tool batch and consumes that
+/// checkpoint before provider transport. Any ambiguous provider/tool/output
+/// handoff becomes `RecoveryRequired`; the coordinator never reconstructs or
+/// silently replays uncertain state.
 pub struct AiReadOnlyAgentCoordinator {
     run_control: Arc<dyn AiAgentRunControl>,
     provider_executor: Arc<dyn AiAgentProviderTurnExecutor>,
     tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
     output_writer: Arc<dyn AiAgentProviderOutputWriter>,
     checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
+    checkpoint_adopter: Arc<dyn AiAgentCheckpointAdopter>,
     planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
     limits: AiReadOnlyAgentCoordinatorLimits,
 }
 
 impl AiReadOnlyAgentCoordinator {
     /// Creates a coordinator from proof-preserving service boundaries.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_control: Arc<dyn AiAgentRunControl>,
         provider_executor: Arc<dyn AiAgentProviderTurnExecutor>,
         tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
         output_writer: Arc<dyn AiAgentProviderOutputWriter>,
         checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
+        checkpoint_adopter: Arc<dyn AiAgentCheckpointAdopter>,
         planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
         limits: AiReadOnlyAgentCoordinatorLimits,
     ) -> Self {
@@ -395,6 +482,7 @@ impl AiReadOnlyAgentCoordinator {
             tool_executor,
             output_writer,
             checkpoint_writer,
+            checkpoint_adopter,
             planner,
             limits,
         }
@@ -418,19 +506,99 @@ impl AiReadOnlyAgentCoordinator {
         claimed: &AiRunLease,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
         let mut lease = self.run_control.start(claimed).await?;
-        let mut guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
-        let mut turn_plan = match self.planner.initial_plan(&lease).await {
-            Ok(plan) if !plan.is_continuation() => plan,
-            Err(_) => {
-                return self
-                    .finish_failed(&lease, &guard, "initial_plan_failed")
-                    .await;
-            }
-            Ok(_) => {
-                return self
-                    .finish_failed(&lease, &guard, "initial_plan_phase_invalid")
-                    .await;
-            }
+        let (mut guard, mut turn_plan) = if lease.latest_checkpoint_id().is_some() {
+            let adopted = match self.checkpoint_adopter.adopt_tool_batch(&lease).await {
+                Ok(Some(adopted)) => adopted,
+                Ok(None) | Err(_) => {
+                    let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "checkpoint_adoption_failed",
+                            None,
+                        )
+                        .await;
+                }
+            };
+            let guard = match AiAgentLoopGuard::resume_after_tool_batch(
+                &lease,
+                self.limits.loop_limits,
+                adopted.provider_turns,
+                adopted.total_tool_calls,
+                adopted.continuation.previous_response_id(),
+            ) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "checkpoint_adoption_limits_invalid",
+                            None,
+                        )
+                        .await;
+                }
+            };
+            let plan = match self
+                .planner
+                .continuation_plan(&lease, adopted.provider_turns, adopted.continuation)
+                .await
+            {
+                Ok(plan)
+                    if plan.is_continuation() && plan.provider_call.scope() == &adopted.scope =>
+                {
+                    plan
+                }
+                Err(_) => {
+                    return self
+                        .finish_failed(&lease, &guard, "adopted_continuation_plan_failed")
+                        .await;
+                }
+                Ok(_) => {
+                    return self
+                        .finish_failed(&lease, &guard, "adopted_continuation_plan_invalid")
+                        .await;
+                }
+            };
+            lease = match self
+                .checkpoint_adopter
+                .consume_before_provider(&lease, adopted.checkpoint_id)
+                .await
+            {
+                Ok(renewed) => renewed,
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "checkpoint_consumption_failed",
+                            None,
+                        )
+                        .await;
+                }
+            };
+            (guard, plan)
+        } else {
+            let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
+            let plan = match self.planner.initial_plan(&lease).await {
+                Ok(plan) if !plan.is_continuation() => plan,
+                Err(_) => {
+                    return self
+                        .finish_failed(&lease, &guard, "initial_plan_failed")
+                        .await;
+                }
+                Ok(_) => {
+                    return self
+                        .finish_failed(&lease, &guard, "initial_plan_phase_invalid")
+                        .await;
+                }
+            };
+            (guard, plan)
         };
 
         loop {
@@ -625,6 +793,38 @@ impl AiReadOnlyAgentCoordinator {
                         Ok(_) => {
                             return self
                                 .finish_failed(&lease, &guard, "continuation_plan_phase_invalid")
+                                .await;
+                        }
+                    };
+                    let checkpoint_id = match lease.latest_checkpoint_id() {
+                        Some(checkpoint_id) => checkpoint_id,
+                        None => {
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "application_tool_checkpoint_missing",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    lease = match self
+                        .checkpoint_adopter
+                        .consume_before_provider(&lease, checkpoint_id)
+                        .await
+                    {
+                        Ok(renewed) => renewed,
+                        Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "application_tool_checkpoint_consumption_failed",
+                                    result.provider_response_id(),
+                                )
                                 .await;
                         }
                     };
@@ -838,6 +1038,97 @@ mod tests {
         route: AiToolResultEgressRoute,
     }
 
+    struct AdoptionOnlyPlanner {
+        scope: AiScope,
+        route: AiToolResultEgressRoute,
+        continuation_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for AdoptionOnlyPlanner {
+        async fn initial_plan(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            Err(AiError::Conflict)
+        }
+
+        async fn continuation_plan(
+            &self,
+            lease: &AiRunLease,
+            _provider_turns: u32,
+            _continuation: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            self.continuation_count.fetch_add(1, Ordering::SeqCst);
+            AiReadOnlyAgentTurnPlan::new(
+                AiProviderCallPlan::test_plan(lease, self.scope.clone(), true),
+                self.route.clone(),
+            )
+        }
+    }
+
+    struct TestCheckpointAdopter {
+        adopted: Mutex<Option<AiAdoptedReadOnlyToolBatch>>,
+        consumed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointAdopter for TestCheckpointAdopter {
+        async fn adopt_tool_batch(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
+            let adopted = self
+                .adopted
+                .lock()
+                .expect("test adoption lock should not be poisoned")
+                .take();
+            if adopted
+                .as_ref()
+                .map(AiAdoptedReadOnlyToolBatch::checkpoint_id)
+                != lease.latest_checkpoint_id()
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(adopted)
+        }
+
+        async fn consume_before_provider(
+            &self,
+            lease: &AiRunLease,
+            checkpoint_id: Uuid,
+        ) -> Result<AiRunLease, AiError> {
+            if lease.latest_checkpoint_id() != Some(checkpoint_id)
+                || self.consumed.swap(true, Ordering::SeqCst)
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.test_without_checkpoint())
+        }
+    }
+
+    struct CheckpointClearedProvider {
+        response: Mutex<Option<AiProviderCallResult>>,
+    }
+
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for CheckpointClearedProvider {
+        async fn execute_turn(
+            &self,
+            lease: &AiRunLease,
+            _plan: AiProviderCallPlan,
+        ) -> Result<AiProviderCallResult, AiError> {
+            if lease.latest_checkpoint_id().is_some() {
+                return Err(AiError::Conflict);
+            }
+            self.response
+                .lock()
+                .expect("test response lock should not be poisoned")
+                .take()
+                .ok_or(AiError::Conflict)
+        }
+    }
+
     #[async_trait]
     impl AiReadOnlyAgentTurnPlanner for InvalidContinuationPlanner {
         async fn initial_plan(
@@ -923,7 +1214,7 @@ mod tests {
             if provider_turns == 0 || result.run_id() != lease.run_id() {
                 return Err(AiError::Conflict);
             }
-            Ok(lease.clone())
+            Ok(lease.test_with_checkpoint(Uuid::new_v4()))
         }
 
         async fn persist_tool_batch(
@@ -944,7 +1235,28 @@ mod tests {
             {
                 return Err(AiError::Conflict);
             }
-            Ok(lease.clone())
+            Ok(lease.test_with_checkpoint(Uuid::new_v4()))
+        }
+    }
+
+    #[async_trait]
+    impl AiAgentCheckpointAdopter for TestCheckpointWriter {
+        async fn adopt_tool_batch(
+            &self,
+            _lease: &AiRunLease,
+        ) -> Result<Option<AiAdoptedReadOnlyToolBatch>, AiError> {
+            Ok(None)
+        }
+
+        async fn consume_before_provider(
+            &self,
+            lease: &AiRunLease,
+            checkpoint_id: Uuid,
+        ) -> Result<AiRunLease, AiError> {
+            if lease.latest_checkpoint_id() != Some(checkpoint_id) {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.test_without_checkpoint())
         }
     }
 
@@ -1063,6 +1375,7 @@ mod tests {
             }),
             Arc::new(TestOutputWriter),
             Arc::new(TestCheckpointWriter),
+            Arc::new(TestCheckpointWriter),
             planner,
             coordinator_limits,
         )
@@ -1104,6 +1417,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adopted_tool_batch_is_consumed_before_the_next_provider_call() {
+        let base_lease = AiRunLease::test_running(principal_reference());
+        let mut old_guard = AiAgentLoopGuard::new(
+            &base_lease,
+            AiAgentLoopLimits::new(4, 8).expect("test limits should validate"),
+        );
+        let old_result = AiProviderCallResult::test_result(
+            &base_lease,
+            None,
+            "adopted-response",
+            vec![("adopted-call", "test.read", json!({}))],
+        );
+        assert!(matches!(
+            old_guard
+                .observe_provider_turn(&old_result)
+                .expect("old provider turn should bind"),
+            AiAgentLoopTurn::ToolCalls { .. }
+        ));
+        let persisted = AiPersistedApplicationToolCall::test_completed(
+            base_lease.clone(),
+            "adopted-call",
+            "test.read",
+            Some(json!({"record": "safe"})),
+            Some(test_manifest(&base_lease, AiEgressCapability::ToolResult)),
+        );
+        old_guard
+            .observe_tool_result(&persisted)
+            .expect("old tool result should bind");
+        let continuation = old_guard
+            .continuation()
+            .expect("old complete batch should continue");
+        let checkpoint_id = Uuid::new_v4();
+        let claimed = base_lease.test_with_checkpoint(checkpoint_id);
+        let adopter = Arc::new(TestCheckpointAdopter {
+            adopted: Mutex::new(Some(AiAdoptedReadOnlyToolBatch::new(
+                checkpoint_id,
+                old_guard.provider_turns(),
+                old_guard.total_tool_calls(),
+                test_scope(),
+                continuation,
+            ))),
+            consumed: AtomicBool::new(false),
+        });
+        let planner = Arc::new(AdoptionOnlyPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(CheckpointClearedProvider {
+            response: Mutex::new(Some(AiProviderCallResult::test_result(
+                &claimed,
+                Some("adopted-response".to_owned()),
+                "final-response",
+                Vec::new(),
+            ))),
+        });
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
+            adopter.clone(),
+            planner.clone(),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&claimed)
+            .await
+            .expect("adopted continuation should complete");
+
+        assert!(matches!(
+            outcome,
+            Completed {
+                provider_turns: 2,
+                total_tool_calls: 1,
+                ..
+            }
+        ));
+        assert!(adopter.consumed.load(Ordering::SeqCst));
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
     async fn provider_result_without_a_durable_checkpoint_requires_recovery() {
         let lease = AiRunLease::test_running(principal_reference());
         let run = Arc::new(TestRunControl::new());
@@ -1124,6 +1526,7 @@ mod tests {
             }),
             Arc::new(TestOutputWriter),
             Arc::new(RejectProviderCheckpoint),
+            Arc::new(TestCheckpointWriter),
             Arc::new(TestPlanner {
                 scope: test_scope(),
                 route: test_route(),
@@ -1288,6 +1691,7 @@ mod tests {
                 expose_result: true,
             }),
             Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
             Arc::new(TestCheckpointWriter),
             invalid_planner,
             limits(50),

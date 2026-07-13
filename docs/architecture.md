@@ -99,15 +99,17 @@ static disclosure, separately authorizes/audits result egress, persists the
 protected outcome, advances the fence, and permits only exact bounded
 continuation.
 
-The top-level read-only coordinator now owns fenced provider heartbeats,
-bounded turn/tool sequencing, exact continuation, output persistence, and safe
+The top-level read-only coordinator owns fenced provider heartbeats, bounded
+turn/tool sequencing, exact continuation, output persistence, and safe
 terminal/recovery classification. Accepted provider results and complete
-model-visible tool batches are now protected through the current run fence
-before the next phase consumes them. Cross-generation adoption of those
-checkpoints and all other partially completed batches remain closed. Mutations,
-approval-required/non-idempotent tools, other ambiguous resume, and stateless
-reasoning continuation require their complete preview, approval,
-fresh-authorization, persistence, and reconciliation contracts before exposure.
+model-visible tool batches are protected through the current run fence before
+the next phase consumes them. An exact complete read-only tool batch can be
+adopted across one new generation only after current-authority protected-state
+validation and is consumed before provider transport. Provider-turn and
+partially completed batches remain closed. Mutations, approval-required/non-
+idempotent tools, other ambiguous resume, and stateless reasoning continuation
+require their complete preview, approval, fresh-authorization, persistence,
+and reconciliation contracts before exposure.
 
 ## Proposal and approval staging
 
