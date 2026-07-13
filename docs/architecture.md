@@ -18,6 +18,12 @@ Host applications own domain resolvers and policies, scope mapping, request
 context construction, proposal schemas/UI, deployment network and secret
 isolation, and the final mutations that apply reviewed proposals.
 
+Attachment metadata and lifecycle state are AI-owned; bytes use the reviewed
+provider-neutral `graphql-orm-storage::BlobStore` boundary. Random quarantine
+and final keys, scanning, acceptance, and release remain inside the attachment
+service. Application resolvers receive only an authorized AI attachment ID and
+decide independently whether it may be linked to domain data.
+
 ## Execution topologies
 
 The runtime supports both embedded and separately deployed execution. It does

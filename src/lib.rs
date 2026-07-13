@@ -24,6 +24,7 @@ mod access;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod agent_loop;
 mod approvals;
+mod attachments;
 mod budget;
 mod configuration;
 mod content_protection;
@@ -36,6 +37,8 @@ mod execution;
 mod live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_attachments;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -79,6 +82,7 @@ pub use access::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use agent_loop::*;
 pub use approvals::*;
+pub use attachments::*;
 pub use budget::*;
 pub use configuration::*;
 pub use content_protection::*;
@@ -91,6 +95,8 @@ pub use execution::*;
 pub use live_delta::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_approvals::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_attachments::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -133,7 +139,8 @@ pub use tools::*;
 /// Common imports for host integrations.
 pub mod prelude {
     pub use crate::{
-        AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiBudgetReservation,
+        AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiAttachmentAcceptancePolicy,
+        AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation,
         AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
         AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
         AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
@@ -146,16 +153,17 @@ pub mod prelude {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
         AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
-        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
-        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiAttachmentServiceLimits,
+        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
         AiCoordinatorCheckpointLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
         AiLiveDeltaSink, AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
         AiRequestedConsequentialToolCall, AiRunServiceLimits, OrmAiApplicationToolCallService,
-        OrmAiApprovalService, OrmAiBudgetService, OrmAiConsequentialToolCallService,
-        OrmAiCoordinatorCheckpointService, OrmAiEgressDecisionAudit, OrmAiLiveDeltaService,
-        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
+        OrmAiApprovalService, OrmAiAttachmentService, OrmAiBudgetService,
+        OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
+        OrmAiEgressDecisionAudit, OrmAiLiveDeltaService, OrmAiProposalService,
+        OrmAiProviderOutputService, OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

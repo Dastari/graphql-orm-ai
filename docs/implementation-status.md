@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.13.0`) and 37 private records
+- AI schema-module identity (currently version `0.14.0`) and 37 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -96,6 +96,12 @@ production-ready behavior.
   the ORM sink freshly validates authority and protection policy, then commits
   a provisional cursor event through the exact active fence and uncertain
   budget before wakeup.
+- Owner-isolated attachment intake over the exact pinned
+  `graphql-orm-storage` `BlobStore`: hashed expiring one-time tickets, current-
+  owner streaming upload, random scope-bound quarantine/final keys, exact
+  size/hash comparison, complete-object scanner attestation, separate
+  fail-closed acceptance, promotion, protected session events, explicit clean
+  release, bounded metadata, and safe unlinked removal.
 - Secret-store contract plus explicit, read-only, allowlist-mapped environment
   bootstrap store. Runtime construction now requires a secret store.
 - Per-scope content-protection policy/envelope/protector contracts with a
@@ -181,12 +187,14 @@ production-ready behavior.
 - Durable per-principal inbox sequencing/subscriptions and retention purge
   execution. Session-event live wakeup/replay/reauthorization is implemented;
   reset signaling is present, while actual retention pruning remains.
-- Attachment, usage, skill, and subscription roots beyond the initial session,
-  configuration, proposal, and approval surfaces.
+- Usage, skill, and inbox subscription roots beyond the session,
+  configuration, attachment, proposal, and approval surfaces.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
-- Attachment/quarantine/storage pipeline.
+- Expired/interrupted attachment cleanup, quotas, derivative artifacts,
+  provider-file/image resolution and provider-side deletion. Core ticketed
+  quarantine/scan/promotion/release is implemented.
 - Top-level supervised coordinator for heartbeating long human approval waits,
   restart adoption, and exact provider continuation. The generic consequential
   executor and preview-builder seam are implemented; the read-only coordinator
@@ -229,8 +237,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add the attachment quarantine/scanning/storage pipeline and connect its
-   authorized image/file resolution to provider adapters.
+1. Add exact authorized image/file resolution to provider adapters plus the
+   bounded expired-ticket/orphan cleanup worker.
 2. Add the per-principal inbox stream and retention/pruning worker, then the
    remaining provider/configuration surfaces, including Ollama and the
    deterministic fake-process foundation for an allowlisted local harness.
@@ -239,7 +247,7 @@ production-ready behavior.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 36 integration tests and 47 active
+- `cargo test --features provider-openai`: 40 integration tests and 47 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:

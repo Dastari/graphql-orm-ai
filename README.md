@@ -90,6 +90,10 @@ adapters listed below are still being implemented.
   reasoning summaries are UTF-8-coalesced within 50 ms / 4 KiB; each batch is
   freshly authorized, protected, exact-fence/budget validated, and committed
   as a cursor event before subscription wakeup.
+- Owner-isolated attachment intake using `graphql-orm-storage`: one-time
+  ticketed streaming upload, random quarantine keys, exact size/hash checks,
+  complete-object scanning, separate acceptance policy, protected events, and
+  explicit clean release before ordinary message linkage.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -153,8 +157,8 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<re
 ```
 
 > **Pre-release dependency note:** this source snapshot pins the reviewed final
-> `graphql-orm` 0.7.0 merge commit and the `agql-auth` 0.10.0 annotated-tag
-> target exactly. Keep the full revisions from this manifest; do not replace
+> `graphql-orm` 0.7.0, `agql-auth` 0.10.0, and `graphql-orm-storage` 0.5.0
+> commits exactly. Keep the full revisions from this manifest; do not replace
 > the shared contracts with moving branches or application-specific
 > substitutes.
 
@@ -193,9 +197,11 @@ a cursor to a captured watermark and then switch to commit-only wakeups. A
 frontend can therefore retain a small virtualized window even for extremely
 large histories instead of receiving or rendering the entire session.
 
-Attachments use opaque AI-owned references and will pass through ownership,
-size/type, quarantine, scanning, disclosure, and provider-egress checks. The
-full attachment storage/scanning pipeline is not production-ready yet.
+Attachments use opaque AI-owned references. Ticketed streaming upload,
+ownership, byte/hash checks, quarantine, scanning, acceptance, promotion,
+release, protected events, and message linkage are implemented. Provider
+file/image resolution, derivative artifacts, quotas, and retention cleanup
+remain gated.
 
 ## Current maturity
 
@@ -213,7 +219,8 @@ implemented through authenticated, optionally PascalCase GraphQL roots.
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authenticated
 budget-policy/usage GraphQL lifecycles and live-delta retention/purge,
-per-item proposal review, attachment pipeline, production mutable secret
+per-item proposal review, provider attachment resolution/retention and
+attachment cleanup/derivatives, production mutable secret
 stores/keyrings, other provider adapters,
 deployment-specific delegated credential issuers/private HTTP transports,
 generated resolver disclosure metadata, Ollama/OpenAI-compatible and
@@ -223,6 +230,8 @@ testing. Details live in
 
 See [protected live streaming](docs/live-streaming.md) for the opt-in sink,
 provisional-event contract, client reconciliation rules, and failure model.
+See [attachment intake](docs/attachments.md) for the streaming endpoint,
+scanner, policy, promotion, and GraphQL contracts.
 
 Local execution remains in scope. Ollama and OpenAI-compatible loopback servers
 will use ordinary provider adapters. Installed CLI/ACP agents will use a

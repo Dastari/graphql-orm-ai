@@ -44,6 +44,14 @@ contract from default camelCase to PascalCase.
 8. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
+For attachments, construct `OrmAiAttachmentService` with the same access and
+protection boundaries plus an exact `graphql-orm-storage::BlobStore`, trusted
+full-object scanner, separate fail-closed acceptance policy, and clock. Compose
+the attachment roots for ticket/finalization metadata, and route large bytes
+through a host-owned authenticated streaming handler using
+`AiAttachmentUploadService`; never accept file bytes in ordinary GraphQL JSON.
+See the [attachment guide](attachments.md).
+
 For private routed/direct targets, use one cloned
 `AiRemoteAuthenticatedGraphqlAdapter` as both request-context factory and
 executor. Implement its authority issuer at the short-lived credential boundary
@@ -114,8 +122,9 @@ ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md).
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
-[implementation status](implementation-status.md). Attachment handling,
-budget/usage GraphQL management, live-delta retention, provider-turn/partial-
+[implementation status](implementation-status.md). Provider attachment
+resolution/retention, attachment cleanup/derivatives, budget/usage GraphQL
+management, live-delta retention, provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL

@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1318,6 +1318,7 @@ dependencies = [
  "async-trait",
  "futures",
  "graphql-orm",
+ "graphql-orm-storage",
  "hex",
  "jsonschema",
  "reqwest",
@@ -1325,6 +1326,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "time",
  "tokio",
@@ -1341,6 +1343,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "graphql-orm-storage"
+version = "0.5.0"
+source = "git+https://github.com/Dastari/graphql-orm-storage.git?rev=f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5#f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "time",
+ "uuid",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.8.0` and the AI
-schema module to `0.13.0`.
+This development line advances the pre-1.0 crate version to `0.9.0` and the AI
+schema module to `0.14.0`.
 
 ### Added
 
@@ -128,14 +128,30 @@ schema module to `0.13.0`.
   summaries, applies sequential persistence backpressure, and appends a
   cursor-addressable session event only after fresh authority, scope,
   protection-policy, run-fence, and uncertain-budget validation.
+- Owner-isolated attachment intake built on the exact reviewed
+  `graphql-orm-storage` `BlobStore`: bounded one-time upload tickets,
+  current-owner streaming upload, random scope-bound quarantine/final keys,
+  exact byte/hash attestations, trusted full-object scanning, separate
+  fail-closed host acceptance policy, conditional promotion, protected durable
+  events, bounded metadata reads, finalization, and unlinked-object removal.
+- Composable `AiAttachmentQueryRoot`/`AiAttachmentMutationRoot` with coherent
+  optional PascalCase naming. Large bytes never pass through GraphQL JSON and
+  raw upload tokens, token hashes, blob keys, checksums, and scanner internals
+  are not returned in ordinary attachment views.
 
 ### Changed
 
+- AI schema module version is now `0.14.0`. Attachment metadata supports
+  durable pending uploads with nullable object facts, hashed expiring one-time
+  capabilities, expected size, scanner/policy versions, and redacted rejection
+  state. Existing finalized attachment rows remain representable.
+- The dependency universe now pins `graphql-orm-storage` 0.5.0 at its reviewed
+  full Git revision with default backend features disabled.
 - `AiProviderCallExecutor` can opt into durable live output with
   `with_live_delta_sink`. Visible batches are bounded to no weaker than 50 ms
   or 4 KiB and are committed before a subscription wakeup. The default remains
   no provisional event persistence.
-- AI schema module version is now `0.13.0` for the persistent meaning of the
+- AI schema module `0.13.0` introduced the persistent meaning of the
   protected `provider_live_delta` session-event type. Entity shape and public
   GraphQL SDL are unchanged.
 - `AiReadOnlyAgentCoordinator::new` now requires both an
@@ -162,7 +178,7 @@ schema module to `0.13.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.13.0`.
+  reconciliation. The current module is `0.14.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -172,7 +188,7 @@ schema module to `0.13.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.13.0`.
+  the current module is `0.14.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts
@@ -231,6 +247,12 @@ schema module to `0.13.0`.
 
 ### Security
 
+- Attachment filenames are display-only sanitized metadata and never storage
+  paths. Ticket plaintext is returned once, redacted from `Debug`, never
+  serialized by Rust APIs, stored only as SHA-256, compared in constant time,
+  and insufficient without the current authenticated owner. Scanner or policy
+  failure never releases bytes; linked transcript attachments cannot be
+  removed through the unlinked-upload mutation.
 - Durable live output never receives raw provider frames, tool arguments,
   structured tool events, or hidden reasoning. Every batch is reauthorized and
   protected before a serializable transaction validates the exact active run

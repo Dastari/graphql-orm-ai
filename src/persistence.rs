@@ -741,18 +741,30 @@ pub(crate) struct AiAttachmentRecord {
     pub message_id: Option<graphql_orm::uuid::Uuid>,
     /// Storage-provider opaque reference, never a user-controlled path.
     #[backup(redact)]
-    pub blob_reference: String,
+    pub blob_reference: Option<String>,
+    /// Pending quarantine object reference, never exposed to clients/models.
+    #[backup(redact)]
+    pub quarantine_blob_reference: Option<String>,
     pub safe_filename: String,
     pub declared_mime: Option<String>,
-    pub detected_mime: String,
-    pub byte_count: i64,
-    pub sha256: String,
+    pub detected_mime: Option<String>,
+    pub expected_byte_count: Option<i64>,
+    pub byte_count: Option<i64>,
+    pub sha256: Option<String>,
+    /// SHA-256 of the one-time upload capability; never the capability itself.
+    #[backup(redact)]
+    pub upload_token_hash: Option<String>,
+    pub upload_expires_at: Option<i64>,
     pub quarantine_state: String,
     pub scan_state: String,
     pub processing_state: String,
+    pub scanner_version: Option<String>,
+    pub acceptance_policy_version: Option<String>,
+    pub rejection_code: Option<String>,
     #[sortable]
     pub created_at: i64,
     pub finalized_at: Option<i64>,
+    #[filterable(type = "number")]
     pub deleted_at: Option<i64>,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
@@ -1639,7 +1651,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.13.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.14.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

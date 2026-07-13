@@ -111,6 +111,14 @@ transport remains uncertain and cannot trigger replay. A committed delta is
 provisional history, not proof of a completed assistant message; see the
 [live-streaming guide](live-streaming.md).
 
+Attachment upload requires both the current authenticated owner and an
+expiring one-use high-entropy token stored only as a hash. Filenames never form
+storage paths. Exact size/hash, complete-object scanner attestation, a separate
+host acceptance policy, quarantine promotion, and explicit release all precede
+message linkage. Scanner/policy/storage ambiguity remains closed; a released
+attachment still has no provider-egress authority. See the
+[attachment guide](attachments.md).
+
 The read-only coordinator accepts only exact enabled idempotent queries with no
 approval requirement. The separate supervised service accepts only exact
 enabled application mutations at `SupervisedWrite` maturity with one-shot

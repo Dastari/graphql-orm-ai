@@ -4,6 +4,53 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.13.0 to 0.14.0 and attachment intake (crate 0.8.0 to 0.9.0)
+
+This pre-1.0 release adds the owner-isolated attachment service and composable
+attachment GraphQL roots. Add the exact pinned `graphql-orm-storage` 0.5.0
+dependency universe from this manifest. Construct `OrmAiAttachmentService`
+with the ordinary session/scope access policy, content-protection boundaries,
+a provider-neutral `BlobStore`, a complete-object `AiAttachmentScanner`, a
+separate fail-closed `AiAttachmentAcceptancePolicy`, and a trusted clock.
+
+The GraphQL `createAiAttachmentUpload` mutation returns a one-time token. A
+host-owned authenticated streaming endpoint passes that token as
+`SecretString` plus `StorageByteStream` to `AiAttachmentUploadService::upload`;
+do not put it in a URL, log, database, or GraphQL file body. The current owner
+must still authenticate. After clean scanning and policy acceptance, call
+`finalizeAiAttachmentUpload`; only released/clean attachment IDs can enter the
+ordinary `sendAiMessage` mutation. Existing applications must compose the new
+roots explicitly; no fields are silently added.
+
+Apply `AiSchemaModule` `0.14.0` while provider starts, uploads, subscriptions,
+and restore callbacks are closed. `graphql_orm_ai_attachments` changes as
+follows:
+
+- `blob_reference`, `detected_mime`, `byte_count`, and `sha256` become nullable
+  so a durable pending ticket never invents final-object facts;
+- nullable `quarantine_blob_reference` keeps cleanup work addressable without
+  exposing or overloading the final object reference;
+- nullable `expected_byte_count`, `upload_token_hash`, and
+  `upload_expires_at` bind new uploads without making legacy finalized rows
+  invalid; and
+- nullable scanner version, acceptance-policy version, and redacted rejection
+  code record lifecycle evidence.
+
+For existing finalized rows, no content rewrite is required. Optionally
+backfill `expected_byte_count` from `byte_count`; leave upload token/expiry null.
+Do not fabricate a token or move a legacy final object into quarantine. Any
+legacy row whose object, checksum, owner, session, clean scan, or release state
+cannot be verified must remain unavailable and be reported by restore
+reconciliation. The managed migration must change column nullability/add the
+new columns and record module `0.14.0`; never relabel an applied `0.13.0`
+module.
+
+This changes public Rust APIs and GraphQL SDL, but no Cargo feature/default.
+Provider adapter file/image resolution, provider-side file retention/deletion,
+derivative artifacts, expired-ticket/orphan pruning, scope quota configuration,
+and bulk session purge remain explicit gates. No application-domain data
+migration is required.
+
 ## Unreleased: schema module 0.12.0 to 0.13.0 and protected live output (crate 0.7.0 to 0.8.0)
 
 This pre-1.0 release adds an optional durable provisional-output boundary to
