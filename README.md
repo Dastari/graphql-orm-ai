@@ -10,11 +10,12 @@ durable history under server control.
 This crate is an active, unpublished pre-release. The concrete session,
 configuration, subscription, fenced worker, provider-turn, protected
 read-only application-tool/result, bounded coordinator/continuation, protected
-output checkpoint, and supervised consequential-tool foundations compile and
-are tested. Protected proposal review and exact one-shot approval lifecycles
-also compile and are tested. Restart adoption for partially completed
-provider/tool batches, a top-level approval-wait coordinator, and several
-operational adapters listed below are still being implemented.
+output checkpoint, supervised consequential-tool, and private remote GraphQL
+adapter foundations compile and are tested. Protected proposal review and exact
+one-shot approval lifecycles also compile and are tested. Restart adoption for
+partially completed provider/tool batches, a top-level approval-wait
+coordinator, and several operational adapters listed below are still being
+implemented.
 
 ## What it provides
 
@@ -27,6 +28,11 @@ operational adapters listed below are still being implemented.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
+- A product-neutral private remote GraphQL adapter that rechecks freshly
+  resolved principal age, requests one short-lived exact delegated authority,
+  verifies the operation/variables/audit binding at handoff, and invokes only a
+  deployment-owned logical-route transport. No incoming bearer or URL crosses
+  this contract.
 - Default-deny tool registration and enablement, maturity gates, exact
   descriptor fingerprints, recursive AI-control-plane denial, and static
   result disclosure schemas.
@@ -157,10 +163,13 @@ A host then:
 6. Opens the runtime start gate only after managed migration validation and
    restore reconciliation succeed.
 
-Remote/federated consumers implement the same `AuthenticatedGraphqlExecutor`
-contract with private destination enforcement and short-lived bounded
-delegation. The crate deliberately has no dependency on a particular router,
-federation implementation, or service topology.
+Remote/federated consumers supply an `AiRemoteGraphqlAuthorityIssuer` and
+`AiRemoteGraphqlTransport` to `AiRemoteAuthenticatedGraphqlAdapter`. The
+transport privately maps logical targets to fixed destinations; the issuer
+mints exact, short-lived authority. Both remain deployment-owned because the
+crate deliberately has no dependency on a particular router, federation
+implementation, credential format, HTTP stack, or service topology. See the
+[remote execution guide](docs/remote-graphql-execution.md).
 
 The [getting-started guide](docs/getting-started.md) tracks which runtime
 services are concrete today and which host seams are still foundations.
@@ -191,14 +200,15 @@ preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
 Production blockers include restart adoption for partial multi-turn
-registered-tool batches, the consequential tool executor that uses consumed
-approvals, durable protected live-delta persistence, authenticated
-budget-policy/usage GraphQL lifecycles,
+registered-tool batches, a top-level supervised approval-wait coordinator,
+durable protected live-delta persistence, authenticated budget-policy/usage
+GraphQL lifecycles,
 per-item proposal review, attachment pipeline, production mutable secret
 stores/keyrings, other provider adapters,
-remote delegated credential implementation, generated resolver disclosure
-metadata, Ollama/OpenAI-compatible and allowlisted installed local-harness
-drivers, and Docker-owned PostgreSQL parity testing. Details live in
+deployment-specific delegated credential issuers/private HTTP transports,
+generated resolver disclosure metadata, Ollama/OpenAI-compatible and
+allowlisted installed local-harness drivers, and Docker-owned PostgreSQL parity
+testing. Details live in
 [implementation status](docs/implementation-status.md).
 
 Local execution remains in scope. Ollama and OpenAI-compatible loopback servers

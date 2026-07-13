@@ -60,6 +60,18 @@ Logical remote GraphQL targets are deployment-registered. Models cannot choose
 URLs, audiences, resources, direct-service routes, or credentials. Recursive
 AI control-plane and introspection tools are rejected.
 
+The remote adapter accepts only private routed/direct registrations and the
+complete server-authored request. It rejects stale or expired principals before
+issuance, bounds delegated expiry by both configured lifetime and principal
+freshness/expiry, and binds the target, audience/resource, actor, scope, operation,
+canonical variables, projection/disclosure fingerprints, run/tool IDs, audit
+chain, delegation reference, and hashed idempotency key. The opaque credential
+is non-serializable, non-cloneable, redacted from `Debug`, and rejected after
+expiry or if the request/context changes. The deployment issuer must make its
+real claims no broader than the redacted request, and the private transport
+must enforce destination allowlisting and routed/direct authorization parity;
+these external properties cannot be proven by the crate's Rust type alone.
+
 ## Operational safety
 
 Runs use monotonically increasing fencing generations. Stale workers and late

@@ -100,6 +100,10 @@ production-ready behavior.
 - Exact local/private-routed/private-direct logical GraphQL target registry
   with audience/resource and schema/document/projection/disclosure bindings;
   the model never receives a target URL or credential.
+- Generic private remote GraphQL adapter with complete exact-operation
+  delegation requests, freshness/expiry enforcement, redacted non-serializable
+  authority, deployment-owned issuer/transport seams, logical target routing,
+  routed/direct parity requirements, and request-swap/expiry conformance tests.
 - Static recursive result-disclosure schemas with closed objects, bounded
   lists, `NeverExport` nodes, classification tightening, stable fingerprints,
   and runtime enforcement before tool results leave the execution boundary.
@@ -200,9 +204,10 @@ production-ready behavior.
   control-plane recursion validation. The current catalog uses explicit
   reviewed operation contracts, disclosure schemas, and a fail-closed
   identifier scanner.
-- Concrete delegated-credential issuer and remote HTTP GraphQL executor. The
-  target/audience/resource/context contracts are present and transport remains
-  host-owned.
+- Deployment-specific delegated-credential issuers and private HTTP GraphQL
+  transports. The generic exact-binding adapter is implemented; credential
+  format, fixed destination mapping, network isolation, and application audit
+  integration intentionally remain host-owned.
 - Ollama/OpenAI-compatible local provider adapters and the allowlisted installed
   local-harness/ACP process driver. Local execution remains in scope; no model
   may choose a command, arguments, working directory, environment, mount, or
@@ -215,19 +220,17 @@ production-ready behavior.
 1. Extend coordinator checkpoints to protected provider-turn/tool-batch state,
    then implement generation adoption only for exact replay-safe read-only
    phases and wire coalesced live batches to protected durable cursor events.
-2. Add the generic delegated-authority seam and remote authenticated GraphQL
-   executor fixtures without embedding a federation/router product.
-3. Add the attachment quarantine/scanning/storage pipeline and connect its
+2. Add the attachment quarantine/scanning/storage pipeline and connect its
    authorized image/file resolution to provider adapters.
-4. Add the per-principal inbox stream and retention/pruning worker, then the
+3. Add the per-principal inbox stream and retention/pruning worker, then the
    remaining provider/configuration surfaces, including Ollama and the
    deterministic fake-process foundation for an allowlisted local harness.
-5. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
+4. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 36 integration tests and 37 active
+- `cargo test --features provider-openai`: 36 integration tests and 43 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:

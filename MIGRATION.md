@@ -4,6 +4,40 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: remote authenticated GraphQL execution (0.4.0 to 0.5.0)
+
+This pre-1.0 Rust API boundary adds the project-agnostic private remote
+execution adapter and deliberately changes
+`GraphqlRequestContextFactory::build` to receive `&ToolGraphqlRequest` instead
+of `&GraphqlInvocationContext`. Update every factory implementation to accept
+the complete request. Local factories may continue to construct the same
+ordinary application context; remote factories should use the additional
+operation and variable bindings rather than discard them.
+
+For private routed or direct targets, construct
+`AiRemoteAuthenticatedGraphqlAdapter` and use the same cloned adapter value as
+both `GraphqlRequestContextFactory` and `AuthenticatedGraphqlExecutor`. Supply:
+
+- an `AiRemoteGraphqlAuthorityIssuer` that mints one audience/resource/
+  operation-bound, short-lived credential while preserving the human actor;
+- an `AiRemoteGraphqlTransport` that maps only deployment-registered logical
+  target IDs to fixed private allowlisted destinations and propagates the
+  correlation/causation audit chain; and
+- validated authority-lifetime and freshly resolved principal-age limits.
+
+Do not pass or persist the user's bearer token. Do not serialize, log, retain,
+or reuse `AiRemoteGraphqlAuthority`. A direct-service transport must never
+grant more authority than the equivalent routed request. The issuer and
+transport remain trusted deployment boundaries: the crate binds and verifies
+the redacted request but cannot inspect proprietary delegated-token claims or
+prove private network configuration.
+
+This change adds no GraphQL root or client-visible SDL, changes no Cargo
+feature/default, and changes no persistent entity, index, constraint, backup,
+restore, or authorization-policy data. `AI_SCHEMA_MODULE_VERSION` remains
+`0.10.0`; no AI or application data migration is required. Update the package
+expectation and reviewed Git revision together.
+
 ## Unreleased: schema module 0.9.0 to 0.10.0
 
 Apply `AiSchemaModule` through the managed `graphql-orm` schema manager while

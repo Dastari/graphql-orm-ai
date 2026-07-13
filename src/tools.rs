@@ -476,7 +476,7 @@ impl AiToolCatalog {
     }
 }
 
-fn contains_forbidden_graphql_name(document: &str) -> bool {
+pub(crate) fn contains_forbidden_graphql_name(document: &str) -> bool {
     const FORBIDDEN: &[&str] = &[
         "aisessions",
         "aisession",

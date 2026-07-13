@@ -1208,7 +1208,7 @@ mod tests {
             &self,
             principal: &ResolvedPrincipal,
             _target: &GraphqlExecutionTarget,
-            _invocation: &GraphqlInvocationContext,
+            _request: &ToolGraphqlRequest,
         ) -> Result<GraphqlRequestContext, ToolExecutionError> {
             Ok(GraphqlRequestContext::new(
                 principal.principal().subject().to_owned(),

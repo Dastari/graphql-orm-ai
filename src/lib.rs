@@ -62,6 +62,7 @@ mod provider;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod provider_calls;
 mod providers;
+mod remote_execution;
 mod restore;
 mod run_state;
 mod runtime;
@@ -112,6 +113,7 @@ pub use provider::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use provider_calls::*;
 pub use providers::*;
+pub use remote_execution::*;
 pub use restore::*;
 pub use run_state::*;
 pub use runtime::*;
@@ -126,9 +128,12 @@ pub mod prelude {
         AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiBudgetReservation,
         AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
         AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
-        AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider, AiRuntime,
-        AiRuntimeBuilder, AiScope, AiSecretStore, AiToolAuthorizationPolicy, AiToolCatalog,
-        AiToolDescriptor, DataClassification, SecretRef, ToolMaturity,
+        AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider,
+        AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
+        AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
+        AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiRuntime, AiRuntimeBuilder,
+        AiScope, AiSecretStore, AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor,
+        DataClassification, SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{

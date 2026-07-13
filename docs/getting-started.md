@@ -44,6 +44,13 @@ contract from default camelCase to PascalCase.
 8. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
+For private routed/direct targets, use one cloned
+`AiRemoteAuthenticatedGraphqlAdapter` as both request-context factory and
+executor. Implement its authority issuer at the short-lived credential boundary
+and its transport at the fixed private logical-route boundary. Do not retain or
+forward the user's bearer token. See the
+[remote execution guide](remote-graphql-execution.md).
+
 For SQLite/PostgreSQL hosts, construct `OrmAiBudgetService` with a trusted
 `agql-auth::Clock` and validated deployment-owned `AiBudgetServiceLimits`.
 Provider orchestration must call `reserve` before egress and `reconcile` after
@@ -89,15 +96,19 @@ gated `new_with_tools` path exposes only exact registered, policy-enabled,
 idempotent read-only application queries. Execute returned calls with
 `OrmAiApplicationToolCallService`, carry its renewed lease forward, and use
 `AiAgentLoopGuard` plus `new_continuation_with_tools` to prevent missing,
-duplicated, or swapped results. Mutations, approval-required operations,
-arbitrary GraphQL, and ambiguous resume remain closed. See the
+duplicated, or swapped results. Supervised plans use the dedicated constructors
+and `OrmAiConsequentialToolCallService` to request a server-previewed one-shot
+approval and execute it through fresh ordinary resolver authorization;
+top-level approval-wait coordination remains host-owned. Arbitrary GraphQL and
+ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md).
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Attachment handling,
 budget/usage GraphQL management, partial-batch restart adoption, durable live
-delta persistence, and the consequential tool executor remain under
-implementation. The proposal
-and approval persistence/GraphQL lifecycles are implemented; approval
-consumption still must be followed by fresh ordinary resolver authorization.
-See the [proposal and approval lifecycle guide](review-lifecycles.md).
+delta persistence, and top-level approval-wait coordination remain under
+implementation. The proposal/approval GraphQL lifecycles and consequential
+executor are implemented; approval consumption is always followed by fresh
+ordinary resolver authorization in that path. See the
+[proposal and approval lifecycle guide](review-lifecycles.md) and
+[supervised tool guide](supervised-tool-loop.md).

@@ -5,7 +5,7 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.4.0` and the AI
+This development line advances the pre-1.0 crate version to `0.5.0` and the AI
 schema module to `0.10.0`.
 
 ### Added
@@ -107,9 +107,18 @@ schema module to `0.10.0`.
 - Durable consequential tool-call bindings for provider/model/response,
   settled budget reservation, correlation/causation, and safe delegation
   references so approval execution can be rebuilt after an interactive wait.
+- A provider-neutral `AiRemoteAuthenticatedGraphqlAdapter` for private routed
+  or direct GraphQL targets, plus redacted exact delegation requests,
+  deployment authority-issuer and transport seams, logical-route conformance
+  fixtures, short-lived secret handling, and current-principal freshness
+  limits without embedding a router or federation product.
 
 ### Changed
 
+- `GraphqlRequestContextFactory::build` now receives the complete validated
+  `ToolGraphqlRequest` instead of only `GraphqlInvocationContext`, allowing a
+  remote issuer to bind delegated authority to the exact server-authored
+  operation, canonical variables, projection, disclosure, and audit context.
 - `AiRuntime::execute_tool` now rejects every approval-required descriptor.
   One-shot supervised mutations use `execute_approved_tool`, which recomputes
   current host tool policy and compares its version and authorization-state
@@ -181,6 +190,12 @@ schema module to `0.10.0`.
 
 ### Security
 
+- Remote GraphQL execution now rejects local/unregistered targets, stale or
+  expired principals, expired delegated authority, changed documents or
+  canonical variables, changed operation/projection/disclosure/audit bindings,
+  contexts from another adapter, and recursive AI/introspection operations
+  before private transport. Incoming bearer tokens and target URLs are not
+  accepted by the adapter contract.
 - Approval-required descriptors can no longer use the ordinary unapproved
   runtime execution entry point. A consumed proof must match the complete
   rebuilt binding, and fresh policy version/state must still match before the

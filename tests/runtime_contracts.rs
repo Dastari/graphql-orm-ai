@@ -51,7 +51,7 @@ impl GraphqlRequestContextFactory for ContextFactory {
         &self,
         principal: &ResolvedPrincipal,
         _target: &GraphqlExecutionTarget,
-        _invocation: &GraphqlInvocationContext,
+        _request: &ToolGraphqlRequest,
     ) -> Result<GraphqlRequestContext, ToolExecutionError> {
         Ok(GraphqlRequestContext::new(
             principal.principal().scopes().to_vec(),

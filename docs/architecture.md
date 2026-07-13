@@ -30,6 +30,14 @@ projection, and disclosure metadata. Delegated credentials are ephemeral. The
 user's original bearer token, endpoint URL, and secret material are never
 stored in sessions, tool calls, or model context.
 
+`AiRemoteAuthenticatedGraphqlAdapter` implements the same context-factory and
+executor contracts for private routed/direct targets. It creates a redacted
+exact delegation request after the ordinary bridge rehydrates and authorizes
+the principal. A deployment issuer mints the ephemeral credential and a
+deployment transport maps the logical target to a fixed private destination.
+The adapter is federation-neutral; direct routes must not gain authority beyond
+their equivalent routed operation.
+
 For every registered call the bridge rehydrates the principal, invokes a
 required host `AiToolAuthorizationPolicy` over the scope/descriptor/validated
 arguments, builds the ordinary request context, and executes the resolver.

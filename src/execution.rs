@@ -305,12 +305,16 @@ pub enum ToolExecutionError {
 #[async_trait]
 pub trait GraphqlRequestContextFactory: Send + Sync {
     /// Builds the complete auth, DB-auth, loader, rate-limit, request, and audit
-    /// envelope for an invocation.
+    /// envelope for the exact server-authored request.
+    ///
+    /// Receiving the complete request lets remote factories bind delegated
+    /// authority to the operation document, variables, projection, disclosure,
+    /// run/tool identity, and audit chain before execution.
     async fn build(
         &self,
         principal: &ResolvedPrincipal,
         target: &GraphqlExecutionTarget,
-        invocation: &GraphqlInvocationContext,
+        request: &ToolGraphqlRequest,
     ) -> Result<GraphqlRequestContext, ToolExecutionError>;
 }
 
@@ -387,7 +391,7 @@ impl AuthenticatedToolBridge {
         }
         let context = self
             .context_factory
-            .build(&principal, target, &request.invocation)
+            .build(&principal, target, &request)
             .await?;
         let response = self.executor.execute(context, request).await?;
         Ok((response, authorization))
@@ -454,7 +458,7 @@ impl AuthenticatedToolBridge {
             .validate_contract(&request.contract, &request.document)?;
         let context = self
             .context_factory
-            .build(&principal, target, &request.invocation)
+            .build(&principal, target, &request)
             .await?;
         let response = self.executor.execute(context, request).await?;
         Ok((response, authorization))
