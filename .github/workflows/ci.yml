@@ -62,15 +62,21 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: Dastari/graphql-orm
-          ref: v0.6.3
+          ref: f24db2f0e64dbc939ca875984d48326f47542aeb
           path: graphql-orm
       - uses: actions/checkout@v5
         with:
           repository: Dastari/agql-auth
-          ref: v0.8.1
+          ref: 2ab5dc1f963dad401a3393fd3af1392c2bb51e50
           path: agql-auth
       - name: Create baseline worktree
         run: git -C graphql-orm-ai worktree add ../graphql-orm-ai-baseline "${{ github.event.pull_request.base.sha }}"
+      - name: Reconstruct unpublished baseline dependency universe
+        run: |
+          sed -i 's/version = "0.8.0"/version = "0.9.0"/' graphql-orm-ai-baseline/Cargo.toml
+          sed -i 's/version = "0.6.1"/version = "0.7.0"/' graphql-orm-ai-baseline/Cargo.toml
+          grep -F 'agql-auth = { path = "../agql-auth", version = "0.9.0" }' graphql-orm-ai-baseline/Cargo.toml
+          grep -F 'graphql-orm = { path = "../graphql-orm/crates/graphql-orm", version = "0.7.0", default-features = false }' graphql-orm-ai-baseline/Cargo.toml
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           manifest-path: graphql-orm-ai/Cargo.toml
