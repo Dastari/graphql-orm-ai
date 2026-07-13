@@ -111,7 +111,9 @@ or turn retention on.
 ## Deliberate remaining gates
 
 - No mutation, proposal, consequential, approval-required, or non-idempotent
-  descriptor can enter this loop.
+  descriptor can enter this loop. Use the separate
+  [supervised service](supervised-tool-loop.md) for exact one-shot application
+  mutations; it is not yet owned by this coordinator.
 - Restart adoption for a provider turn or partially completed tool batch is not
   implemented. Only final protected output has an exact same-transaction
   checkpoint that expired recovery can safely finalize.

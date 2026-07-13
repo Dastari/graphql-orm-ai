@@ -1042,6 +1042,14 @@ pub(crate) struct AiToolCallRecord {
     pub provider_call_key: String,
     /// Opaque provider call ID required for exact continuation binding.
     pub provider_call_id: String,
+    /// Exact provider family that emitted the call.
+    pub provider_kind: Option<String>,
+    /// Exact provider model that emitted the call.
+    pub provider_model: Option<String>,
+    /// Provider response containing the call, when emitted.
+    pub provider_response_id: Option<String>,
+    /// Settled provider-turn budget/usage correlation.
+    pub budget_reservation_id: Option<graphql_orm::uuid::Uuid>,
     /// Zero-based provider turn within the bounded agent loop.
     pub provider_turn_index: i64,
     /// Zero-based call order within the provider turn.
@@ -1080,6 +1088,12 @@ pub(crate) struct AiToolCallRecord {
     pub approval_id: Option<graphql_orm::uuid::Uuid>,
     /// Stable idempotency key when supported.
     pub idempotency_key: Option<String>,
+    /// Original server-owned correlation reference.
+    pub correlation_id: Option<String>,
+    /// Original server-owned causation reference.
+    pub causation_id: Option<String>,
+    /// Safe delegation/grant reference, never a credential.
+    pub delegation_reference: Option<String>,
     /// Attempt/fencing generation that owns the result.
     pub lease_generation: i64,
     /// Durable state.
@@ -1621,7 +1635,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.9.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.10.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

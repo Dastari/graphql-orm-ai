@@ -441,6 +441,39 @@ impl AiToolCatalog {
         }
         Ok(())
     }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_supervised_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        policy: &AiToolPolicySet,
+    ) -> Result<(), AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let descriptor = self.descriptor(&id).ok_or(AiError::Forbidden)?;
+        let safe_read = descriptor.operation_kind == AiToolOperationKind::Query
+            && descriptor.operation_domain == AiToolOperationDomain::Application
+            && descriptor.maturity == ToolMaturity::ReadOnly
+            && descriptor.risk == AiToolRisk::ReadOnly
+            && descriptor.approval == AiApprovalRule::None
+            && descriptor.idempotent;
+        let supervised_write = descriptor.operation_kind == AiToolOperationKind::Mutation
+            && descriptor.operation_domain == AiToolOperationDomain::Application
+            && descriptor.maturity == ToolMaturity::SupervisedWrite
+            && matches!(
+                descriptor.risk,
+                AiToolRisk::LowRiskWrite | AiToolRisk::NonIdempotentWrite | AiToolRisk::HighImpact
+            )
+            && descriptor.approval == AiApprovalRule::OneShot;
+        if !policy.allows(descriptor)
+            || !(safe_read || supervised_write)
+            || definition.fingerprint != descriptor.fingerprint
+            || definition.description != descriptor.description
+            || definition.parameters != descriptor.argument_schema
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(())
+    }
 }
 
 fn contains_forbidden_graphql_name(document: &str) -> bool {

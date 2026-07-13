@@ -4,16 +4,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agql_auth::{CurrentPrincipalResolver, PrincipalReference};
+use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 
 use crate::{
-    AiAccessPolicy, AiContentProtectionPolicyResolver, AiContentProtector,
-    AiDeploymentEgressBoundary, AiDisclosureEvaluation, AiEgressDecision, AiEgressManifest,
-    AiEgressPolicy, AiError, AiProposalCatalog, AiProvider, AiSchemaModule, AiSecretStore,
-    AiToolAuthorizationPolicy, AiToolCatalog, AiToolId, AuthenticatedGraphqlExecutor,
-    AuthenticatedToolBridge, GraphqlExecutionTargetRegistry, GraphqlRequestContextFactory,
-    ModelRequest, ProviderError, ProviderEventStream, ProviderKind, ProviderRequestContext,
-    ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
+    AiAccessPolicy, AiApprovalBinding, AiApprovalRule, AiContentProtectionPolicyResolver,
+    AiContentProtector, AiDeploymentEgressBoundary, AiDisclosureEvaluation, AiEgressDecision,
+    AiEgressManifest, AiEgressPolicy, AiError, AiProposalCatalog, AiProvider, AiSchemaModule,
+    AiSecretStore, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog,
+    AiToolDescriptor, AiToolId, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge,
+    ConsumedAiApproval, GraphqlExecutionTargetRegistry, GraphqlRequestContextFactory, ModelRequest,
+    ProviderError, ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
+    ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
 
@@ -100,6 +101,44 @@ pub struct AiToolExecutionResult {
     tool_fingerprint: String,
     policy_version: String,
     authorization_state_digest: String,
+}
+
+/// Fresh current-principal host tool-policy proof for one exact registered
+/// request.
+///
+/// This proof is intentionally weaker than resolver authorization and does
+/// not prove approval, unchanged application resources, or execution. A
+/// consequential workflow binds its version/digest into the canonical action
+/// envelope, then recomputes and compares both immediately before invoking the
+/// resolver.
+#[derive(Clone, Debug)]
+pub struct AiToolPreauthorization {
+    principal: ResolvedPrincipal,
+    tool_fingerprint: String,
+    policy_version: String,
+    authorization_state_digest: String,
+}
+
+impl AiToolPreauthorization {
+    /// Freshly resolved principal used by a server-owned preview builder.
+    pub fn principal(&self) -> &ResolvedPrincipal {
+        &self.principal
+    }
+
+    /// Exact registered descriptor fingerprint that was authorized.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+
+    /// Current host tool-policy version.
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    /// Safe current authorization-state digest.
+    pub fn authorization_state_digest(&self) -> &str {
+        &self.authorization_state_digest
+    }
 }
 
 impl AiToolExecutionResult {
@@ -248,11 +287,116 @@ impl AiRuntime {
             &request,
             self.maximum_tool_maturity,
         )?;
+        if descriptor.approval != AiApprovalRule::None {
+            return Err(AiError::Forbidden);
+        }
         let (response, authorization) = self
             .tool_bridge
             .execute(principal_reference, descriptor, request)
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
+        self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
+    }
+
+    /// Rehydrates and evaluates current host tool policy for an exact
+    /// registered request without invoking its resolver.
+    ///
+    /// The returned proof is suitable for canonical approval binding only. It
+    /// does not replace ordinary resolver authorization or one-shot approval.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the runtime is not ready, the descriptor/request is
+    /// stale or above the deployment maturity cap, arguments are invalid, or
+    /// current host tool policy denies the request.
+    pub async fn preauthorize_tool(
+        &self,
+        principal_reference: &PrincipalReference,
+        tool_id: &AiToolId,
+        request: &ToolGraphqlRequest,
+    ) -> Result<AiToolPreauthorization, AiError> {
+        if !self.start_gate.is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let (descriptor, _) = self.tool_catalog.validate_execution_request(
+            tool_id,
+            request,
+            self.maximum_tool_maturity,
+        )?;
+        let (principal, authorization) = self
+            .tool_bridge
+            .preauthorize(principal_reference, descriptor, request)
+            .await
+            .map_err(|_| AiError::Forbidden)?;
+        Ok(AiToolPreauthorization {
+            principal,
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            policy_version: authorization.policy_version,
+            authorization_state_digest: authorization.authorization_state_digest,
+        })
+    }
+
+    /// Executes one exact supervised application mutation after atomic
+    /// consumption of its complete one-shot approval envelope.
+    ///
+    /// The bridge rehydrates and authorizes again, compares the newly computed
+    /// policy version and authorization-state digest before invoking the
+    /// resolver, then applies the same bounded static disclosure validation as
+    /// an ordinary tool result. Approval never substitutes for the resolver's
+    /// normal row/field/domain authorization.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a stale consumption/binding, a non-supervised or
+    /// non-one-shot descriptor, changed current policy/authorization state,
+    /// resolver ambiguity, output-limit violations, or static disclosure
+    /// failure.
+    pub async fn execute_approved_tool(
+        &self,
+        principal_reference: &PrincipalReference,
+        tool_id: &AiToolId,
+        request: ToolGraphqlRequest,
+        approval: &ConsumedAiApproval,
+        binding: &AiApprovalBinding,
+    ) -> Result<AiToolExecutionResult, AiError> {
+        if !self.start_gate.is_ready()
+            || approval.binding_hash() != binding.stable_hash()
+            || approval.approval_id().0.is_nil()
+        {
+            return Err(AiError::Forbidden);
+        }
+        let (descriptor, disclosure_schema) = self.tool_catalog.validate_execution_request(
+            tool_id,
+            &request,
+            self.maximum_tool_maturity,
+        )?;
+        if !is_supervised_one_shot_mutation(descriptor)
+            || descriptor.fingerprint != binding.tool_fingerprint
+            || descriptor.graphql_contract.as_ref() != Some(&binding.operation)
+        {
+            return Err(AiError::Forbidden);
+        }
+        let (response, authorization) = self
+            .tool_bridge
+            .execute_bound(
+                principal_reference,
+                descriptor,
+                request,
+                &binding.policy_version,
+                &binding.authorization_state_digest,
+            )
+            .await
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
+    }
+
+    fn finish_tool_execution(
+        &self,
+        descriptor: &AiToolDescriptor,
+        disclosure_schema: &crate::AiDisclosureSchema,
+        response: ToolGraphqlResponse,
+        authorization: AiToolAuthorizationDecision,
+    ) -> Result<AiToolExecutionResult, AiError> {
         if response.error_codes.len() > 32
             || response.error_codes.iter().any(|code| {
                 code.is_empty()
@@ -315,6 +459,19 @@ impl AiRuntime {
         }
         provider.stream(request, context).await
     }
+}
+
+fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
+    descriptor.operation_kind == crate::AiToolOperationKind::Mutation
+        && descriptor.operation_domain == crate::AiToolOperationDomain::Application
+        && descriptor.maturity == ToolMaturity::SupervisedWrite
+        && descriptor.approval == AiApprovalRule::OneShot
+        && matches!(
+            descriptor.risk,
+            crate::AiToolRisk::LowRiskWrite
+                | crate::AiToolRisk::NonIdempotentWrite
+                | crate::AiToolRisk::HighImpact
+        )
 }
 
 /// Runtime builder with fail-closed required dependencies.

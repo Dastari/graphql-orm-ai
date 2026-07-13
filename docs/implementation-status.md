@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.9.0`) and 37 private records
+- AI schema-module identity (currently version `0.10.0`) and 37 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -116,6 +116,12 @@ production-ready behavior.
   optional recent-MFA decision, revocation, current original-actor
   rehydration, atomic one-shot consumption, protected events, and renewed
   running fences.
+- Supervised provider-plan exposure and a concrete ORM consequential mutation
+  service: exact current tool preauthorization, deployment-provided canonical
+  preview generation, protected restart bindings, committed-budget validation,
+  one-shot consumption, fresh policy version/state comparison before ordinary
+  resolver execution, protected/static-disclosed results, separate result
+  egress, renewed fences, and recovery-required closure for ambiguous effects.
 - Explicit egress manifests, deployment boundary, policy decision, and
   allowed-manifest proof.
 - JSON Schema 2020-12 structured proposal registry and provenance validation.
@@ -166,10 +172,10 @@ production-ready behavior.
   implementations. Database-managed protection and the safe service seams are
   implemented.
 - Attachment/quarantine/storage pipeline.
-- Consequential application-tool executor and deployment-provided canonical
-  preview builder. Approval request/decision/revocation/consumption persistence
-  is implemented, but consumption is deliberately not yet wired to mutations;
-  fresh resolver/resource authorization remains mandatory.
+- Top-level supervised coordinator for heartbeating long human approval waits,
+  restart adoption, and exact provider continuation. The generic consequential
+  executor and preview-builder seam are implemented; the read-only coordinator
+  deliberately cannot route mutation descriptors.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
@@ -209,22 +215,19 @@ production-ready behavior.
 1. Extend coordinator checkpoints to protected provider-turn/tool-batch state,
    then implement generation adoption only for exact replay-safe read-only
    phases and wire coalesced live batches to protected durable cursor events.
-2. Implement the consequential tool executor around the existing exact
-   approval lifecycle, with a host canonical-preview builder and fresh resolver
-   authorization immediately after one-shot consumption.
-3. Add the generic delegated-authority seam and remote authenticated GraphQL
+2. Add the generic delegated-authority seam and remote authenticated GraphQL
    executor fixtures without embedding a federation/router product.
-4. Add the attachment quarantine/scanning/storage pipeline and connect its
+3. Add the attachment quarantine/scanning/storage pipeline and connect its
    authorized image/file resolution to provider adapters.
-5. Add the per-principal inbox stream and retention/pruning worker, then the
+4. Add the per-principal inbox stream and retention/pruning worker, then the
    remaining provider/configuration surfaces, including Ollama and the
    deterministic fake-process foundation for an allowlisted local harness.
-6. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
+5. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 36 integration tests and 35 active
+- `cargo test --features provider-openai`: 36 integration tests and 37 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:

@@ -209,9 +209,7 @@ impl OrmAiApprovalService {
                 "approval expiry is invalid".to_owned(),
             ));
         }
-        let resolved = self
-            .resolve_current(lease.principal_reference(), now)
-            .await?;
+        let resolved = self.resolve_current(lease.principal_reference()).await?;
         self.require_registered_binding(lease, &binding, "executing")
             .await?;
         if !self
@@ -340,9 +338,7 @@ impl OrmAiApprovalService {
             return Err(AiError::Conflict);
         }
         let now = canonical_second(self.clock.now());
-        let resolved = self
-            .resolve_current(lease.principal_reference(), now)
-            .await?;
+        let resolved = self.resolve_current(lease.principal_reference()).await?;
         self.require_registered_binding(lease, binding, "waiting_approval")
             .await?;
         if !self
@@ -456,15 +452,15 @@ impl OrmAiApprovalService {
     async fn resolve_current(
         &self,
         reference: &PrincipalReference,
-        now: OffsetDateTime,
     ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
         let resolved = self
             .principal_resolver
             .resolve(reference)
             .await
             .map_err(|_| AiError::ReauthorizationFailed)?;
-        if resolved.resolved_at() > now
-            || now - resolved.resolved_at() > self.limits.maximum_principal_age
+        let checked_at = self.clock.now();
+        if resolved.resolved_at() > checked_at
+            || checked_at - resolved.resolved_at() > self.limits.maximum_principal_age
             || resolved.reference() != reference
         {
             return Err(AiError::ReauthorizationFailed);
@@ -513,7 +509,7 @@ impl OrmAiApprovalService {
         principal: &AuthPrincipal,
     ) -> Result<AuthPrincipal, AiError> {
         Ok(self
-            .resolve_current(&principal.reference(), canonical_second(self.clock.now()))
+            .resolve_current(&principal.reference())
             .await?
             .into_principal())
     }
@@ -1312,6 +1308,10 @@ mod tests {
                     id: tool_call_id.0,
                     provider_call_key: "approval-provider-call".to_owned(),
                     provider_call_id: "provider-call-1".to_owned(),
+                    provider_kind: "mock".to_owned(),
+                    provider_model: "approval-test".to_owned(),
+                    provider_response_id: Some("approval-response-1".to_owned()),
+                    budget_reservation_id: Uuid::new_v4(),
                     provider_turn_index: 0,
                     tool_call_index: 0,
                     tool_id: "application.change".to_owned(),
@@ -1319,7 +1319,10 @@ mod tests {
                     protected_arguments: serde_json::json!({"protection": "database_managed", "value": {"id": "resource-1"}}),
                     argument_hash: "argument-hash-v1".to_owned(),
                     risk: "high_impact".to_owned(),
-                    idempotency_key: tool_call_id.0.to_string(),
+                    idempotency_key: Some(tool_call_id.0.to_string()),
+                    correlation_id: "approval-correlation".to_owned(),
+                    causation_id: "approval-causation".to_owned(),
+                    delegation_reference: None,
                     expected_owner_principal_kind: "user".to_owned(),
                     expected_owner_subject: fixture.principal.subject().to_owned(),
                     expected_scope_kind: fixture.scope.kind.clone(),

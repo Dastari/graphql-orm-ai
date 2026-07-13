@@ -133,12 +133,13 @@ pub mod prelude {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
         AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
-        AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
-        AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
-        AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
+        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome, AiProposalServiceLimits,
+        AiProviderCallExecutor, AiProviderCallLimits, AiProviderOutputLimits,
+        AiProviderUsageAccounting, AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits,
+        AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall,
         AiRunServiceLimits, OrmAiApplicationToolCallService, OrmAiApprovalService,
-        OrmAiBudgetService, OrmAiEgressDecisionAudit, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRunService,
+        OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiEgressDecisionAudit,
+        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

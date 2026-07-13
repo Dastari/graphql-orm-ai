@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.3.0` and the AI
-schema module to `0.9.0`.
+This development line advances the pre-1.0 crate version to `0.4.0` and the AI
+schema module to `0.10.0`.
 
 ### Added
 
@@ -97,15 +97,36 @@ schema module to `0.9.0`.
 - Project-agnostic local execution design covering local HTTP model servers and
   allowlisted native/ACP subprocess harnesses without arbitrary shell,
   environment, filesystem, network, or tool authority.
+- Explicit supervised provider-plan constructors accepting only enabled exact
+  read-only tools and `SupervisedWrite` application mutations with one-shot
+  approval and non-secret consequential risk classes.
+- `AiCanonicalActionPreviewBuilder`, `AiToolPreauthorization`, and
+  `OrmAiConsequentialToolCallService` for server-owned current-state previews,
+  protected approval staging, exact consumption, freshly policy-bound ordinary
+  resolver execution, protected results, separate egress, and fenced outcomes.
+- Durable consequential tool-call bindings for provider/model/response,
+  settled budget reservation, correlation/causation, and safe delegation
+  references so approval execution can be rebuilt after an interactive wait.
 
 ### Changed
+
+- `AiRuntime::execute_tool` now rejects every approval-required descriptor.
+  One-shot supervised mutations use `execute_approved_tool`, which recomputes
+  current host tool policy and compares its version and authorization-state
+  digest before building the normal resolver request context.
+- AI schema module version is now `0.10.0`. Existing tool-call history keeps
+  nullable new provider/audit fields; a waiting pre-`0.10.0` consequential row
+  cannot be resumed and fails closed for reconciliation.
+- Approval principal freshness is sampled after asynchronous rehydration,
+  avoiding false future-timestamp rejection with sub-second system clocks.
 
 - `AiProviderCallPlan::new_with_tools` now accepts initial turns only and
   rejects pre-populated provider continuation/tool-result input. Exact later
   turns must consume `AiAgentContinuation` through
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
-  `completed` counter. The AI schema module version is `0.9.0`.
+  `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
+  the current module is `0.10.0`.
 
 - Multi-repository development now uses one owning agent per repository.
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
@@ -159,6 +180,15 @@ schema module to `0.9.0`.
   internal whitespace instead of sending an ambiguous bearer credential.
 
 ### Security
+
+- Approval-required descriptors can no longer use the ordinary unapproved
+  runtime execution entry point. A consumed proof must match the complete
+  rebuilt binding, and fresh policy version/state must still match before the
+  resolver is invoked.
+- Supervised execution verifies the exact provider turn has a committed,
+  reconciled budget reservation before consuming approval. Any resolver
+  timeout or post-side-effect persistence/authorization ambiguity terminally
+  closes the run as `RecoveryRequired` and is never automatically replayed.
 
 - Tool registration rejects current AI control-plane and GraphQL introspection
   roots, including casing variants, before policy enablement.

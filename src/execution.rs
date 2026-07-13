@@ -392,4 +392,71 @@ impl AuthenticatedToolBridge {
         let response = self.executor.execute(context, request).await?;
         Ok((response, authorization))
     }
+
+    /// Rehydrates and authorizes an exact registered request without invoking
+    /// its resolver.
+    ///
+    /// This is only a current host tool-policy decision. It does not prove
+    /// resolver authorization, unchanged application resources, approval, or
+    /// successful execution.
+    pub(crate) async fn preauthorize(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> Result<(ResolvedPrincipal, AiToolAuthorizationDecision), ToolExecutionError> {
+        if request.operation_name != request.contract.operation_name {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        self.targets
+            .validate_contract(&request.contract, &request.document)?;
+        let principal = self
+            .principal_resolver
+            .resolve(principal_reference)
+            .await
+            .map_err(|_| ToolExecutionError::Reauthorization)?;
+        let authorization = self
+            .authorization_policy
+            .authorize(
+                &principal,
+                &request.invocation.scope,
+                descriptor,
+                &request.variables,
+            )
+            .await;
+        if !authorization.is_complete_allow() {
+            return Err(ToolExecutionError::Authorization);
+        }
+        Ok((principal, authorization))
+    }
+
+    /// Executes only when a newly recomputed host policy decision still
+    /// matches the policy version and safe authorization-state digest bound to
+    /// a consumed one-shot approval.
+    pub(crate) async fn execute_bound(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        expected_policy_version: &str,
+        expected_authorization_state_digest: &str,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        let (principal, authorization) = self
+            .preauthorize(principal_reference, descriptor, &request)
+            .await?;
+        if authorization.policy_version != expected_policy_version
+            || authorization.authorization_state_digest != expected_authorization_state_digest
+        {
+            return Err(ToolExecutionError::Authorization);
+        }
+        let target = self
+            .targets
+            .validate_contract(&request.contract, &request.document)?;
+        let context = self
+            .context_factory
+            .build(&principal, target, &request.invocation)
+            .await?;
+        let response = self.executor.execute(context, request).await?;
+        Ok((response, authorization))
+    }
 }

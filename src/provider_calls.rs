@@ -199,6 +199,52 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an initial provider call that may expose explicitly enabled
+    /// read-only queries and supervised one-shot application mutations.
+    ///
+    /// This constructor only controls model-visible discovery. Every mutation
+    /// still requires a server-generated canonical preview, exact durable
+    /// approval, fresh policy comparison, and ordinary resolver authorization
+    /// before execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for ordinary plan-binding failures or
+    /// pre-populated continuation/tool-result input, and
+    /// [`AiError::Forbidden`] unless every definition exactly matches an
+    /// enabled safe read or supervised one-shot mutation descriptor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_supervised_tools(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        policy: &AiToolPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty()
+            || request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, crate::ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::InvalidInput(
+                "initial supervised provider tool plan is invalid".to_owned(),
+            ));
+        }
+        Self::new_with_bound_supervised_tools(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            policy,
+        )
+    }
+
     fn new_with_bound_tools(
         provider_kind: ProviderKind,
         request: ModelRequest,
@@ -215,6 +261,36 @@ impl AiProviderCallPlan {
         }
         for definition in &request.tools {
             catalog.validate_read_only_model_definition(definition, policy)?;
+        }
+        let mut request_without_tools = request.clone();
+        request_without_tools.tools.clear();
+        let mut plan = Self::new(
+            provider_kind,
+            request_without_tools,
+            budget,
+            transfers,
+            correlation_id,
+        )?;
+        plan.request = request;
+        Ok(plan)
+    }
+
+    fn new_with_bound_supervised_tools(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        catalog: &crate::AiToolCatalog,
+        policy: &AiToolPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.tools.is_empty() {
+            return Err(AiError::InvalidInput(
+                "supervised provider tool plan has no tools".to_owned(),
+            ));
+        }
+        for definition in &request.tools {
+            catalog.validate_supervised_model_definition(definition, policy)?;
         }
         let mut request_without_tools = request.clone();
         request_without_tools.tools.clear();
@@ -256,6 +332,39 @@ impl AiProviderCallPlan {
         let tool_transfers = continuation.apply_with_transfers(&mut request)?;
         transfers.extend(tool_transfers);
         Self::new_with_bound_tools(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            catalog,
+            policy,
+        )
+    }
+
+    /// Creates a continuation turn retaining the exact supervised tool
+    /// exposure policy while installing one bounded, egress-authorized prior
+    /// result set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed continuation bindings or any stale,
+    /// disabled, non-read-only/non-supervised, or otherwise unsafe tool
+    /// definition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_supervised_continuation_with_tools(
+        provider_kind: ProviderKind,
+        mut request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        continuation: crate::AiAgentContinuation,
+        catalog: &crate::AiToolCatalog,
+        policy: &AiToolPolicySet,
+    ) -> Result<Self, AiError> {
+        let tool_transfers = continuation.apply_with_transfers(&mut request)?;
+        transfers.extend(tool_transfers);
+        Self::new_with_bound_supervised_tools(
             provider_kind,
             request,
             budget,
@@ -1025,6 +1134,8 @@ fn valid_provider_call_id(value: &str) -> bool {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
     use agql_auth::{
         AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
@@ -1105,7 +1216,7 @@ mod tests {
         }
     }
 
-    struct Executor;
+    struct Executor(Arc<AtomicBool>);
 
     #[async_trait]
     impl AuthenticatedGraphqlExecutor for Executor {
@@ -1114,6 +1225,9 @@ mod tests {
             context: GraphqlRequestContext,
             request: ToolGraphqlRequest,
         ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+            if self.0.load(Ordering::SeqCst) {
+                return Err(ToolExecutionError::Execution);
+            }
             let subject = context
                 .downcast_ref::<String>()
                 .ok_or(ToolExecutionError::RequestContext)?;
@@ -1128,7 +1242,7 @@ mod tests {
         }
     }
 
-    struct AllowTools;
+    struct AllowTools(Arc<AtomicUsize>);
 
     #[async_trait]
     impl AiToolAuthorizationPolicy for AllowTools {
@@ -1141,9 +1255,56 @@ mod tests {
         ) -> AiToolAuthorizationDecision {
             AiToolAuthorizationDecision::allow(
                 "test_read_allowed",
-                "tool-policy-v1",
-                format!("auth-state:{}", principal.principal().subject()),
+                format!("tool-policy-v{}", self.0.load(Ordering::SeqCst)),
+                format!(
+                    "auth-state:{}:v{}",
+                    principal.principal().subject(),
+                    self.0.load(Ordering::SeqCst)
+                ),
             )
+        }
+    }
+
+    struct AllowApprovals;
+
+    #[async_trait]
+    impl AiApprovalAccessPolicy for AllowApprovals {
+        async fn can_access_approval(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _session_id: AiSessionId,
+            _action: AiApprovalAction,
+        ) -> bool {
+            true
+        }
+    }
+
+    struct PreviewBuilder;
+
+    #[async_trait]
+    impl AiCanonicalActionPreviewBuilder for PreviewBuilder {
+        async fn build_preview(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _descriptor: &AiToolDescriptor,
+            request: &ToolGraphqlRequest,
+        ) -> Result<AiCanonicalActionPreview, AiError> {
+            let record_id = request
+                .variables
+                .get("recordId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AiError::InvalidInput("record ID is missing".to_owned()))?;
+            Ok(AiCanonicalActionPreview {
+                action_kind: "record_update".to_owned(),
+                title: "Update one authorized record".to_owned(),
+                targets: vec![AiApprovalResourceBinding {
+                    resource_type: "record".to_owned(),
+                    resource_id: record_id.to_owned(),
+                    expected_version: "record-version-1".to_owned(),
+                }],
+                details: json!({"recordId": record_id, "change": "test_update"}),
+            })
         }
     }
 
@@ -1213,6 +1374,8 @@ mod tests {
         mock: MockProvider,
         lease: AiRunLease,
         scope: AiScope,
+        tool_policy_version: Arc<AtomicUsize>,
+        fail_execution: Arc<AtomicBool>,
     }
 
     async fn fixture(events: Vec<ProviderEvent>) -> Fixture {
@@ -1402,6 +1565,58 @@ mod tests {
         tool_catalog
             .register_with_disclosure(descriptor, disclosure)
             .expect("tool should register");
+        let write_document = "mutation UpdateRecord($recordId: ID!) { updateRecord(id: $recordId) { recordId subject } }";
+        let write_disclosure = AiDisclosureSchema::new(
+            "record-update-v1",
+            AiDisclosureShape::object(
+                AiDisclosureRule::exportable(DataClassification::Internal),
+                [
+                    (
+                        "recordId".to_owned(),
+                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                            DataClassification::Internal,
+                        )),
+                    ),
+                    (
+                        "subject".to_owned(),
+                        AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                            DataClassification::Internal,
+                        )),
+                    ),
+                ],
+            ),
+        )
+        .expect("write disclosure should validate");
+        let write_contract = GraphqlOperationContract::new(
+            GraphqlExecutionTargetId::parse("local-application").expect("target ID should parse"),
+            "schema-v1",
+            "UpdateRecord",
+            write_document,
+            "record-update-projection-v1",
+            write_disclosure.fingerprint.clone(),
+        )
+        .expect("write contract should validate");
+        let write_descriptor = AiToolDescriptor::new(
+            "records.update",
+            "Update one authorized record after exact approval",
+            AiToolOperationKind::Mutation,
+            write_document,
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"recordId": {"type": "string"}},
+                "required": ["recordId"],
+                "additionalProperties": false
+            }),
+        )
+        .expect("write descriptor should validate")
+        .with_result_projection("record-update-projection-v1")
+        .with_graphql_contract(write_contract)
+        .with_maturity(ToolMaturity::SupervisedWrite)
+        .with_risk(AiToolRisk::HighImpact, AiApprovalRule::OneShot);
+        tool_catalog
+            .register_with_disclosure(write_descriptor, write_disclosure)
+            .expect("supervised write should register");
         let mut targets = GraphqlExecutionTargetRegistry::new();
         targets
             .register(GraphqlExecutionTarget {
@@ -1414,12 +1629,14 @@ mod tests {
                 schema_fingerprint: "schema-v1".to_owned(),
             })
             .expect("target should register");
+        let tool_policy_version = Arc::new(AtomicUsize::new(1));
+        let fail_execution = Arc::new(AtomicBool::new(false));
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(Resolver(principal.clone())))
             .access_policy(Arc::new(AllowAccess))
-            .tool_authorization_policy(Arc::new(AllowTools))
+            .tool_authorization_policy(Arc::new(AllowTools(tool_policy_version.clone())))
             .request_context_factory(Arc::new(ContextFactory))
-            .graphql_executor(Arc::new(Executor))
+            .graphql_executor(Arc::new(Executor(fail_execution.clone())))
             .graphql_targets(targets)
             .egress_policy(Arc::new(AllowEgress))
             .deployment_egress(AiDeploymentEgressBoundary {
@@ -1434,7 +1651,7 @@ mod tests {
                 maximum_bytes: 16_384,
                 maximum_attachments: 0,
             })
-            .maximum_tool_maturity(ToolMaturity::ProposalOnly)
+            .maximum_tool_maturity(ToolMaturity::SupervisedWrite)
             .tool_catalog(tool_catalog)
             .secret_store(Arc::new(EnvironmentSecretStore::new()))
             .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
@@ -1466,6 +1683,8 @@ mod tests {
             mock,
             lease,
             scope,
+            tool_policy_version,
+            fail_execution,
         }
     }
 
@@ -1568,6 +1787,128 @@ mod tests {
             &policy,
         )
         .expect("registered enabled read-only tool plan should validate")
+    }
+
+    fn supervised_tool_plan(fixture: &Fixture) -> AiProviderCallPlan {
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.update").expect("tool ID should parse"))
+            .expect("supervised tool should be registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::SupervisedWrite);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let mut base = plan(fixture);
+        base.request.tools = vec![ModelToolDefinition {
+            tool_id: descriptor.id.as_str().to_owned(),
+            provider_name: "records_update".to_owned(),
+            fingerprint: descriptor.fingerprint.clone(),
+            description: descriptor.description.clone(),
+            parameters: descriptor.argument_schema.clone(),
+            strict: true,
+        }];
+        AiProviderCallPlan::new_with_supervised_tools(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("registered enabled supervised tool plan should validate")
+    }
+
+    async fn stage_approved_supervised_call(
+        fixture: &Fixture,
+    ) -> (
+        OrmAiConsequentialToolCallService,
+        AiRequestedConsequentialToolCall,
+    ) {
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let provider_result = provider_executor
+            .execute(&fixture.lease, supervised_tool_plan(fixture))
+            .await
+            .expect("supervised provider call should normalize");
+        let approval_service = OrmAiApprovalService::new(
+            fixture.database.clone(),
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowApprovals),
+            Arc::new(fixture.runtime.tool_catalog().clone()),
+            agql_auth::RecentMfaPolicy {
+                maximum_age: Duration::minutes(5),
+                clock_skew: Duration::seconds(30),
+                allowed_amr: Vec::new(),
+                allowed_acr: Vec::new(),
+                match_mode: agql_auth::AssuranceMatchMode::All,
+            },
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+        );
+        let service = OrmAiConsequentialToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            approval_service.clone(),
+            Arc::new(PreviewBuilder),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let context = AiApplicationToolCallContext::new(
+            0,
+            0,
+            fixture.scope.clone(),
+            "supervised-recovery-test",
+            provider_result.budget_reservation_id().0.to_string(),
+        )
+        .expect("supervised context should validate");
+        let requested = service
+            .request_approval(
+                &fixture.lease,
+                &provider_result,
+                context,
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .expect("supervised call should park for approval");
+        let pending = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should exist");
+        approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: requested.approval_id().0,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: pending.row_version,
+                },
+            )
+            .await
+            .expect("human approval should persist");
+        (service, requested)
     }
 
     async fn reservation_state(database: &Database<SqliteBackend>) -> String {
@@ -1975,6 +2316,346 @@ mod tests {
             )
             .await
             .expect("renewed tool fence should complete the run");
+    }
+
+    #[tokio::test]
+    async fn supervised_mutation_requires_preview_approval_and_fresh_resolver_authorization() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("supervised-response-1".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "supervised-call-1".to_owned(),
+                tool_id: "records.update".to_owned(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "supervised-call-1".to_owned(),
+                delta: "{\"recordId\":\"54\"}".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "supervised-call-1".to_owned(),
+                arguments: json!({"recordId": "54"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("supervised-response-1".to_owned()),
+            },
+        ])
+        .await;
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let provider_result = provider_executor
+            .execute(&fixture.lease, supervised_tool_plan(&fixture))
+            .await
+            .expect("supervised provider call should normalize");
+        let approval_service = OrmAiApprovalService::new(
+            fixture.database.clone(),
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowApprovals),
+            Arc::new(fixture.runtime.tool_catalog().clone()),
+            agql_auth::RecentMfaPolicy {
+                maximum_age: Duration::minutes(5),
+                clock_skew: Duration::seconds(30),
+                allowed_amr: Vec::new(),
+                allowed_acr: Vec::new(),
+                match_mode: agql_auth::AssuranceMatchMode::All,
+            },
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+        );
+        let service = OrmAiConsequentialToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            approval_service.clone(),
+            Arc::new(PreviewBuilder),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let context = AiApplicationToolCallContext::new(
+            0,
+            0,
+            fixture.scope.clone(),
+            "supervised-tool-test",
+            provider_result.budget_reservation_id().0.to_string(),
+        )
+        .expect("supervised context should validate");
+        let supervised_descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.update").expect("tool ID should parse"))
+            .expect("supervised descriptor should exist");
+        let supervised_contract = supervised_descriptor
+            .graphql_contract
+            .clone()
+            .expect("supervised descriptor should bind GraphQL");
+        let direct_request = ToolGraphqlRequest {
+            document: supervised_descriptor.document.clone(),
+            operation_name: supervised_contract.operation_name.clone(),
+            contract: supervised_contract,
+            variables: json!({"recordId": "54"}),
+            invocation: GraphqlInvocationContext {
+                run_id: fixture.lease.run_id(),
+                tool_call_id: AiToolCallId::new(),
+                scope: fixture.scope.clone(),
+                correlation_id: "approval-bypass-test".to_owned(),
+                causation_id: "approval-bypass-test".to_owned(),
+                delegation_reference: None,
+                idempotency_key: None,
+            },
+        };
+        assert!(matches!(
+            fixture
+                .runtime
+                .execute_tool(
+                    fixture.lease.principal_reference(),
+                    &supervised_descriptor.id,
+                    direct_request,
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        let requested = service
+            .request_approval(
+                &fixture.lease,
+                &provider_result,
+                context,
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .expect("supervised call should park for approval");
+        let pending = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should exist");
+        assert_eq!(pending.state, "pending");
+        let decided = approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: requested.approval_id().0,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: pending.row_version,
+                },
+            )
+            .await
+            .expect("human approval should persist");
+        assert_eq!(decided.state, "approved");
+        fixture.tool_policy_version.store(2, Ordering::SeqCst);
+        let stale_policy_route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_supervised_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("stale-policy route should validate");
+        assert!(matches!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    stale_policy_route,
+                )
+                .await,
+            Err(AiError::Forbidden)
+        ));
+        let still_approved =
+            AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+                .await
+                .expect("approval lookup should succeed")
+                .expect("approval should remain present");
+        assert_eq!(still_approved.state, "approved");
+        fixture.tool_policy_version.store(1, Ordering::SeqCst);
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_supervised_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("supervised result route should validate");
+        let outcome = service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                route,
+            )
+            .await
+            .expect("approved mutation should execute and persist");
+        let persisted = outcome
+            .persisted()
+            .expect("unambiguous resolver result should persist");
+        assert_eq!(persisted.state(), AiApplicationToolCallState::Completed);
+        assert!(persisted.model_input().is_some());
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &requested.tool_call_id().0)
+            .await
+            .expect("tool call lookup should succeed")
+            .expect("tool call should exist");
+        assert_eq!(call.state, "completed");
+        assert_eq!(
+            call.authorization_policy_version.as_deref(),
+            Some("tool-policy-v1")
+        );
+        assert_eq!(
+            call.provider_kind.as_deref(),
+            Some(ProviderKind::OpenAiCompatible.as_str())
+        );
+        assert_eq!(call.provider_model.as_deref(), Some("mock-model"));
+        assert_eq!(call.correlation_id.as_deref(), Some("supervised-tool-test"));
+        let consumed = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should remain auditable");
+        assert_eq!(consumed.state, "consumed");
+        assert_eq!(consumed.consumed_uses, 1);
+        let replay_route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_supervised_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("replay route should validate");
+        assert!(matches!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    replay_route,
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        fixture
+            .run_service
+            .finish(
+                persisted.lease(),
+                AiRunCompletion::new(AiRunState::Completed, "supervised_test", None, None)
+                    .expect("test completion should validate"),
+            )
+            .await
+            .expect("renewed supervised fence should complete the run");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_supervised_resolver_execution_is_never_replayed() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("ambiguous-supervised-response".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "ambiguous-supervised-call".to_owned(),
+                tool_id: "records.update".to_owned(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "ambiguous-supervised-call".to_owned(),
+                delta: "{\"recordId\":\"55\"}".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "ambiguous-supervised-call".to_owned(),
+                arguments: json!({"recordId": "55"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("ambiguous-supervised-response".to_owned()),
+            },
+        ])
+        .await;
+        let (service, requested) = stage_approved_supervised_call(&fixture).await;
+        fixture.fail_execution.store(true, Ordering::SeqCst);
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_supervised_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("recovery route should validate");
+        let outcome = service
+            .execute_approved(
+                requested.lease(),
+                requested.approval_id(),
+                requested.tool_call_id(),
+                route,
+            )
+            .await
+            .expect("ambiguous execution should close durably");
+        assert!(matches!(
+            outcome,
+            AiConsequentialToolCallOutcome::RecoveryRequired { tool_call_id }
+                if tool_call_id == requested.tool_call_id()
+        ));
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should remain auditable");
+        assert_eq!(approval.state, "consumed");
+        assert_eq!(approval.consumed_uses, 1);
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &requested.tool_call_id().0)
+            .await
+            .expect("tool lookup should succeed")
+            .expect("tool should remain auditable");
+        assert_eq!(call.state, "executing");
+        assert!(call.protected_result.is_none());
+        assert!(matches!(
+            service
+                .execute_approved(
+                    requested.lease(),
+                    requested.approval_id(),
+                    requested.tool_call_id(),
+                    AiToolResultEgressRoute::new(
+                        "mock-profile",
+                        "local-mock",
+                        AiDestinationTrust::Local,
+                        "continue_supervised_tool_result",
+                        "none",
+                        "egress-v1",
+                    )
+                    .expect("replay route should validate"),
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
     }
 
     #[test]

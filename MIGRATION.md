@@ -4,6 +4,61 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.9.0 to 0.10.0
+
+Apply `AiSchemaModule` through the managed `graphql-orm` schema manager while
+provider starts, workers, subscriptions, and approval callbacks remain closed.
+This revision adds nullable restart/audit bindings to
+`graphql_orm_ai_tool_calls`:
+
+- `provider_kind`, `provider_model`, and `provider_response_id`;
+- `budget_reservation_id`;
+- `correlation_id` and `causation_id`; and
+- `delegation_reference`.
+
+New tool calls always populate the applicable fields. Supervised execution
+requires provider/model, budget, correlation, and causation bindings and proves
+that the referenced budget reservation is committed, reconciled, and matches
+the exact session/run/attempt/fencing generation/provider/model before
+consuming approval. Historical completed rows need no rewrite. A pending or
+approved consequential row created before module `0.10.0` lacks authoritative
+restart bindings and must fail closed for privileged reconciliation; do not
+invent values or update private tables manually.
+
+No application-domain data migration is required. The AI schema migration is
+nullable/additive, but the runtime start gate must remain closed until managed
+schema validation and restore reconciliation report module `0.10.0` ready.
+
+### Rust API and behavior changes
+
+- Use `AiProviderCallPlan::new_with_supervised_tools` and
+  `new_supervised_continuation_with_tools` only when the deployment/scope
+  policy explicitly enables exact supervised descriptors. The read-only plan
+  constructors remain restricted to read-only queries.
+- Implement `AiCanonicalActionPreviewBuilder` with trusted current application
+  state. Returned resource versions and preview content are approval authority;
+  model-written prose must never be used.
+- Construct `OrmAiConsequentialToolCallService`, call `request_approval`, let a
+  human decide through the existing approval GraphQL lifecycle, then call
+  `execute_approved` with the exact waiting lease and current result-egress
+  route. Replace the lease only when the returned persisted outcome contains a
+  renewed one.
+- `AiRuntime::execute_tool` now rejects descriptors whose approval rule is not
+  `None`. Direct callers that previously passed a one-shot descriptor must use
+  the supervised lifecycle; there is no compatibility bypass.
+- `AiToolPreauthorization` proves only a fresh host tool-policy decision.
+  `execute_approved_tool` recomputes and compares that policy version/state
+  before resolver invocation; ordinary resolver authorization remains final.
+- A post-consumption resolver or handoff ambiguity returns
+  `AiConsequentialToolCallOutcome::RecoveryRequired` and terminally closes the
+  run. Never retry that mutation or reuse its consumed approval.
+
+This adds no public GraphQL field or root and changes no client SDL. Approval
+query/mutation roots are unchanged. The new public APIs and deliberately
+stricter runtime behavior advance the pre-1.0 crate from `0.3.0` to `0.4.0`;
+consumers must update the package expectation and reviewed Git revision
+together.
+
 ## Unreleased: schema module 0.8.0 to 0.9.0
 
 This public/security/persistence slice advances the pre-1.0 crate version from

@@ -109,8 +109,10 @@ not reusable.
 ## Deliberate remaining gates
 
 - The generic consequential tool executor and host canonical-preview builder
-  contract are not implemented yet, so mutation/proposal/approval-required
-  descriptors remain excluded from the active agent loop.
+  contract are implemented. A top-level coordinator that supervises long-lived
+  approval waits and resumes the exact provider loop is not yet implemented;
+  mutation/proposal/approval-required descriptors remain excluded from the
+  read-only coordinator.
 - Per-item proposal review is not yet exposed; whole structured payload review
   is bounded and schema validated.
 - Long-lived approval waits currently retain a fenced waiting lease and need

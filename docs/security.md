@@ -84,15 +84,16 @@ coalescing supplies only UTF-8/time/byte bounds and never authorizes delivery.
 Until protected fenced delta-event persistence is wired, batches must not be
 treated as durable cursor events or sent across an external boundary.
 
-Application-tool events are accepted only when offered from an exact current
-catalog/policy snapshot and only for idempotent read-only queries with no
-approval requirement. Arguments are protected before ordinary resolver
-authorization; statically disclosed results require their own exact egress
-decision/audit before protected persistence and continuation. Unoffered,
-malformed, consequential, mutation, proposal, approval-required, and
-non-idempotent calls remain fail-closed. This prevents partial orchestration
-from bypassing protected history, disclosure, egress, approval, or resolver
-authorization.
+The read-only coordinator accepts only exact enabled idempotent queries with no
+approval requirement. The separate supervised service accepts only exact
+enabled application mutations at `SupervisedWrite` maturity with one-shot
+approval and an allowed non-secret consequential risk. Arguments are protected
+before approval; provider/model/budget/audit bindings are durable; canonical
+resource versions are rebuilt before consumption; and current tool policy is
+recomputed and compared again before ordinary resolver execution. Statically
+disclosed results still require exact egress audit before continuation.
+Unoffered, malformed, autonomous, secret, AI-control-plane, introspection, and
+wrong-maturity calls remain fail-closed.
 
 Proposals never carry application write authority. Review mutates only
 protected AI-owned staging state, and applied-outcome linkage happens only
@@ -107,3 +108,10 @@ grant to `Consumed` atomically, and advances the exact run fence. The resulting
 proof grants no resolver authority, cannot be reused, and does not hide a
 failed application mutation. Fresh ordinary resolver and resource-version
 authorization must immediately follow.
+
+`AiRuntime::execute_tool` structurally rejects approval-required descriptors.
+Only `execute_approved_tool` accepts a consumed exact proof, and it checks the
+new current policy version/state before constructing resolver context. After
+consumption, timeouts and any uncertain resolver or post-side-effect handoff
+terminally classify the run `RecoveryRequired`; workers must never replay the
+mutation or reuse the approval.

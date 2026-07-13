@@ -10,11 +10,11 @@ durable history under server control.
 This crate is an active, unpublished pre-release. The concrete session,
 configuration, subscription, fenced worker, provider-turn, protected
 read-only application-tool/result, bounded coordinator/continuation, protected
-output checkpoint, and security foundations compile and are tested. Protected
-proposal review and exact one-shot approval lifecycles also compile and are
-tested. Restart adoption for partially completed provider/tool batches, the
-consequential tool executor, and several operational adapters listed below are
-still being implemented.
+output checkpoint, and supervised consequential-tool foundations compile and
+are tested. Protected proposal review and exact one-shot approval lifecycles
+also compile and are tested. Restart adoption for partially completed
+provider/tool batches, a top-level approval-wait coordinator, and several
+operational adapters listed below are still being implemented.
 
 ## What it provides
 
@@ -47,6 +47,11 @@ still being implemented.
   are CAS-bound and optional-recent-MFA-gated; exact consumption rehydrates the
   original actor, advances the run fence, and still grants no resolver
   authority.
+- A supervised application-mutation service that accepts only explicitly
+  enabled exact `SupervisedWrite` descriptors, builds current server-owned
+  previews, consumes approval once, recomputes host policy before ordinary
+  resolver execution, and closes any side-effect ambiguity for recovery rather
+  than retry.
 - Fenced run/attempt contracts, fail-closed startup, and restore reconciliation
   that treats uncertain external effects as uncertain rather than replayable.
 - A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
