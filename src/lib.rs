@@ -57,6 +57,8 @@ mod orm_inbox;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_pricing;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_proposals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
@@ -71,6 +73,7 @@ mod orm_tools;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_usage;
 mod persistence;
+mod pricing;
 mod proposals;
 mod provider;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -123,6 +126,8 @@ pub use orm_inbox::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_live_delta::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_pricing::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_proposals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
@@ -139,6 +144,7 @@ pub use orm_usage::*;
 pub use persistence::{
     AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
 };
+pub use pricing::*;
 pub use proposals::*;
 pub use provider::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -163,10 +169,11 @@ pub mod prelude {
         AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation, AiBudgetService,
         AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema, AiEgressDecision,
         AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError, AiInboxPruningService,
-        AiInboxService, AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
-        AiProposalTypeDescriptor, AiProvider, AiProviderAttachmentRequest,
-        AiProviderAttachmentResolver, AiRemoteAuthenticatedGraphqlAdapter,
-        AiRemoteGraphqlAuthority, AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
+        AiInboxService, AiLiveDeltaCoalescerLimits, AiPricingCatalogService, AiPricingQuoteService,
+        AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider,
+        AiProviderAttachmentRequest, AiProviderAttachmentResolver,
+        AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
+        AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
         AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiToolAuthorizationPolicy,
         AiToolCatalog, AiToolDescriptor, AiUsageAccessPolicy, AiUsageService, DataClassification,
@@ -186,8 +193,8 @@ pub mod prelude {
         OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
         OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
-        OrmAiLiveDeltaService, OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
-        OrmAiUsageService,
+        OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
+        OrmAiProviderOutputService, OrmAiRunService, OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

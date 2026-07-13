@@ -12,6 +12,55 @@ struct ConfigurationService {
     expected_secret_received: AtomicBool,
 }
 
+struct PricingService;
+
+#[async_trait]
+impl AiPricingCatalogService for PricingService {
+    async fn pricing_policies(
+        &self,
+        _principal: &AuthPrincipal,
+        scope: AiScope,
+        provider_kind: AiProviderKindInput,
+        provider_model: String,
+    ) -> Result<Vec<AiPricingPolicyView>, AiError> {
+        Ok(vec![AiPricingPolicyView {
+            id: Uuid::from_u128(2),
+            version_reference: "pricing:test-v1".to_owned(),
+            scope_kind: scope.kind,
+            scope_id: scope.id,
+            tenant_id: scope.tenant_id,
+            provider_kind: provider_kind.as_str().to_owned(),
+            provider_model,
+            fixed_call_microunits: 1,
+            input_microunits_per_million: 2,
+            cached_input_microunits_per_million: 1,
+            output_microunits_per_million: 3,
+            created_at: 1,
+        }])
+    }
+
+    async fn create_pricing_policy(
+        &self,
+        _principal: &AuthPrincipal,
+        input: CreateAiPricingPolicyInput,
+    ) -> Result<AiPricingPolicyView, AiError> {
+        Ok(AiPricingPolicyView {
+            id: Uuid::from_u128(2),
+            version_reference: "pricing:test-v1".to_owned(),
+            scope_kind: input.scope.kind,
+            scope_id: input.scope.id,
+            tenant_id: input.scope.tenant_id,
+            provider_kind: input.provider_kind.as_str().to_owned(),
+            provider_model: input.provider_model,
+            fixed_call_microunits: input.fixed_call_microunits,
+            input_microunits_per_million: input.input_microunits_per_million,
+            cached_input_microunits_per_million: input.cached_input_microunits_per_million,
+            output_microunits_per_million: input.output_microunits_per_million,
+            created_at: 1,
+        })
+    }
+}
+
 impl ConfigurationService {
     fn profile(profile_id: Uuid) -> AiProviderProfileView {
         AiProviderProfileView {
@@ -208,6 +257,8 @@ async fn credential_mutation_returns_only_redacted_state() {
         assert!(schema.sdl().contains("setAiRetentionPolicy(input:"));
         assert!(schema.sdl().contains("aiBudgetPolicies(scope:"));
         assert!(schema.sdl().contains("upsertAiBudgetPolicy(input:"));
+        assert!(schema.sdl().contains("aiPricingPolicies(scope:"));
+        assert!(schema.sdl().contains("createAiPricingPolicy(input:"));
     }
     #[cfg(feature = "graphql-case-pascal")]
     {
@@ -215,6 +266,8 @@ async fn credential_mutation_returns_only_redacted_state() {
         assert!(schema.sdl().contains("SetAiRetentionPolicy(Input:"));
         assert!(schema.sdl().contains("AiBudgetPolicies(Scope:"));
         assert!(schema.sdl().contains("UpsertAiBudgetPolicy(Input:"));
+        assert!(schema.sdl().contains("AiPricingPolicies(Scope:"));
+        assert!(schema.sdl().contains("CreateAiPricingPolicy(Input:"));
     }
 }
 
@@ -284,4 +337,74 @@ async fn budget_policy_mutation_uses_the_configured_case_and_redacted_view() {
     let serialized = serde_json::to_string(&response.data).expect("response should serialize");
     assert!(!serialized.contains("principalSubject"));
     assert!(!serialized.contains("PrincipalSubject"));
+}
+
+#[tokio::test]
+async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
+    let configuration: Arc<dyn AiConfigurationService> = Arc::new(ConfigurationService {
+        expected_secret_received: AtomicBool::new(false),
+    });
+    let pricing: Arc<dyn AiPricingCatalogService> = Arc::new(PricingService);
+    let schema = Schema::build(
+        AiConfigurationQueryRoot,
+        AiConfigurationMutationRoot,
+        EmptySubscription,
+    )
+    .data(configuration)
+    .data(pricing)
+    .finish();
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let mutation = r#"
+        mutation {
+            createAiPricingPolicy(input: {
+                scope: { kind: "project", id: "project-1", tenantId: "tenant-1" }
+                providerKind: OPEN_AI
+                providerModel: "model-a"
+                fixedCallMicrounits: 1
+                inputMicrounitsPerMillion: 2
+                cachedInputMicrounitsPerMillion: 1
+                outputMicrounitsPerMillion: 3
+            }) { versionReference providerKind providerModel }
+        }
+    "#;
+    #[cfg(feature = "graphql-case-pascal")]
+    let mutation = r#"
+        mutation {
+            CreateAiPricingPolicy(Input: {
+                Scope: { Kind: "project", Id: "project-1", TenantId: "tenant-1" }
+                ProviderKind: OpenAi
+                ProviderModel: "model-a"
+                FixedCallMicrounits: 1
+                InputMicrounitsPerMillion: 2
+                CachedInputMicrounitsPerMillion: 1
+                OutputMicrounitsPerMillion: 3
+            }) { VersionReference ProviderKind ProviderModel }
+        }
+    "#;
+    let response = schema
+        .execute(Request::new(mutation).data(principal()))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let serialized = serde_json::to_string(&response.data).expect("response should serialize");
+    assert!(serialized.contains("pricing:test-v1"));
+    assert!(serialized.contains("model-a"));
+
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let query = r#"
+        { aiPricingPolicies(
+            scope: { kind: "project", id: "project-1", tenantId: "tenant-1" }
+            providerKind: OPEN_AI
+            providerModel: "model-a"
+        ) { versionReference } }
+    "#;
+    #[cfg(feature = "graphql-case-pascal")]
+    let query = r#"
+        { AiPricingPolicies(
+            Scope: { Kind: "project", Id: "project-1", TenantId: "tenant-1" }
+            ProviderKind: OpenAi
+            ProviderModel: "model-a"
+        ) { VersionReference } }
+    "#;
+    let response = schema.execute(Request::new(query).data(principal())).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
 }

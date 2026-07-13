@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.18.0`) and 38 private records
+- AI schema-module identity (currently version `0.19.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -63,6 +63,14 @@ production-ready behavior.
   configuration roots: exact-scope bounded reads, deployment-ceiling opt-in,
   recent MFA, immutable targeting/interval bindings, CAS updates, atomic
   redacted audit, and deterministic exact/tenant-wildcard scope keys.
+- Authenticated append-only pricing-catalog management through the existing
+  configuration roots and a separately installed service: exact
+  scope/provider/model reads, globally unique immutable references, recent
+  MFA, separate host read/write decisions, deployment rate/cardinality bounds,
+  and atomic redacted creation audit. The same ORM service provides
+  conservative exact-version quotes and authoritative cached/non-cached token
+  settlement with checked integer arithmetic; built-in provider units remain
+  deliberately unsupported by the concrete accountant.
 - Authoritative usage facts append exactly once in the budget reconciliation
   transaction with a unique reservation binding, exact scope/principal and
   provider/model dimensions, total/cached token separation, units, and settled
@@ -256,7 +264,7 @@ production-ready behavior.
   Exact inline image/file input is implemented and remains independently gated
   by host MIME policy, budget, egress, current authority, and reopening limits.
 - Provider webhooks/background processing.
-- Authenticated immutable pricing-catalog validation, privileged uncertain-call
+- Privileged uncertain-call
   recovery, retention/purge, and telemetry sinks. Budget-policy management,
   ordinary transactional reservation/reconciliation, and authenticated usage
   reporting are implemented.
@@ -286,8 +294,7 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add an authenticated immutable pricing-catalog GraphQL surface plus bounded
-   session-event/content retention workers.
+1. Add bounded session-event/content retention workers.
 2. Add provider-independent stateless conversation checkpoints for safe Ollama
    and installed-harness tool continuation, then a separately reviewed
    production OS/container launcher; provider-persistent file lifecycle

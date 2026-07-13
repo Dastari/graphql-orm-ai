@@ -56,7 +56,12 @@ camelCase to PascalCase.
    `OrmAiConfigurationService::with_budget_policy_management`, using deployment
    ceilings no broader than operational spend policy. Authorize reads and
    writes independently; writes require recent MFA.
-11. Apply/validate migrations and restore reconciliation, then open the runtime
+11. Construct `OrmAiPricingService` with an independent configuration access
+   policy, recent-MFA policy, trusted clock, and
+   `AiPricingCatalogManagementLimits`. Install the same instance as
+   `Arc<dyn AiPricingCatalogService>`, `Arc<dyn AiPricingQuoteService>`, and
+   `Arc<dyn AiProviderUsageAccounting>` when using its token-only accounting.
+12. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
@@ -107,10 +112,10 @@ Provider orchestration must call `reserve` before egress and `reconcile` after
 the result classification. It must durably mark the reservation uncertain
 immediately before handing the authorized proof to provider transport; after
 that boundary the ordinary unused-release path is deliberately unavailable.
-Budget policy configuration is not yet exposed as a public GraphQL lifecycle,
-so do not seed policies with application SQL or expose the private generated
-ORM entities; that authenticated configuration surface remains an
-implementation gate.
+Budget and pricing policy configuration is exposed only through authenticated
+GraphQL lifecycle services. Do not seed either with application SQL or expose
+the private generated ORM entities. Budget updates use exact CAS; pricing
+versions are append-only and selected only by their exact returned reference.
 
 Construct `OrmAiRunService` from the same ORM database and trusted clock. The
 lower-level concrete provider path is deliberately explicit:
@@ -120,8 +125,10 @@ lower-level concrete provider path is deliberately explicit:
 2. Execute a server-authored `AiProviderCallPlan` through
    `AiProviderCallExecutor`, configured with the budget service and a durable
    `OrmAiEgressDecisionAudit`. Supply `AiProviderUsageAccounting` backed by an
-   immutable deployment pricing catalog; it must settle the exact pricing
-   version rather than substituting current rates or reserved estimates.
+   immutable deployment pricing catalog; `OrmAiPricingService` supplies the
+   concrete token-only implementation. It settles the exact pricing version
+   rather than substituting current rates or reserved estimates and rejects
+   provider built-ins until authoritative billed-unit support exists.
    To emit provisional visible output, explicitly install
    `OrmAiLiveDeltaService` with `with_live_delta_sink`. Use the same runtime,
    run service, current-principal/access/protection boundaries, and validated
@@ -167,8 +174,9 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
-upload/search/deletion, attachment quotas/derivatives, pricing-catalog GraphQL
-management, per-session live-delta retention, provider-turn/partial-
+upload/search/deletion, attachment quotas/derivatives, authoritative
+provider-built-in unit pricing, per-session live-delta retention,
+provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL

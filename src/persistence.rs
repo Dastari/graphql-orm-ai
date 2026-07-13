@@ -358,6 +358,49 @@ pub(crate) struct AiBudgetPolicyRecord {
     pub updated_at: i64,
 }
 
+/// Immutable provider/model token pricing version.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_pricing_policies",
+    plural = "GraphqlOrmAiPricingPolicies",
+    default_sort = "created_at DESC",
+    append_only = true,
+    keyset = "created_at desc, id desc"
+)]
+pub(crate) struct AiPricingPolicyRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Globally unique immutable pricing reference stored on reservations.
+    #[unique]
+    #[filterable(type = "string")]
+    pub version_reference: String,
+    #[filterable(type = "string")]
+    pub scope_key: String,
+    pub scope_kind: String,
+    pub scope_id: String,
+    pub tenant_id: Option<String>,
+    #[filterable(type = "string")]
+    pub provider_kind: String,
+    #[filterable(type = "string")]
+    pub provider_model: String,
+    pub fixed_call_microunits: i64,
+    pub input_microunits_per_million: i64,
+    pub cached_input_microunits_per_million: i64,
+    pub output_microunits_per_million: i64,
+    pub created_by_principal_kind: String,
+    pub created_by_subject: String,
+    #[filterable(type = "number")]
+    #[sortable]
+    pub created_at: i64,
+}
+
 /// Atomically maintained budget usage for one policy/time window.
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -1737,7 +1780,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.18.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.19.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -1788,6 +1831,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiToolPolicyRecord::metadata(),
                 AiRetentionPolicyRecord::metadata(),
                 AiBudgetPolicyRecord::metadata(),
+                AiPricingPolicyRecord::metadata(),
                 AiBudgetCounterRecord::metadata(),
                 AiBudgetReservationRecord::metadata(),
                 AiSessionRecord::metadata(),

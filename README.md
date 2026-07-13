@@ -20,7 +20,7 @@ adapters listed below are still being implemented.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 38 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 39 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, egress, audit, skills, and restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
@@ -238,14 +238,16 @@ protection, egress proofs, logical GraphQL target contracts, static disclosure
 validation, authenticated recent-MFA/CAS/audited budget-policy management, an
 atomic ORM-backed budget reservation/reconciliation service,
 an exactly-once append-only usage ledger with authenticated bounded reporting,
+an authenticated immutable pricing catalog with conservative quoting and
+authoritative token settlement,
 exact approval binding, proposal schemas, fenced state transitions, and restore
 planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
-top-level supervised approval-wait coordinator, an authenticated immutable
-pricing-catalog GraphQL lifecycle, privileged uncertain-call
+top-level supervised approval-wait coordinator, authoritative built-in-tool
+pricing/unit catalogs, privileged uncertain-call
 recovery, and per-session live-delta retention/purge,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret

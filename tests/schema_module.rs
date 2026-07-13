@@ -8,8 +8,8 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.18.0");
-    assert_eq!(catalog.entities().len(), 38);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.19.0");
+    assert_eq!(catalog.entities().len(), 39);
     assert!(
         catalog
             .entities()
@@ -27,6 +27,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                     | "graphql_orm_ai_run_checkpoints"
                     | "graphql_orm_ai_skill_versions"
                     | "graphql_orm_ai_usage_entries"
+                    | "graphql_orm_ai_pricing_policies"
                     | "graphql_orm_ai_audit_events"
                     | "graphql_orm_ai_egress_events"
             ))
@@ -51,6 +52,23 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .iter()
             .any(|column| { column.name == "scope_key" && !column.nullable })
     );
+    let pricing_policy = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_pricing_policies")
+        .expect("pricing policy table should exist");
+    assert!(pricing_policy.append_only);
+    assert!(pricing_policy.columns.iter().any(|column| {
+        column.name == "version_reference" && column.is_unique && !column.nullable
+    }));
+    for expected in ["scope_key", "provider_kind", "provider_model"] {
+        assert!(
+            pricing_policy
+                .indexes
+                .iter()
+                .any(|index| { index.columns == [expected.to_owned()] && !index.is_unique })
+        );
+    }
     assert!(
         budget_policy
             .indexes

@@ -5,10 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.18.0` and the AI
-schema module to `0.18.0`.
+This development line advances the pre-1.0 crate version to `0.19.0` and the AI
+schema module to `0.19.0`.
 
 ### Added
+
+- An append-only, GraphQL-managed immutable pricing catalog with exact
+  scope/provider/model bindings, globally unique version references,
+  integer-only fixed/input/cached-input/output token rates, deployment hard
+  bounds, per-route version caps, recent MFA, separate host read/write
+  decisions, and same-transaction redacted audit.
+- `OrmAiPricingService` as both a conservative exact-version preflight quote
+  service and authoritative token-only provider usage accountant. Cached input
+  is priced as a subset, estimates assume non-cached input, arithmetic is
+  checked and rounded conservatively, and provider built-ins fail closed until
+  authoritative billable-unit catalogs are implemented.
+- Authoritative provider usage observations now retain the exact application
+  scope from their budget plan, so settlement rejects cross-scope pricing
+  references as well as provider/model/version swaps.
+- Fatal restore evidence for corrupt immutable pricing references, scope/route
+  bindings, rates, or creator-audit linkage.
 
 - Authenticated GraphQL budget-policy reads and recent-MFA-protected CAS
   create/update/enable/disable through the existing configuration service.
@@ -71,7 +87,7 @@ schema module to `0.18.0`.
   idempotent blob deletion, durable redacted audit, and bounded retry backoff.
 - Configurable upload-processing and cleanup claim lifetimes, plus a redacted
   per-pass cleanup report suitable for deployment telemetry.
-- Project-agnostic AI schema module with 38 private persistence entities for
+- Project-agnostic AI schema module with 39 private persistence entities for
   configuration, sessions, protected history, fenced runs, tools, approvals,
   proposals, budgets, usage, egress, audit, and restore readiness.
 - Owner-isolated ORM-backed session/configuration services and resumable
@@ -297,7 +313,7 @@ schema module to `0.18.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.18.0`.
+  reconciliation. The current module is `0.19.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -307,7 +323,7 @@ schema module to `0.18.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.18.0`.
+  the current module is `0.19.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts

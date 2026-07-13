@@ -4,6 +4,57 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: immutable pricing catalog (crate/schema 0.18.0 to 0.19.0)
+
+Apply AI schema module `0.19.0` while configuration writes, provider workers,
+budget reservations, backups, and restore callbacks are closed. Do not run
+0.19.0 code against module 0.18.0. The module adds its 39th private entity,
+append-only `graphql_orm_ai_pricing_policies`, with a required globally unique
+`version_reference`, exact deterministic scope key and scope fields, exact
+provider/model, integer-only fixed/input/cached-input/output rates, creator
+principal identity, and creation time. No consumer-owned application/domain
+data migration is needed.
+
+Pricing versions are immutable and immediately eligible for explicit
+selection. There is no update, delete, activation, or implicit “latest” API.
+Create a new version to change a rate, then bind its exact returned reference
+into new budget reservations. Existing reservations and uncertain calls retain
+their original reference and must never be repriced under a newer version.
+
+Hosts composing `AiConfigurationQueryRoot`/`AiConfigurationMutationRoot` gain
+`aiPricingPolicies` and `createAiPricingPolicy` (or coherent PascalCase names).
+Install a separate `Arc<dyn AiPricingCatalogService>` in GraphQL context;
+existing `AiConfigurationService` implementations do not gain methods. Add
+the new exhaustive `AiConfigurationAction::ReadPricingCatalog` and
+`ManagePricingCatalog` cases to every host policy. Reads are exact-route and
+bounded to 100 versions. Creation requires a user principal with recent MFA,
+the exact host write decision, deployment `AiPricingCatalogManagementLimits`,
+per-route capacity, and an atomic redacted audit append.
+
+`OrmAiPricingService` also implements `AiPricingQuoteService` and
+`AiProviderUsageAccounting`. Quotes bind exact scope, provider, model, and
+version and conservatively price all estimated input at the non-cached rate.
+Settlement prices authoritative total/cached input and output under the same
+version. `AiProviderUsageObservation::scope` exposes the exact application
+scope copied from the bound budget plan so custom accountants can enforce the
+same cross-scope rejection. Rates and totals use checked integer microunit arithmetic with
+per-dimension ceiling division; cached rate cannot exceed ordinary input rate.
+Version/provider/model swaps, corrupt rows, negative rates, and overflow fail
+closed. The initial concrete accountant rejects provider built-ins because a
+requested tool is not authoritative provider-billed usage; deployments using
+built-ins must retain a custom complete accounting implementation until exact
+billable-unit catalogs land.
+
+Restore fact collectors must populate the new
+`AiRestoreSnapshotFacts::invalid_pricing_policy_count`. Validate unique
+references, deterministic scope-key equality, exact supported provider/model,
+non-negative rates, cached rate no greater than input, creator identity, and
+the corresponding creation audit before reporting zero. Any nonzero value adds
+fatal `AI_RESTORE_PRICING_POLICY_INVALID` and keeps runtime readiness closed.
+
+This is a pre-1.0 public Rust API, GraphQL SDL, authorization, configuration,
+persistence, migration, backup/restore, and behavioral contract change.
+
 ## Unreleased: authenticated budget-policy management (crate/schema 0.17.0 to 0.18.0)
 
 Apply AI schema module `0.18.0` while provider workers, configuration writes,

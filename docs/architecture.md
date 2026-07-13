@@ -109,6 +109,15 @@ exact-scope visibility before stable keyset pagination, and the public view
 never includes prompt, transcript, tool, pricing-policy, or counter content.
 See [usage and budgets](usage-and-budgets.md).
 
+Immutable provider/model pricing is a separate authenticated configuration
+projection over an append-only ORM entity. A unique version reference is
+carried from conservative quote to reservation to authoritative settlement;
+there is no mutable “current rate” lookup that could reprice an in-flight or
+restored call. Static deployment bounds, recent MFA, host scope authorization,
+and same-transaction audit govern creation. The concrete catalog accounts for
+tokens only; built-in tool/image billing stays closed until exact provider
+billable-unit evidence can be represented.
+
 ## Durable worker and provider turn
 
 `OrmAiRunService` is the concrete SQLite/PostgreSQL queue boundary. A claim

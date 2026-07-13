@@ -59,6 +59,37 @@ then verifies the deterministic scope key and every stored scope field before
 applying principal filters. The scope key is a bounded lookup aid, never
 authorization.
 
+## Immutable pricing catalog
+
+Pricing configuration uses the same composable configuration GraphQL roots but
+a separate `Arc<dyn AiPricingCatalogService>`. The host independently decides
+`ReadPricingCatalog` and `ManagePricingCatalog` for the exact requested scope.
+Creation additionally requires recent MFA and deployment-owned
+`AiPricingCatalogManagementLimits`; the mutation and its redacted audit append
+commit in one state-machine transaction.
+
+Each row binds an exact scope, provider family, model, and globally unique
+version reference. Fixed-call and per-million input, cached-input, and output
+rates are non-negative integer microunits. Cached input cannot cost more than
+ordinary input. Rows are append-only: there is no update, delete, activation,
+or implicit latest-version lookup. Rate changes create a new reference, while
+existing reservations and uncertain work retain the old one.
+
+`OrmAiPricingService` implements three contracts:
+
+- `AiPricingCatalogService` for authenticated bounded administration;
+- `AiPricingQuoteService` for a conservative pre-transport estimate bound to
+  exact scope/provider/model/version; and
+- `AiProviderUsageAccounting` for authoritative post-transport cached and
+  non-cached token settlement under that same immutable version.
+
+The quote treats every estimated input token as non-cached. Settlement uses
+the provider-reported cached subset. Each integer-priced dimension rounds up
+independently and all multiplication/addition is checked. Provider built-ins
+are rejected by this concrete accountant because requested tools do not prove
+billable provider units; a deployment enabling them must supply a custom
+complete accountant until authoritative unit catalogs are available.
+
 ## Reporting authorization
 
 Compose `AiQueryRoot` (or `AiUsageQueryRoot` separately) and install
@@ -118,8 +149,9 @@ failure closes the query.
 ## Migration, backup, and restore
 
 The usage ledger was introduced by schema module `0.17.0`; current deployments
-apply module `0.18.0`, which additionally indexes deterministic budget-policy
-scope keys. Keep workers, configuration writes, and readers closed during each
+apply module `0.19.0`, which additionally indexes deterministic budget-policy
+scope keys and adds the append-only immutable pricing catalog. Keep workers,
+configuration writes, and readers closed during each
 managed migration. Unsupported legacy private usage rows must be proven from
 complete committed reservation evidence or removed; never fabricate a binding.
 Existing committed reservations are not automatically treated as historical
@@ -133,3 +165,7 @@ not exceeding total input. Set
 any nonzero value is fatal. Reporting must remain closed until restore
 reconciliation succeeds. Budget-policy validation similarly populates
 `invalid_budget_policy_count`; a nonzero value is fatal.
+Pricing-catalog validation similarly populates
+`invalid_pricing_policy_count`; reject duplicate references, scope-key or
+provider/model swaps, invalid rates, and missing creation-audit linkage before
+reporting zero.

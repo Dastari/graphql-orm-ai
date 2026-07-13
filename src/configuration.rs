@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use uuid::Uuid;
 
-use crate::{AiContentProtectionMode, AiError, AiScope, AiScopeInput};
+use crate::{
+    AiContentProtectionMode, AiError, AiPricingCatalogService, AiPricingPolicyView, AiScope,
+    AiScopeInput, CreateAiPricingPolicyInput,
+};
 
 /// Administrative configuration action evaluated by the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +34,10 @@ pub enum AiConfigurationAction {
     ReadBudgetPolicies,
     /// Create, alter, enable, or disable budget policies.
     ManageBudgetPolicies,
+    /// Read immutable provider/model pricing versions.
+    ReadPricingCatalog,
+    /// Append immutable provider/model pricing versions.
+    ManagePricingCatalog,
 }
 
 /// Host-owned administrative authorization for GraphQL-managed AI settings.
@@ -534,6 +541,28 @@ impl AiConfigurationQueryRoot {
         }
         Ok(policies)
     }
+
+    /// Lists bounded immutable pricing versions for one exact route.
+    async fn ai_pricing_policies(
+        &self,
+        context: &Context<'_>,
+        scope: AiScopeInput,
+        provider_kind: AiProviderKindInput,
+        provider_model: String,
+    ) -> async_graphql::Result<Vec<AiPricingPolicyView>> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        let policies = pricing_catalog_service(context)?
+            .pricing_policies(&principal, scope.into(), provider_kind, provider_model)
+            .await
+            .map_err(extend)?;
+        if policies.len() > 100 {
+            return Err(AiError::InvalidConfiguration(
+                "pricing catalog returned an unbounded version list".to_owned(),
+            )
+            .extend());
+        }
+        Ok(policies)
+    }
 }
 
 /// Composable configuration mutation root.
@@ -630,6 +659,19 @@ impl AiConfigurationMutationRoot {
             .await
             .map_err(extend)
     }
+
+    /// Appends one immediately effective immutable pricing version.
+    async fn create_ai_pricing_policy(
+        &self,
+        context: &Context<'_>,
+        input: CreateAiPricingPolicyInput,
+    ) -> async_graphql::Result<AiPricingPolicyView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        pricing_catalog_service(context)?
+            .create_pricing_policy(&principal, input)
+            .await
+            .map_err(extend)
+    }
 }
 
 fn configuration_service(
@@ -640,6 +682,18 @@ fn configuration_service(
         .cloned()
         .ok_or_else(|| {
             AiError::InvalidConfiguration("AI configuration service is missing".to_owned()).extend()
+        })
+}
+
+fn pricing_catalog_service(
+    context: &Context<'_>,
+) -> async_graphql::Result<Arc<dyn AiPricingCatalogService>> {
+    context
+        .data_opt::<Arc<dyn AiPricingCatalogService>>()
+        .cloned()
+        .ok_or_else(|| {
+            AiError::InvalidConfiguration("AI pricing catalog service is missing".to_owned())
+                .extend()
         })
 }
 

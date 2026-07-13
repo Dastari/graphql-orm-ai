@@ -57,6 +57,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_attachment_count: 0,
         invalid_usage_fact_count: 0,
         invalid_budget_policy_count: 0,
+        invalid_pricing_policy_count: 0,
         duplicate_stream_sequence_count: 0,
         stream_gap_count: 1,
     });
@@ -100,10 +101,11 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_attachment_count: 1,
         invalid_usage_fact_count: 1,
         invalid_budget_policy_count: 1,
+        invalid_pricing_policy_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 6);
-    assert_eq!(plan.readiness_report_after_apply(true).fatal_issue_count, 6);
+    assert_eq!(plan.fatal_issue_count(), 7);
+    assert_eq!(plan.readiness_report_after_apply(true).fatal_issue_count, 7);
 }

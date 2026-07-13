@@ -582,6 +582,7 @@ pub struct AiProviderCallResult {
 /// settlement before budget commit.
 #[derive(Clone, Debug)]
 pub struct AiProviderUsageObservation {
+    scope: AiScope,
     provider_kind: ProviderKind,
     model: String,
     pricing_policy_version: String,
@@ -592,6 +593,35 @@ pub struct AiProviderUsageObservation {
 }
 
 impl AiProviderUsageObservation {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn test_observation(
+        scope: AiScope,
+        provider_kind: ProviderKind,
+        model: impl Into<String>,
+        pricing_policy_version: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        builtin_tools: Vec<ModelBuiltinTool>,
+    ) -> Self {
+        Self {
+            scope,
+            provider_kind,
+            model: model.into(),
+            pricing_policy_version: pricing_policy_version.into(),
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            builtin_tools,
+        }
+    }
+
+    /// Exact application scope bound to the provider budget reservation.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
     /// Provider family.
     pub fn provider_kind(&self) -> &ProviderKind {
         &self.provider_kind
@@ -1288,6 +1318,7 @@ impl AiProviderCallExecutor {
         }
 
         let observation = AiProviderUsageObservation {
+            scope: plan.budget.scope.clone(),
             provider_kind: plan.provider_kind.clone(),
             model: provider_model.clone(),
             pricing_policy_version: plan.budget.pricing_policy_version,

@@ -49,6 +49,16 @@ exact pricing-policy version and authoritatively settle cost/tool/image units.
 Unknown pricing or arithmetic failure occurs after transport and therefore
 leaves the reservation uncertain.
 
+The built-in ORM pricing service resolves only a globally unique immutable
+version that exactly matches the configured provider/model. Preflight quotes
+also bind the exact application scope and conservatively treat input as
+non-cached. Rates are bounded non-negative integers; cached input cannot exceed
+ordinary input pricing; every dimension rounds up with checked arithmetic.
+Catalog reads and appends require separate current host decisions, appends
+require recent MFA and atomic redacted audit, and no mutation can alter or
+delete an existing version. It deliberately refuses provider built-ins because
+requested tools are not authoritative billable-unit observations.
+
 The concrete ORM budget service checks every applicable policy before writing
 any counter, serializes competing starts, and accepts a reservation only while
 the resolved principal and run lease remain current. Actual usage may exceed an
