@@ -179,6 +179,102 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
 }
 
 #[tokio::test]
+async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
+    let session_id = AiSessionId::new();
+    let run_id = AiRunId::new();
+    let attachment_id = Uuid::new_v4();
+    let sha256 = "a".repeat(64);
+    let attachment_block = ModelInputBlock::Attachment {
+        attachment_id: attachment_id.to_string(),
+        mime: "image/png".to_owned(),
+        byte_count: 1_024,
+        sha256: sha256.clone(),
+    };
+    let exact_reference = attachment_block
+        .attachment_egress_reference()
+        .expect("attachment should have a canonical source reference");
+    let attachment_request = ModelRequest {
+        model: "test-model".to_owned(),
+        instructions: vec![],
+        input: vec![attachment_block],
+        continuation: None,
+        tools: vec![],
+        builtin_tools: vec![],
+        output_schema: None,
+        maximum_output_tokens: Some(64),
+    };
+    let mut inference = manifest(
+        session_id,
+        run_id,
+        "test-model",
+        AiEgressCapability::ModelInference,
+    );
+    inference.attachment_count = 1;
+    let mut image = manifest(
+        session_id,
+        run_id,
+        "test-model",
+        AiEgressCapability::ImageAnalysis,
+    );
+    image.attachment_count = 1;
+    image.sources = vec![AiDataSourceRef {
+        kind: "attachment".to_owned(),
+        reference: exact_reference,
+        classification: DataClassification::Confidential,
+        trust: AiSourceTrust::UserProvided,
+    }];
+    let context = ProviderRequestContext::new(
+        session_id,
+        run_id,
+        "correlation",
+        budget(run_id, ProviderKind::OpenAiCompatible, "test-model"),
+        inference.clone(),
+        proof(&inference),
+    )
+    .expect("inference proof should bind")
+    .with_authorized_transfer(image.clone(), proof(&image))
+    .expect("exact image proof should bind");
+    let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted {
+        response_id: Some("mock".to_owned()),
+    }]);
+    provider
+        .stream(attachment_request.clone(), context.clone())
+        .await
+        .expect("exact attachment should pass context validation")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("mock attachment stream should complete");
+
+    for swapped_block in [
+        ModelInputBlock::Attachment {
+            attachment_id: attachment_id.to_string(),
+            mime: "image/jpeg".to_owned(),
+            byte_count: 1_024,
+            sha256: sha256.clone(),
+        },
+        ModelInputBlock::Attachment {
+            attachment_id: attachment_id.to_string(),
+            mime: "image/png".to_owned(),
+            byte_count: 2_048,
+            sha256: sha256.clone(),
+        },
+        ModelInputBlock::Attachment {
+            attachment_id: attachment_id.to_string(),
+            mime: "image/png".to_owned(),
+            byte_count: 1_024,
+            sha256: "b".repeat(64),
+        },
+    ] {
+        let mut swapped = attachment_request.clone();
+        swapped.input = vec![swapped_block];
+        assert!(matches!(
+            provider.stream(swapped, context.clone()).await,
+            Err(ProviderError::EgressDenied)
+        ));
+    }
+}
+
+#[tokio::test]
 async fn database_managed_protection_refuses_wrong_mode_and_unready_policy() {
     let protector = DatabaseManagedContentProtector;
     let context = ContentProtectionContext {

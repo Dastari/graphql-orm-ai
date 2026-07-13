@@ -8,6 +8,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::{
     AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError, AiRunId, AiSessionId,
@@ -97,6 +98,10 @@ pub enum ModelInputBlock {
         attachment_id: String,
         /// Safe detected MIME type.
         mime: String,
+        /// Exact verified attachment bytes.
+        byte_count: u64,
+        /// Exact lowercase SHA-256 of the released object.
+        sha256: String,
     },
     /// Structured JSON content.
     Json {
@@ -112,6 +117,32 @@ pub enum ModelInputBlock {
         /// Disclosure-validated, separately egress-authorized tool output.
         output: serde_json::Value,
     },
+}
+
+impl ModelInputBlock {
+    /// Returns the canonical source reference for an attachment block.
+    ///
+    /// The versioned reference binds the attachment ID, verified byte count,
+    /// detected MIME type, and content checksum without containing attachment
+    /// plaintext. Hosts should place this exact value in the
+    /// [`crate::AiDataSourceRef::reference`] authorized for the attachment's
+    /// image/file capability.
+    ///
+    /// This helper derives a reference; it does not prove that the block was
+    /// released, that its metadata is valid, or that egress was authorized.
+    /// [`ModelRequest::validate`] and the provider boundary enforce those
+    /// remaining checks.
+    pub fn attachment_egress_reference(&self) -> Option<String> {
+        match self {
+            Self::Attachment {
+                attachment_id,
+                mime,
+                byte_count,
+                sha256,
+            } => Some(format!("v1:{attachment_id}:{byte_count}:{mime}:{sha256}")),
+            Self::Text { .. } | Self::Json { .. } | Self::ToolResult { .. } => None,
+        }
+    }
 }
 
 /// Explicit provider-side conversation continuation.
@@ -190,6 +221,20 @@ impl ModelRequest {
             {
                 return Err(ProviderError::InvalidRequest);
             }
+            if let ModelInputBlock::Attachment {
+                attachment_id,
+                mime,
+                byte_count,
+                sha256,
+            } = block
+                && (Uuid::parse_str(attachment_id).is_err()
+                    || !crate::valid_mime(mime)
+                    || *byte_count == 0
+                    || *byte_count > 100 * 1024 * 1024
+                    || !crate::valid_sha256(sha256))
+            {
+                return Err(ProviderError::InvalidRequest);
+            }
         }
         let mut provider_names = BTreeSet::new();
         let mut tool_ids = BTreeSet::new();
@@ -214,7 +259,13 @@ impl ModelRequest {
                 ModelInputBlock::Attachment {
                     attachment_id,
                     mime,
-                } => attachment_id.len() + mime.len(),
+                    byte_count,
+                    sha256,
+                } => attachment_id
+                    .len()
+                    .saturating_add(mime.len())
+                    .saturating_add(sha256.len())
+                    .saturating_add(usize::try_from(*byte_count).unwrap_or(usize::MAX)),
                 ModelInputBlock::Json { value } => value.to_string().len(),
                 ModelInputBlock::ToolResult {
                     call_id,
@@ -444,6 +495,22 @@ impl ProviderRequestContext {
                         1,
                         estimated_bytes,
                     )?;
+                    let exact_reference = block
+                        .attachment_egress_reference()
+                        .expect("matched attachment block");
+                    if !self.transfers.iter().any(|transfer| {
+                        transfer.manifest.provider_kind == provider_kind.as_str()
+                            && transfer.manifest.model == request.model
+                            && transfer.manifest.capability == capability
+                            && transfer.manifest.sources.iter().any(|source| {
+                                source.kind == "attachment"
+                                    && source.reference == exact_reference
+                                    && source.trust == crate::AiSourceTrust::UserProvided
+                            })
+                            && transfer.manifest.stable_hash() == transfer.proof.manifest_hash()
+                    }) {
+                        return Err(ProviderError::EgressDenied);
+                    }
                 }
                 ModelInputBlock::ToolResult {
                     call_id,

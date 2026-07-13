@@ -4,6 +4,23 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: exact attachment egress binding (crate 0.9.0 to 0.10.0)
+
+Every `ModelInputBlock::Attachment` constructor must now supply the exact
+verified `byte_count` and lowercase `sha256` from the released attachment. Its
+separate `ImageAnalysis` or `ProviderFile` egress manifest must include a
+source with `kind: "attachment"`, `trust: UserProvided`, and canonical
+`reference` returned by `ModelInputBlock::attachment_egress_reference`. The
+versioned value binds ID, byte count, detected MIME, and SHA-256. The manifest
+byte/count limits must cover the full request including attachment bytes.
+Changed content or metadata requires a new manifest decision and audit; never
+copy a proof between attachments.
+
+This is a pre-1.0 breaking Rust API and provider behavior change. It adds no
+GraphQL SDL, Cargo feature/default, entity, field, index, constraint,
+backup/restore, or data semantic change. `AI_SCHEMA_MODULE_VERSION` remains
+`0.14.0`; no AI or application-domain data migration is required.
+
 ## Unreleased: schema module 0.13.0 to 0.14.0 and attachment intake (crate 0.8.0 to 0.9.0)
 
 This pre-1.0 release adds the owner-isolated attachment service and composable

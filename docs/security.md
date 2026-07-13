@@ -116,7 +116,10 @@ expiring one-use high-entropy token stored only as a hash. Filenames never form
 storage paths. Exact size/hash, complete-object scanner attestation, a separate
 host acceptance policy, quarantine promotion, and explicit release all precede
 message linkage. Scanner/policy/storage ambiguity remains closed; a released
-attachment still has no provider-egress authority. See the
+attachment still has no provider-egress authority. Provider input additionally
+requires a canonical user-provided source proof bound to the exact attachment
+ID, MIME type, byte count, SHA-256 checksum, provider, model, and capability;
+swapping any of those values invalidates the egress decision. See the
 [attachment guide](attachments.md).
 
 The read-only coordinator accepts only exact enabled idempotent queries with no

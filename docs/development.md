@@ -55,7 +55,10 @@ On a committed branch, compare against the reviewed base:
 
 ```bash
 scripts/check-release-policy.sh <base-revision>
+cargo semver-checks --baseline-rev <base-revision> --default-features
 ```
 
 CI additionally runs `cargo-semver-checks` against a sibling baseline worktree
-so local path dependencies resolve consistently.
+so local path dependencies resolve consistently. The explicit default-feature
+selection is required: the backend features are mutually exclusive, while the
+tool's ordinary heuristic attempts to enable every feature at once.

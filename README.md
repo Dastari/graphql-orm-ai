@@ -94,6 +94,9 @@ adapters listed below are still being implemented.
   ticketed streaming upload, random quarantine keys, exact size/hash checks,
   complete-object scanning, separate acceptance policy, protected events, and
   explicit clean release before ordinary message linkage.
+- Exact attachment model-input binding: ID, MIME, verified bytes and SHA-256
+  must match a separately authorized image/file manifest source before any
+  provider adapter can start transport.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 

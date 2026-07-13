@@ -92,6 +92,10 @@ prefixes from application code.
 Release is not provider egress permission. Before image/file model input, a
 future provider resolver must rehydrate current authority, reopen the exact
 released object, verify bytes/hash/MIME, and require a separately audited
-attachment/image egress manifest. The current OpenAI adapter continues to
+attachment/image egress manifest. `ModelInputBlock::Attachment` already binds
+ID, MIME, exact bytes and SHA-256; its capability manifest must contain the
+canonical user-provided source returned by
+`ModelInputBlock::attachment_egress_reference`, preventing content or metadata
+swaps before transport. The current OpenAI adapter continues to
 reject opaque local attachment IDs until that exact resolver/file-lifecycle
 slice lands.

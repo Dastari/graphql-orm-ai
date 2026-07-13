@@ -5,7 +5,7 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.9.0` and the AI
+This development line advances the pre-1.0 crate version to `0.10.0` and the AI
 schema module to `0.14.0`.
 
 ### Added
@@ -141,6 +141,10 @@ schema module to `0.14.0`.
 
 ### Changed
 
+- `ModelInputBlock::Attachment` now requires exact verified `byte_count` and
+  lowercase `sha256`. Provider request validation rejects malformed/oversized
+  attachment blocks and accounts the full attachment bytes instead of only
+  the opaque ID/MIME metadata.
 - AI schema module version is now `0.14.0`. Attachment metadata supports
   durable pending uploads with nullable object facts, hashed expiring one-time
   capabilities, expected size, scanner/policy versions, and redacted rejection
@@ -247,6 +251,11 @@ schema module to `0.14.0`.
 
 ### Security
 
+- Every image/file attachment capability proof must contain the exact canonical
+  versioned user-provided source reference returned by
+  `ModelInputBlock::attachment_egress_reference`. It binds ID, byte count,
+  detected MIME and SHA-256; swapping any fact or reusing a broader capability
+  manifest is rejected before provider transport.
 - Attachment filenames are display-only sanitized metadata and never storage
   paths. Ticket plaintext is returned once, redacted from `Debug`, never
   serialized by Rust APIs, stored only as SHA-256, compared in constant time,

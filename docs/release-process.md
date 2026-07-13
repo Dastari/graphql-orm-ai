@@ -36,7 +36,9 @@ release/base branch. Persistent schema changes also require a new
 3. Run formatting, tests, warnings-denied Clippy, warnings- and
    missing-docs-denied Rustdoc, PascalCase SDL, and compile-only backend checks
    from `docs/development.md`.
-4. Run `cargo-semver-checks` against the reviewed baseline.
+4. Run `cargo semver-checks --baseline-rev <release-base>
+   --default-features` against the reviewed baseline. Do not allow its ordinary
+   all-compatible-features heuristic to combine mutually exclusive backends.
 5. Review GraphQL SDL, schema-module metadata/fingerprint, migration and restore
    behavior, backup inclusion, and public error changes.
 6. Confirm no test used a live database or real consumer integration.

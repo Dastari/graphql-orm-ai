@@ -247,7 +247,7 @@ production-ready behavior.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 40 integration tests and 47 active
+- `cargo test --features provider-openai`: 41 integration tests and 47 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:
