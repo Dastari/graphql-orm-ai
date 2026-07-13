@@ -587,6 +587,30 @@ pub trait AiProviderUsageAccounting: Send + Sync {
 }
 
 impl AiProviderCallResult {
+    pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "formatVersion": 1,
+            "sessionId": self.session_id.0,
+            "runId": self.run_id.0,
+            "attemptId": self.attempt_id,
+            "leaseGeneration": self.lease_generation,
+            "providerKind": self.provider_kind,
+            "providerModel": self.provider_model,
+            "events": self.events,
+            "usage": self.usage,
+            "cachedInputTokens": self.cached_input_tokens,
+            "providerResponseId": self.provider_response_id,
+            "budgetReservationId": self.budget_reservation_id.0,
+            "previousResponseId": self.previous_response_id,
+            "toolCalls": self.tool_calls.iter().map(|call| serde_json::json!({
+                "callId": call.call_id,
+                "toolId": call.tool_id.as_str(),
+                "toolFingerprint": call.tool_fingerprint,
+                "arguments": call.arguments,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
     /// Session bound to the provider turn.
     pub const fn session_id(&self) -> crate::AiSessionId {
         self.session_id
@@ -2177,8 +2201,35 @@ mod tests {
             "egress-v1",
         )
         .expect("test tool-result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let checkpointed_lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &provider_result,
+                &fixture.scope,
+                "tool-loop-test",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("provider result should be durably checkpointed");
         let persisted = service
-            .execute_read_only(&fixture.lease, &provider_result, call_context, route)
+            .execute_read_only(
+                &checkpointed_lease,
+                &provider_result,
+                call_context,
+                route.clone(),
+            )
             .await
             .expect("tool should execute through the resolver and durable fence");
         assert_eq!(persisted.state(), AiApplicationToolCallState::Completed);
@@ -2216,6 +2267,33 @@ mod tests {
         let continuation = guard
             .continuation()
             .expect("all exact tool results should permit one continuation");
+        let batch_lease = checkpoint_service
+            .persist_tool_batch(
+                persisted.lease(),
+                &provider_result,
+                std::slice::from_ref(&persisted),
+                &continuation,
+                &fixture.scope,
+                "tool-loop-test",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("complete tool batch should be durably checkpointed");
+        let run = AiRunRecord::find_by_id(&fixture.database, &batch_lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        let checkpoint_id = run
+            .latest_checkpoint_id
+            .expect("run should link the protected tool-batch checkpoint");
+        let checkpoint = AiRunCheckpointRecord::find_by_id(&fixture.database, &checkpoint_id)
+            .await
+            .expect("checkpoint lookup should succeed")
+            .expect("checkpoint should exist");
+        assert_eq!(checkpoint.checkpoint_kind, "tool_batch_persisted");
+        assert!(checkpoint.protected_state.is_some());
         let descriptor = fixture
             .runtime
             .tool_catalog()
@@ -2310,7 +2388,7 @@ mod tests {
         fixture
             .run_service
             .finish(
-                persisted.lease(),
+                &batch_lease,
                 AiRunCompletion::new(AiRunState::Completed, "tool_loop_test", None, None)
                     .expect("test completion should validate"),
             )

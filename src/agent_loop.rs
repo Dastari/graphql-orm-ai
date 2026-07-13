@@ -65,6 +65,15 @@ pub struct AiAgentContinuation {
 }
 
 impl AiAgentContinuation {
+    pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "formatVersion": 1,
+            "continuation": self.continuation,
+            "input": self.input,
+            "transfers": self.transfers,
+        })
+    }
+
     pub(crate) fn apply_with_transfers(
         self,
         request: &mut ModelRequest,

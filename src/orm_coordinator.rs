@@ -257,6 +257,53 @@ pub trait AiAgentProviderOutputWriter: Send + Sync {
     ) -> Result<AiPersistedProviderOutput, AiError>;
 }
 
+/// Protected fenced checkpoint persistence for replay-safe coordinator phases.
+///
+/// A successful write proves only that an exact provider result or completed
+/// read-only tool batch is durably protected under the current attempt fence.
+/// It does not itself authorize generation adoption or external replay.
+#[async_trait]
+pub trait AiAgentCheckpointWriter: Send + Sync {
+    /// Persists one normalized provider turn before output or tools consume it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale fencing, unsettled budget usage, current
+    /// access/protection denial, malformed state, or persistence failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_provider_turn(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        scope: &AiScope,
+        correlation_id: &str,
+        route: &AiToolResultEgressRoute,
+        provider_turns: u32,
+        total_tool_calls: u32,
+    ) -> Result<AiRunLease, AiError>;
+
+    /// Persists one exact complete model-visible read-only tool batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless every result is protected, separately
+    /// egress-authorized, durably complete, and bound to the current fence and
+    /// preceding provider response.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_tool_batch(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        completed_tools: &[AiPersistedApplicationToolCall],
+        continuation: &AiAgentContinuation,
+        scope: &AiScope,
+        correlation_id: &str,
+        route: &AiToolResultEgressRoute,
+        provider_turns: u32,
+        total_tool_calls: u32,
+    ) -> Result<AiRunLease, AiError>;
+}
+
 #[async_trait]
 impl AiAgentProviderOutputWriter for OrmAiProviderOutputService {
     async fn persist_output(
@@ -326,6 +373,7 @@ pub struct AiReadOnlyAgentCoordinator {
     provider_executor: Arc<dyn AiAgentProviderTurnExecutor>,
     tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
     output_writer: Arc<dyn AiAgentProviderOutputWriter>,
+    checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
     planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
     limits: AiReadOnlyAgentCoordinatorLimits,
 }
@@ -337,6 +385,7 @@ impl AiReadOnlyAgentCoordinator {
         provider_executor: Arc<dyn AiAgentProviderTurnExecutor>,
         tool_executor: Arc<dyn AiAgentReadOnlyToolExecutor>,
         output_writer: Arc<dyn AiAgentProviderOutputWriter>,
+        checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
         planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
         limits: AiReadOnlyAgentCoordinatorLimits,
     ) -> Self {
@@ -345,6 +394,7 @@ impl AiReadOnlyAgentCoordinator {
             provider_executor,
             tool_executor,
             output_writer,
+            checkpoint_writer,
             planner,
             limits,
         }
@@ -418,6 +468,32 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
+            lease = match self
+                .checkpoint_writer
+                .persist_provider_turn(
+                    &lease,
+                    &result,
+                    &scope,
+                    &correlation_id,
+                    &route,
+                    guard.provider_turns(),
+                    guard.total_tool_calls(),
+                )
+                .await
+            {
+                Ok(renewed) => renewed,
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderTurn,
+                            "provider_turn_checkpoint_uncertain",
+                            result.provider_response_id(),
+                        )
+                        .await;
+                }
+            };
             match observed {
                 AiAgentLoopTurn::Completed => {
                     let persisted = match self.output_writer.persist_output(&lease, &result).await {
@@ -453,6 +529,7 @@ impl AiReadOnlyAgentCoordinator {
                     provider_turn_index,
                     call_count,
                 } => {
+                    let mut completed_tools = Vec::with_capacity(call_count);
                     for tool_call_index in 0..call_count {
                         let context = AiApplicationToolCallContext::new(
                             provider_turn_index,
@@ -490,6 +567,7 @@ impl AiReadOnlyAgentCoordinator {
                                 .await;
                         }
                         lease = renewed;
+                        completed_tools.push(persisted);
                     }
                     let continuation = match guard.continuation() {
                         Ok(continuation) => continuation,
@@ -500,6 +578,34 @@ impl AiReadOnlyAgentCoordinator {
                                     &guard,
                                     AiAgentRecoveryPhase::ApplicationTool,
                                     "application_tool_batch_invalid",
+                                    result.provider_response_id(),
+                                )
+                                .await;
+                        }
+                    };
+                    lease = match self
+                        .checkpoint_writer
+                        .persist_tool_batch(
+                            &lease,
+                            &result,
+                            &completed_tools,
+                            &continuation,
+                            &scope,
+                            &correlation_id,
+                            &route,
+                            guard.provider_turns(),
+                            guard.total_tool_calls(),
+                        )
+                        .await
+                    {
+                        Ok(renewed) => renewed,
+                        Err(_) => {
+                            return self
+                                .finish_recovery(
+                                    &lease,
+                                    &guard,
+                                    AiAgentRecoveryPhase::ApplicationTool,
+                                    "application_tool_batch_checkpoint_uncertain",
                                     result.provider_response_id(),
                                 )
                                 .await;
@@ -800,6 +906,81 @@ mod tests {
         }
     }
 
+    struct TestCheckpointWriter;
+
+    #[async_trait]
+    impl AiAgentCheckpointWriter for TestCheckpointWriter {
+        async fn persist_provider_turn(
+            &self,
+            lease: &AiRunLease,
+            result: &AiProviderCallResult,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            if provider_turns == 0 || result.run_id() != lease.run_id() {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.clone())
+        }
+
+        async fn persist_tool_batch(
+            &self,
+            lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+            completed_tools: &[AiPersistedApplicationToolCall],
+            _continuation: &AiAgentContinuation,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _provider_turns: u32,
+            total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            if completed_tools.is_empty()
+                || usize::try_from(total_tool_calls)
+                    .map_or(true, |total| total < completed_tools.len())
+            {
+                return Err(AiError::Conflict);
+            }
+            Ok(lease.clone())
+        }
+    }
+
+    struct RejectProviderCheckpoint;
+
+    #[async_trait]
+    impl AiAgentCheckpointWriter for RejectProviderCheckpoint {
+        async fn persist_provider_turn(
+            &self,
+            _lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::PersistenceFailed)
+        }
+
+        async fn persist_tool_batch(
+            &self,
+            _lease: &AiRunLease,
+            _result: &AiProviderCallResult,
+            _completed_tools: &[AiPersistedApplicationToolCall],
+            _continuation: &AiAgentContinuation,
+            _scope: &AiScope,
+            _correlation_id: &str,
+            _route: &AiToolResultEgressRoute,
+            _provider_turns: u32,
+            _total_tool_calls: u32,
+        ) -> Result<AiRunLease, AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
     fn principal_reference() -> PrincipalReference {
         AuthPrincipal::User(AuthUser {
             user_id: "coordinator-user".to_owned(),
@@ -881,6 +1062,7 @@ mod tests {
                 expose_result: expose_tool_result,
             }),
             Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
             planner,
             coordinator_limits,
         )
@@ -919,6 +1101,51 @@ mod tests {
             }
         ));
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn provider_result_without_a_durable_checkpoint_requires_recovery() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-without-checkpoint",
+                Vec::new(),
+            ))])),
+            delay: None,
+        });
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider,
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            Arc::new(RejectProviderCheckpoint),
+            Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            }),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("missing checkpoint should close for recovery");
+
+        assert!(matches!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 1,
+                total_tool_calls: 0,
+            }
+        ));
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
     }
 
     #[tokio::test]
@@ -1061,6 +1288,7 @@ mod tests {
                 expose_result: true,
             }),
             Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
             invalid_planner,
             limits(50),
         );

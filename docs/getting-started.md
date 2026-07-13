@@ -83,9 +83,14 @@ For the bounded registered read-only tool path, prefer
 trusted `AiReadOnlyAgentTurnPlanner` that constructs initial turns with
 `new_with_tools` and consumes exact later `AiAgentContinuation` values with
 `new_continuation_with_tools`. Configure its heartbeat interval comfortably
-shorter than the run-service lease TTL. A successful coordinator outcome means
+shorter than the run-service lease TTL. Also supply an
+`OrmAiCoordinatorCheckpointService` as the required
+`AiAgentCheckpointWriter`, using the same principal/access/protection
+boundaries as transcript persistence. A successful coordinator outcome means
 the terminal/recovery state was durably committed; a lost fence returns an
-error and must not be followed by another write from that worker.
+error and must not be followed by another write from that worker. Protected
+non-final checkpoints are not yet cross-generation resume authority; see the
+[checkpoint guide](coordinator-checkpoints.md).
 
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run

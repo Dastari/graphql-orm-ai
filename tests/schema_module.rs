@@ -8,6 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.11.0");
     assert_eq!(catalog.entities().len(), 37);
     assert!(
         catalog
@@ -77,5 +78,16 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         run.columns
             .iter()
             .any(|column| column.name == "latest_checkpoint_id" && column.nullable)
+    );
+    let checkpoint = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_run_checkpoints")
+        .expect("run checkpoint table should exist");
+    assert!(
+        checkpoint
+            .columns
+            .iter()
+            .any(|column| column.name == "protected_state" && column.nullable)
     );
 }

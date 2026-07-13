@@ -4,6 +4,39 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.10.0 to 0.11.0
+
+Apply `AiSchemaModule` through the managed `graphql-orm` schema manager with
+workers, provider starts, subscriptions, and restore callbacks closed. This
+revision adds nullable private `protected_state` to append-only
+`graphql_orm_ai_run_checkpoints`. It stores exact protected normalized provider
+turns and completed model-visible read-only tool batches. Final assistant-output
+checkpoints continue to prove their content through message/block rows and keep
+this field null.
+
+The coordinator now requires an `AiAgentCheckpointWriter`. Install
+`OrmAiCoordinatorCheckpointService` with the same run service, current-principal
+resolver, access policy, content-protection resolver/protector, trusted clock,
+and deployment byte/freshness limits. Provider turns are checkpointed only
+after authoritative budget reconciliation; tool-batch checkpoints additionally
+verify every protected result, egress decision/manifest hash, run step, provider
+response, and fence in the same transaction. A checkpoint failure after
+external execution becomes `RecoveryRequired`.
+
+These checkpoints do not yet permit cross-generation adoption. Existing active
+pre-`0.11.0` runs and malformed/absent checkpoints must continue through
+privileged recovery; never infer provider output or tool results, replay a
+provider call, or backfill protected state manually. Historical completed runs
+and final-output checkpoints need no rewrite. No application-domain data
+migration is required.
+
+This adds no public GraphQL root or client-visible SDL and changes no Cargo
+feature/default. The AI schema migration is nullable/additive, but the runtime
+gate must remain closed until managed validation and restore reconciliation
+report module `0.11.0` ready. The new public service/trait and constructor
+change advance the pre-1.0 crate from `0.5.0` to `0.6.0`; update the reviewed
+Git revision and package expectation together.
+
 ## Unreleased: remote authenticated GraphQL execution (0.4.0 to 0.5.0)
 
 This pre-1.0 Rust API boundary adds the project-agnostic private remote

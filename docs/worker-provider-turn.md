@@ -19,6 +19,9 @@ of these contracts permits arbitrary provider calls or model-authored GraphQL.
   protected, windowable assistant-message blocks and a durable session event.
 - `OrmAiApplicationToolCallService` protects and persists exact read-only tool
   calls and results around the ordinary authenticated GraphQL resolver path.
+- `OrmAiCoordinatorCheckpointService` protects accepted provider results and
+  complete model-visible tool batches, verifies their settled budget/tool audit
+  facts transactionally, and renews the exact run fence.
 - `AiAgentLoopGuard` enforces hard provider-turn/tool-call bounds and exact
   result-to-`call_id` continuation ordering.
 - `AiReadOnlyAgentCoordinator` owns turn planning, provider heartbeats, exact
@@ -45,6 +48,7 @@ Queued/RetryScheduled
         │ authoritative completion + usage
         ▼
   budget Committed
+        │ protected provider-turn checkpoint + renewed fence
         ├─ no application calls
         │    fresh access + current protection policy
         │    message blocks + event + run fence in one transaction
@@ -54,6 +58,7 @@ Queued/RetryScheduled
              fresh policy + ordinary authenticated resolver
              static disclosure + exact result egress decision/audit
              protected result + event + renewed fence
+             protected complete-tool-batch checkpoint + renewed fence
              exact bounded continuation → next provider turn
         ▼
   renewed Running lease
@@ -113,11 +118,13 @@ tool-result egress decision, persists the protected outcome, and renews the
 fence. `AiAgentLoopGuard` binds each result to its opaque provider `call_id`
 before `new_continuation_with_tools` can construct the next request.
 
-The coordinator is not yet restart-adoptable across a partial batch. A lost
-guard, partial batch, unknown provider response, expired fence without the
-exact final-output checkpoint, or restore state remains closed for
-reconciliation instead of being reconstructed. Consequential, mutation,
-proposal, approval-required, and non-idempotent descriptors remain rejected
+The coordinator is not yet restart-adoptable across generations. Provider-turn
+and completed-tool-batch checkpoints are durable inputs to a future adoption
+proof, not permission to reconstruct a lost guard today. A partial batch,
+unknown provider response, expired fence without the exact final-output
+checkpoint, or restore state remains closed for reconciliation.
+Consequential, mutation, proposal, approval-required, and non-idempotent
+descriptors remain rejected
 until canonical preview, one-shot approval persistence, post-approval fresh
 authorization, and recovery are owned by the coordinator. Callers must never
 simulate either path with a model-authored document, operation name, URL,

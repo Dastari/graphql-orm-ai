@@ -86,9 +86,17 @@ immutable manifests produced for those exact results as one unit. The normal
 provider executor still reserves a fresh atomic budget and freshly authorizes
 and audits the model-inference and result transfers before transport.
 
-Do not reconstruct a guard to resume an ambiguous partial loop. A lost worker,
-partially completed batch, expired lease, unknown provider response, or restore
-snapshot stays closed for reconciliation/operator review.
+The top-level coordinator additionally requires an `AiAgentCheckpointWriter`.
+It protects and fences the accepted provider result before executing tools,
+then protects the exact complete tool batch and opaque continuation before the
+next plan. Checkpoint persistence failure after either external boundary closes
+the run for recovery and never replays the provider or resolver.
+
+Do not reconstruct a guard to resume an ambiguous partial loop. A protected
+checkpoint is bound to its original attempt/generation and is not yet adoption
+authority. A lost worker, partially completed batch, expired lease, unknown
+provider response, or restore snapshot stays closed for reconciliation/operator
+review.
 
 ## OpenAI continuation and retention
 
@@ -114,9 +122,10 @@ or turn retention on.
   descriptor can enter this loop. Use the separate
   [supervised service](supervised-tool-loop.md) for exact one-shot application
   mutations; it is not yet owned by this coordinator.
-- Restart adoption for a provider turn or partially completed tool batch is not
-  implemented. Only final protected output has an exact same-transaction
-  checkpoint that expired recovery can safely finalize.
+- Cross-generation adoption remains unimplemented. Provider turns and complete
+  model-visible tool batches now have protected exact checkpoints, but expired
+  recovery still closes them; only the final-output checkpoint can currently
+  be finalized automatically.
 - `AiLiveDeltaCoalescer` bounds visible text/reasoning-summary batches to no
   more than 50 ms / 4 KiB and excludes structured/tool events, but protected
   durable session-event persistence is not wired yet. A raw batch is not an

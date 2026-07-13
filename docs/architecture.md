@@ -101,8 +101,10 @@ continuation.
 
 The top-level read-only coordinator now owns fenced provider heartbeats,
 bounded turn/tool sequencing, exact continuation, output persistence, and safe
-terminal/recovery classification. Restart adoption for a partially completed
-provider/tool batch and all consequential paths remain closed. Mutations,
+terminal/recovery classification. Accepted provider results and complete
+model-visible tool batches are now protected through the current run fence
+before the next phase consumes them. Cross-generation adoption of those
+checkpoints and all other partially completed batches remain closed. Mutations,
 approval-required/non-idempotent tools, other ambiguous resume, and stateless
 reasoning continuation require their complete preview, approval,
 fresh-authorization, persistence, and reconciliation contracts before exposure.

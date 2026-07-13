@@ -39,6 +39,8 @@ mod orm_approvals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_checkpoints;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_coordinator;
@@ -90,6 +92,8 @@ pub use orm_approvals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_checkpoints::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_configuration::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_coordinator::*;
@@ -137,14 +141,16 @@ pub mod prelude {
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
-        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
-        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome, AiProposalServiceLimits,
-        AiProviderCallExecutor, AiProviderCallLimits, AiProviderOutputLimits,
-        AiProviderUsageAccounting, AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits,
-        AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall,
-        AiRunServiceLimits, OrmAiApplicationToolCallService, OrmAiApprovalService,
-        OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiEgressDecisionAudit,
-        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
+        AiAgentCheckpointWriter, AiApplicationToolCallLimits, AiApprovalServiceLimits,
+        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiCoordinatorCheckpointLimits, AiProposalServiceLimits, AiProviderCallExecutor,
+        AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
+        AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,
+        AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
+        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiBudgetService,
+        OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
+        OrmAiEgressDecisionAudit, OrmAiProposalService, OrmAiProviderOutputService,
+        OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

@@ -91,6 +91,13 @@ and renewed run fence commit atomically.
 The read-only coordinator heartbeats the current fence while provider
 transport is pending and stops immediately when that proof is lost. Provider,
 resolver, or output ambiguity is classified for recovery rather than replayed.
+After a provider result is accepted, its settled budget, normalized content,
+tool calls, scope/route, and loop state are protected and checkpointed before
+tool/output consumption. A complete tool batch is checkpointed only after one
+transaction verifies every protected result and exact egress audit. These
+checkpoints remain bound to the original attempt/generation; until the separate
+adoption proof exists, expired non-final work still becomes
+`RecoveryRequired`.
 Live-delta batches contain sensitive plaintext inside the trusted process;
 coalescing supplies only UTF-8/time/byte bounds and never authorizes delivery.
 Until protected fenced delta-event persistence is wired, batches must not be

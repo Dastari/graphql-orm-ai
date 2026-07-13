@@ -164,6 +164,43 @@ pub struct AiToolResultEgressRoute {
 }
 
 impl AiToolResultEgressRoute {
+    pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "providerProfileId": self.provider_profile_id,
+            "destination": self.destination,
+            "destinationTrust": self.destination_trust,
+            "purpose": self.purpose,
+            "retention": self.retention,
+            "policyVersion": self.policy_version,
+            "residency": self.residency,
+            "consentReference": self.consent_reference,
+        })
+    }
+
+    pub(crate) fn matches_manifest(
+        &self,
+        manifest: &AiEgressManifest,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        provider_kind: &str,
+        provider_model: &str,
+    ) -> bool {
+        manifest.provider_profile_id == self.provider_profile_id
+            && manifest.provider_kind == provider_kind
+            && manifest.model == provider_model
+            && manifest.destination == self.destination
+            && manifest.destination_trust == self.destination_trust
+            && manifest.capability == AiEgressCapability::ToolResult
+            && manifest.scope == *scope
+            && manifest.session_id == Some(lease.session_id())
+            && manifest.run_id == Some(lease.run_id())
+            && manifest.purpose == self.purpose
+            && manifest.retention == self.retention
+            && manifest.residency == self.residency
+            && manifest.policy_version == self.policy_version
+            && manifest.consent_reference == self.consent_reference
+    }
+
     /// Creates required server-owned destination metadata.
     ///
     /// # Errors
@@ -366,6 +403,16 @@ impl AiConsequentialToolCallOutcome {
 }
 
 impl AiPersistedApplicationToolCall {
+    pub(crate) fn checkpoint_value(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "id": self.id.0,
+            "providerCallId": self.provider_call_id,
+            "state": self.state.as_str(),
+            "modelInput": self.model_input.as_ref()?,
+            "egressManifest": self.egress_manifest.as_ref()?,
+        }))
+    }
+
     /// Durable local tool-call identifier.
     pub const fn id(&self) -> AiToolCallId {
         self.id

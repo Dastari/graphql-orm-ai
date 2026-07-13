@@ -10,12 +10,12 @@ durable history under server control.
 This crate is an active, unpublished pre-release. The concrete session,
 configuration, subscription, fenced worker, provider-turn, protected
 read-only application-tool/result, bounded coordinator/continuation, protected
-output checkpoint, supervised consequential-tool, and private remote GraphQL
-adapter foundations compile and are tested. Protected proposal review and exact
-one-shot approval lifecycles also compile and are tested. Restart adoption for
-partially completed provider/tool batches, a top-level approval-wait
-coordinator, and several operational adapters listed below are still being
-implemented.
+output/provider-turn/tool-batch checkpoints, supervised consequential-tool, and
+private remote GraphQL adapter foundations compile and are tested. Protected
+proposal review and exact one-shot approval lifecycles also compile and are
+tested. Cross-generation adoption for exact checkpoints, a top-level
+approval-wait coordinator, and several operational adapters listed below are
+still being implemented.
 
 ## What it provides
 
@@ -76,6 +76,10 @@ implemented.
 - Same-transaction final-output checkpoints that let expired-lease recovery
   safely finish the exact crash window after protected message persistence but
   before terminal run finalization.
+- Protected fenced coordinator checkpoints written after every accepted
+  provider turn and complete model-visible read-only tool batch. They bind
+  settled usage, loop state, scope/route, exact outputs, and continuation;
+  failed checkpoint handoff requires recovery and does not trigger replay.
 - UTF-8-safe live-delta coalescing primitives capped at 50 ms / 4 KiB. Durable
   protected delta-event wiring remains gated; a batch alone is not permission
   to disclose content.
@@ -199,8 +203,8 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include restart adoption for partial multi-turn
-registered-tool batches, a top-level supervised approval-wait coordinator,
+Production blockers include cross-generation adoption of validated protected
+provider/tool checkpoints, a top-level supervised approval-wait coordinator,
 durable protected live-delta persistence, authenticated budget-policy/usage
 GraphQL lifecycles,
 per-item proposal review, attachment pipeline, production mutable secret

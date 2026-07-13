@@ -971,9 +971,8 @@ pub(crate) struct AiRunStepRecord {
     pub row_version: i64,
 }
 
-/// Immutable fenced coordinator checkpoint containing only redacted recovery
-/// metadata. Protected resumable payloads are reserved for a later module
-/// version and must never be inferred from this row.
+/// Immutable fenced coordinator checkpoint containing redacted recovery
+/// metadata and, when present, a protected exact resumable payload.
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
     any(feature = "sqlite", feature = "postgres"),
@@ -1009,6 +1008,11 @@ pub(crate) struct AiRunCheckpointRecord {
     pub budget_reservation_id: Option<graphql_orm::uuid::Uuid>,
     /// Durable assistant message proving final protected output persistence.
     pub assistant_message_id: Option<graphql_orm::uuid::Uuid>,
+    /// Protected provider-turn or completed-tool-batch state. This field is
+    /// never exposed through generated reads and is absent for final-output
+    /// checkpoints whose message/block rows are the durable proof.
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_state: Option<serde_json::Value>,
     /// Stable hash over every recovery-relevant redacted field.
     pub checkpoint_hash: String,
     /// Checkpoint commit time.
@@ -1635,7 +1639,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.10.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.11.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

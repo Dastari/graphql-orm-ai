@@ -283,6 +283,25 @@ pub(crate) struct PreparedProviderOutput {
     pub expected_tenant_id: Option<String>,
 }
 
+pub(crate) struct PreparedCoordinatorCheckpointTool {
+    pub id: Uuid,
+    pub provider_call_id: String,
+    pub tool_id: String,
+    pub result_egress_manifest_hash: String,
+}
+
+pub(crate) struct PreparedCoordinatorCheckpoint {
+    pub id: Uuid,
+    pub checkpoint_kind: String,
+    pub provider_kind: String,
+    pub provider_model: String,
+    pub provider_response_id: Option<String>,
+    pub budget_reservation_id: Uuid,
+    pub protected_state: serde_json::Value,
+    pub checkpoint_hash: String,
+    pub completed_tools: Vec<PreparedCoordinatorCheckpointTool>,
+}
+
 pub(crate) struct PreparedProposal {
     pub id: Uuid,
     pub proposal_type: String,
@@ -974,6 +993,7 @@ impl OrmAiRunService {
                         provider_response_id: output.provider_response_id,
                         budget_reservation_id: Some(output.budget_reservation_id),
                         assistant_message_id: Some(output.message_id),
+                        protected_state: None,
                         checkpoint_hash: output.checkpoint_hash,
                     })
                     .await
@@ -1008,6 +1028,130 @@ impl OrmAiRunService {
                         session_id: lease.session_id.0,
                         sequence: event_sequence,
                     });
+                    lease_from_record(&updated_run)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn append_coordinator_checkpoint(
+        &self,
+        lease: &AiRunLease,
+        checkpoint: PreparedCoordinatorCheckpoint,
+    ) -> Result<AiRunLease, AiError> {
+        let now = canonical_second(self.clock.now());
+        let lease_ttl = self.limits.lease_ttl;
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    let valid_kind = match checkpoint.checkpoint_kind.as_str() {
+                        "provider_turn_persisted" => checkpoint.completed_tools.is_empty(),
+                        "tool_batch_persisted" => {
+                            checkpoint.provider_response_id.is_some()
+                                && !checkpoint.completed_tools.is_empty()
+                        }
+                        _ => false,
+                    };
+                    if persisted_state(&current)? != AiRunState::Running
+                        || !valid_kind
+                        || checkpoint.provider_kind.trim().is_empty()
+                        || checkpoint.provider_model.trim().is_empty()
+                        || checkpoint.checkpoint_hash.len() != 64
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let reservation = tx
+                        .find_by_id::<AiBudgetReservationRecord>(&checkpoint.budget_reservation_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if reservation.session_id != lease.session_id.0
+                        || reservation.run_id != lease.run_id.0
+                        || reservation.attempt_id != lease.attempt_id
+                        || reservation.lease_generation != lease.lease_generation
+                        || reservation.provider_kind != checkpoint.provider_kind
+                        || reservation.provider_model != checkpoint.provider_model
+                        || reservation.state != "committed"
+                        || reservation.actual_runs != Some(1)
+                        || reservation.reconciled_at.is_none()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    for expected in &checkpoint.completed_tools {
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&expected.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let step = tx
+                            .find_by_id::<AiRunStepRecord>(&expected.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if call.run_id != lease.run_id.0
+                            || call.lease_generation != lease.lease_generation
+                            || call.provider_call_id != expected.provider_call_id
+                            || call.tool_id != expected.tool_id
+                            || call.provider_kind.as_deref()
+                                != Some(checkpoint.provider_kind.as_str())
+                            || call.provider_model.as_deref()
+                                != Some(checkpoint.provider_model.as_str())
+                            || call.provider_response_id != checkpoint.provider_response_id
+                            || call.budget_reservation_id != Some(checkpoint.budget_reservation_id)
+                            || !matches!(call.state.as_str(), "completed" | "execution_failed")
+                            || call.protected_result.is_none()
+                            || call.result_egress_decision_id.is_none()
+                            || call.result_egress_manifest_hash.as_deref()
+                                != Some(expected.result_egress_manifest_hash.as_str())
+                            || call.completed_at.is_none()
+                            || step.run_id != lease.run_id.0
+                            || step.lease_generation != lease.lease_generation
+                            || step.state != call.state
+                            || step.finished_at.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
+                    let expiry = now
+                        .checked_add(lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let run_update = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(AiRunState::Running.as_str()),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                latest_checkpoint_id: Some(Some(checkpoint.id)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated_run = match run_update {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                        id: checkpoint.id,
+                        run_id: lease.run_id.0,
+                        attempt_id: lease.attempt_id,
+                        lease_generation: lease.lease_generation,
+                        checkpoint_kind: checkpoint.checkpoint_kind,
+                        provider_response_id: checkpoint.provider_response_id,
+                        budget_reservation_id: Some(checkpoint.budget_reservation_id),
+                        assistant_message_id: None,
+                        protected_state: Some(checkpoint.protected_state),
+                        checkpoint_hash: checkpoint.checkpoint_hash,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
                     lease_from_record(&updated_run)
                 })
             })

@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.5.0` and the AI
-schema module to `0.10.0`.
+This development line advances the pre-1.0 crate version to `0.6.0` and the AI
+schema module to `0.11.0`.
 
 ### Added
 
@@ -112,9 +112,22 @@ schema module to `0.10.0`.
   deployment authority-issuer and transport seams, logical-route conformance
   fixtures, short-lived secret handling, and current-principal freshness
   limits without embedding a router or federation product.
+- `OrmAiCoordinatorCheckpointService` and `AiAgentCheckpointWriter` for
+  protected, size-bounded, freshly authorized, fenced provider-turn and exact
+  completed-tool-batch checkpoints. The same transaction verifies committed
+  provider usage and every protected/egress-audited tool row before advancing
+  the run's latest checkpoint.
 
 ### Changed
 
+- `AiReadOnlyAgentCoordinator::new` now requires an
+  `AiAgentCheckpointWriter`. Accepted provider results are checkpointed before
+  tool/output consumption, and a completed tool batch is checkpointed before
+  the next continuation plan. Checkpoint failure closes the run for recovery.
+- AI schema module version is now `0.11.0`; run checkpoints add nullable,
+  private `protected_state`. Existing final-output checkpoints remain valid
+  with no protected state, while older active runs gain no inferred resume
+  authority.
 - `GraphqlRequestContextFactory::build` now receives the complete validated
   `ToolGraphqlRequest` instead of only `GraphqlInvocationContext`, allowing a
   remote issuer to bind delegated authority to the exact server-authored
@@ -123,9 +136,10 @@ schema module to `0.10.0`.
   One-shot supervised mutations use `execute_approved_tool`, which recomputes
   current host tool policy and compares its version and authorization-state
   digest before building the normal resolver request context.
-- AI schema module version is now `0.10.0`. Existing tool-call history keeps
-  nullable new provider/audit fields; a waiting pre-`0.10.0` consequential row
-  cannot be resumed and fails closed for reconciliation.
+- The supervised-tool slice introduced AI schema module `0.10.0`. Existing
+  tool-call history keeps nullable provider/audit fields; a waiting
+  pre-`0.10.0` consequential row cannot be resumed and fails closed for
+  reconciliation. The current module is `0.11.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -135,7 +149,7 @@ schema module to `0.10.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.10.0`.
+  the current module is `0.11.0`.
 
 - Multi-repository development now uses one owning agent per repository.
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
@@ -190,6 +204,11 @@ schema module to `0.10.0`.
 
 ### Security
 
+- Durable coordinator checkpoints rehydrate the principal and re-resolve an
+  unchanged ready protection policy around asynchronous protection. Payloads
+  bind the exact attempt/generation, provider result, loop counts, scope,
+  result route, completed tool outputs/manifests, and continuation. They are
+  persistence proofs only; cross-generation adoption remains closed.
 - Remote GraphQL execution now rejects local/unregistered targets, stale or
   expired principals, expired delegated authority, changed documents or
   canonical variables, changed operation/projection/disclosure/audit bindings,
