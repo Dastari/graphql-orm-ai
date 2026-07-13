@@ -1,11 +1,21 @@
-use async_graphql::Schema;
-use graphql_orm_ai::{AiMutationRoot, AiQueryRoot, AiSubscriptionRoot};
+use async_graphql::{EmptySubscription, Schema};
+use graphql_orm_ai::{
+    AiConfigurationMutationRoot, AiConfigurationQueryRoot, AiMutationRoot, AiQueryRoot,
+    AiSubscriptionRoot,
+};
 
 #[test]
 fn configured_graphql_case_is_coherent_without_aliases() {
     let sdl = Schema::build(AiQueryRoot, AiMutationRoot, AiSubscriptionRoot)
         .finish()
         .sdl();
+    let configuration_sdl = Schema::build(
+        AiConfigurationQueryRoot,
+        AiConfigurationMutationRoot,
+        EmptySubscription,
+    )
+    .finish()
+    .sdl();
 
     #[cfg(not(feature = "graphql-case-pascal"))]
     {
@@ -15,6 +25,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("aiSessionEvents(sessionId:"));
         assert!(sdl.contains("aiInboxEventPage("));
         assert!(sdl.contains("aiInboxEvents("));
+        assert!(configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("AiSessions("));
     }
 
@@ -26,6 +37,8 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("AiSessionEvents(SessionId:"));
         assert!(sdl.contains("AiInboxEventPage("));
         assert!(sdl.contains("AiInboxEvents("));
+        assert!(configuration_sdl.contains("LocalHarness"));
+        assert!(!configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("aiSessions("));
     }
 }

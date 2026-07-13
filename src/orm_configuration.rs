@@ -249,6 +249,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
                             if current.scope_key != scope_hash {
                                 return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
+                            if provider_kind == AiProviderKindInput::LocalHarness.as_str()
+                                && current.credential_reference.is_some()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
+                            }
                             match tx
                                 .compare_and_swap::<AiProviderProfileRecord>(
                                     &id,
@@ -314,6 +319,11 @@ impl AiConfigurationService for OrmAiConfigurationService {
             AiConfigurationAction::ManageProviderCredentials,
         )
         .await?;
+        if existing.provider_kind == AiProviderKindInput::LocalHarness.as_str() {
+            return Err(AiError::InvalidInput(
+                "local-harness profiles do not accept provider credentials".to_owned(),
+            ));
+        }
         if existing.row_version != expected_version {
             return Err(AiError::Conflict);
         }

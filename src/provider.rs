@@ -34,6 +34,8 @@ pub enum ProviderKind {
     Ollama,
     /// Explicitly configured OpenAI-compatible endpoint.
     OpenAiCompatible,
+    /// Deployment-registered installed local harness.
+    LocalHarness,
 }
 
 impl ProviderKind {
@@ -45,6 +47,7 @@ impl ProviderKind {
             Self::Xai => "xai",
             Self::Ollama => "ollama",
             Self::OpenAiCompatible => "openai_compatible",
+            Self::LocalHarness => "local_harness",
         }
     }
 }

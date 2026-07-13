@@ -21,6 +21,8 @@ Exactly one persistence backend is currently required:
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter. `provider-ollama` enables the native Ollama `/api/chat`
 adapter; it needs an explicit deployment endpoint policy even for loopback.
+`local-harness` enables the installed text/structured-output protocol and
+provider wrapper; it still requires a deployment-owned sandbox launcher.
 `graphql-case-pascal` changes the complete GraphQL naming contract from default
 camelCase to PascalCase.
 
@@ -56,6 +58,15 @@ The initial adapter supports streaming text, exact PNG/JPEG/WebP input, and
 structured output. It deliberately rejects tools and continuation until a
 provider-independent stateless checkpoint can reconstruct the full chat. See
 the [Ollama guide](ollama.md).
+
+For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
+`AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,
+wrap it in `AiJsonLinesLocalHarnessDriver`, then register the resulting
+`AiLocalHarnessProvider` as `ProviderKind::LocalHarness`. The GraphQL provider
+profile has no process configuration or base URL. Do not implement the launcher
+as a plain inherited `Command`; it must meet the digest, clean-environment,
+network-denial, resource, process-tree, and kill-on-drop obligations in the
+[local harness guide](local-harness.md).
 
 The principal inbox lets a virtualized chat drawer refresh bounded session
 shells across multiple conversations without loading transcript history. Its

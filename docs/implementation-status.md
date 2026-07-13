@@ -39,6 +39,12 @@ production-ready behavior.
   exact PNG/JPEG/WebP image reopening, JSON-schema output, and authoritative
   prompt/evaluation token usage. It explicitly omits thinking and rejects
   tools, files, built-ins, and continuation until stateless checkpoints land.
+- Feature-gated installed local-harness foundation with immutable logical-model
+  registry, fixed executable/arguments/digest/version/sandbox/resource
+  registration, a trusted process-tree launcher seam, strict bounded
+  JSON-lines request/event protocol, ordinary provider proof validation, and a
+  deterministic fake-process conformance suite. No unsandboxed concrete child
+  process launcher is supplied.
 - Exact provider request binding: an egress proof cannot be paired with a
   changed provider/model/session/run/payload estimate, every built-in or
   attachment capability requires its own matching authorized transfer, and an
@@ -257,9 +263,11 @@ production-ready behavior.
   format, fixed destination mapping, network isolation, and application audit
   integration intentionally remain host-owned.
 - Ollama custom-tool/stateless-continuation support, OpenAI-compatible local
-  provider profiles, and the allowlisted installed local-harness/ACP process
-  driver. Local execution remains in scope; no model may choose a command,
-  arguments, working directory, environment, mount, or network authority.
+  provider profiles, a production OS/container implementation of the trusted
+  local-harness launcher, and optional ACP framing. The immutable registry,
+  safe JSON-lines driver, and fake-process suite are implemented; no model may
+  choose command, arguments, working directory, environment, mount, or network
+  authority.
 - Any consumer integration testing or migration. That work is explicitly left
   to each consumer project/agent.
 
@@ -267,20 +275,21 @@ production-ready behavior.
 
 1. Add authenticated budget-policy, usage, and immutable pricing-catalog
    GraphQL surfaces plus bounded session-event/content retention workers.
-2. Add the deterministic fake-process foundation for an allowlisted local
-   harness, then provider-independent stateless conversation checkpoints for
-   safe Ollama tool continuation; provider-persistent file lifecycle remains
-   separately gated.
+2. Add provider-independent stateless conversation checkpoints for safe Ollama
+   and installed-harness tool continuation, then a separately reviewed
+   production OS/container launcher; provider-persistent file lifecycle
+   remains gated.
 3. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai,provider-ollama`: full SQLite,
+- `cargo test --features provider-openai,provider-ollama,local-harness`: full SQLite,
   OpenAI-mock, and native Ollama loopback-mock coverage passed; one explicit
-  live-provider test remained ignored. Generated private-ORM search doctests
+  live-provider test remained ignored. Deterministic installed-harness process
+  conformance and generated private-ORM doctests were included; the latter
   remained intentionally ignored.
-- `cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings`:
+- `cargo clippy --all-targets --features provider-openai,provider-ollama,local-harness -- -D warnings`:
   passed.
 - Warnings-denied Rustdoc passed for both provider adapters and
   `graphql-case-pascal`.

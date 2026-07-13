@@ -60,6 +60,21 @@ Logical remote GraphQL targets are deployment-registered. Models cannot choose
 URLs, audiences, resources, direct-service routes, or credentials. Recursive
 AI control-plane and introspection tools are rejected.
 
+Installed local harnesses are not shell tools. A model selects only a logical
+name already frozen in `AiLocalHarnessRegistry`; the registration fixes an
+absolute executable, argument vector, executable digest/version, isolated
+working directory, sandbox profile, and resource ceilings. The initial type
+has no environment, credential, mount, network, file, image, tool, built-in,
+background, or continuation authority. The JSON-lines driver passes only the
+bounded model request and accepts only visible text plus bounded usage and
+terminal events. Stderr is counted and discarded. Protocol errors explicitly
+terminate the process, and stream cancellation relies on the launcher's
+mandatory process-tree kill-on-drop contract. A registration proves syntax,
+not sandbox enforcement: the trusted deployment launcher must atomically
+verify/execute the digest, avoid a shell, clear ambient environment, deny
+network, enforce OS/container and memory/CPU/wall ceilings, and contain every
+descendant. See the [local harness guide](local-harness.md).
+
 The remote adapter accepts only private routed/direct registrations and the
 complete server-authored request. It rejects stale or expired principals before
 issuance, bounds delegated expiry by both configured lifetime and principal

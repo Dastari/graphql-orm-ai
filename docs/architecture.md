@@ -47,6 +47,18 @@ deployment transport maps the logical target to a fixed private destination.
 The adapter is federation-neutral; direct routes must not gain authority beyond
 their equivalent routed operation.
 
+Local HTTP model servers remain ordinary provider adapters. Installed model or
+agent programs use the separate `AiLocalHarnessProvider` and
+`AiLocalHarnessDriver` boundary. The provider maps a server-authored logical
+model to one immutable deployment registration after the same egress/budget
+validation as remote providers. The bounded JSON-lines driver owns framing and
+normalization; `AiLocalHarnessProcessLauncher` is the deployment seam that must
+apply an operating-system/container sandbox and process-tree lifecycle. This
+separation keeps executable, arguments, digest, filesystem, network, and
+environment authority outside GraphQL/model input while allowing the normal
+provider executor to retain fencing, audit, accounting, and persistence
+semantics.
+
 For every registered call the bridge rehydrates the principal, invokes a
 required host `AiToolAuthorizationPolicy` over the scope/descriptor/validated
 arguments, builds the ordinary request context, and executes the resolver.

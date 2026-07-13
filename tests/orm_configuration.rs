@@ -241,6 +241,23 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
     assert!(credential.credential_configured);
     assert_eq!(credential.row_version, 1);
     assert_eq!(secrets.count(), 1);
+    assert!(matches!(
+        service
+            .upsert_provider_profile(
+                &principal,
+                UpsertAiProviderProfileInput {
+                    id: Some(profile.id),
+                    scope: scope_input(),
+                    provider_kind: AiProviderKindInput::LocalHarness,
+                    display_name: "must not retain a credential".to_owned(),
+                    base_url: None,
+                    enabled: true,
+                    expected_version: Some(1),
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
     let rotated = service
         .set_provider_credential(
             &principal,
@@ -276,7 +293,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
 
 #[tokio::test]
 async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
-    let (service, _secrets, now) = service().await;
+    let (service, secrets, now) = service().await;
     let principal = recent_principal(now);
     assert!(matches!(
         service
@@ -294,6 +311,51 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
             )
             .await,
         Err(AiError::InvalidInput(_)) | Err(AiError::Forbidden)
+    ));
+    let installed = service
+        .upsert_provider_profile(
+            &principal,
+            UpsertAiProviderProfileInput {
+                id: None,
+                scope: scope_input(),
+                provider_kind: AiProviderKindInput::LocalHarness,
+                display_name: "Reviewed installed harness".to_owned(),
+                base_url: None,
+                enabled: true,
+                expected_version: None,
+            },
+        )
+        .await
+        .expect("logical installed profile needs no configurable endpoint");
+    assert!(installed.base_url.is_none());
+    assert!(matches!(
+        service
+            .set_provider_credential(
+                &principal,
+                installed.id,
+                SecretString::from("must-not-be-stored".to_owned()),
+                0,
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+    assert_eq!(secrets.count(), 0);
+    assert!(matches!(
+        service
+            .upsert_provider_profile(
+                &principal,
+                UpsertAiProviderProfileInput {
+                    id: Some(installed.id),
+                    scope: scope_input(),
+                    provider_kind: AiProviderKindInput::LocalHarness,
+                    display_name: "unsafe endpoint".to_owned(),
+                    base_url: Some("http://127.0.0.1:9999".to_owned()),
+                    enabled: true,
+                    expected_version: Some(0),
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
     ));
     let local = service
         .upsert_provider_profile(

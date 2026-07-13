@@ -48,6 +48,11 @@ adapters listed below are still being implemented.
   feature-gated OpenAI Responses/SSE adapter, and a native Ollama `/api/chat`
   adapter for streaming text, exact images, and structured output. Anthropic,
   xAI, and explicitly profiled OpenAI-compatible adapters remain reserved.
+- An opt-in installed local-harness boundary with deployment-frozen logical
+  model registrations, fixed executable/digest/sandbox/resource contracts, a
+  bounded JSON-lines provider driver, and deterministic fake-process
+  conformance tests. The crate intentionally supplies no generic unsandboxed
+  subprocess launcher.
 - Separate, exact proofs for provider egress and atomic budget reservation.
   Provider built-ins such as web search, file search, code execution, image
   analysis, and image generation require their own authorized transfer.
@@ -155,6 +160,7 @@ Exactly one persistence backend should be selected:
 | `provider-xai` | no | Reserved; adapter not implemented yet |
 | `provider-ollama` | no | Native Ollama chat: streaming text, exact images, structured output |
 | `provider-openai-compatible` | no | Reserved; requires explicit endpoint profiles |
+| `local-harness` | no | Installed text/structured harness protocol over a trusted sandbox launcher |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -242,8 +248,8 @@ attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings, other provider adapters,
 deployment-specific delegated credential issuers/private HTTP transports,
 generated resolver disclosure metadata, OpenAI-compatible and
-allowlisted installed local-harness drivers, and Docker-owned PostgreSQL parity
-testing. Details live in
+production OS/container local-harness launchers/ACP framing, and Docker-owned
+PostgreSQL parity testing. Details live in
 [implementation status](docs/implementation-status.md).
 
 See [protected live streaming](docs/live-streaming.md) for the opt-in sink,
@@ -251,14 +257,16 @@ provisional-event contract, client reconciliation rules, and failure model.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 
-Local execution remains in scope. The initial native Ollama adapter is
+Local execution is a first-class path. The initial native Ollama adapter is
 implemented; its exact supported and deliberately gated behaviors are in the
 [Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers will use a
-separately profiled provider adapter. Installed CLI/ACP agents will use a
-separate deployment-registered subprocess driver with no shell, fixed command
-and arguments, sanitized environment, sandbox/resource limits, and mediated
-tool callbacks through this runtime; GraphQL may select an approved logical
-profile but can never configure an arbitrary command.
+separately profiled provider adapter. The installed-harness JSON-lines
+foundation is also implemented with no shell, fixed command and arguments, no
+inherited environment or network authority, sandbox/resource contracts, and a
+trusted launcher seam. GraphQL may select an approved logical profile but can
+never configure a command. A concrete OS/container launcher, ACP, and mediated
+tool callbacks remain separately gated; see the
+[local harness guide](docs/local-harness.md).
 
 ## Development safety and checks
 
@@ -270,9 +278,9 @@ forbidden. Consumer-application integration tests belong to those consumers.
 
 ```bash
 cargo fmt --check
-cargo test --features provider-openai,provider-ollama
-cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-ollama --no-deps
+cargo test --features provider-openai,provider-ollama,local-harness
+cargo clippy --all-targets --features provider-openai,provider-ollama,local-harness -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-ollama,local-harness --no-deps
 cargo test --features graphql-case-pascal --test graphql_naming
 cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql

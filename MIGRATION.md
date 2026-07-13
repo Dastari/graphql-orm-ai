@@ -4,6 +4,53 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: installed local-harness foundation (crate 0.14.0 to 0.15.0)
+
+`ProviderKind` and GraphQL `AiProviderKindInput` now include `LocalHarness`
+with stable persistence/configuration value `local_harness`. Exhaustive Rust
+matches must add that variant. Composed configuration GraphQL schemas gain the
+corresponding enum value (`LOCAL_HARNESS` by default or `LocalHarness` with
+`graphql-case-pascal`). A local-harness provider profile accepts no `base_url`:
+GraphQL may enable, disable, scope, and route a logical profile, but cannot
+create or alter executable, arguments, digest, working directory, sandbox,
+environment, network, or resource authority.
+Credential set/rotation is rejected for these profiles, and a credentialed
+profile cannot be changed to `LocalHarness` until its provider credential is
+removed through the ordinary audited mutation.
+
+The opt-in `local-harness` feature exports `AiLocalHarnessRegistration`, its
+immutable registry and limits, `AiLocalHarnessProvider`, the bounded
+`AiJsonLinesLocalHarnessDriver`, and trusted process launcher/session traits.
+Registrations require a normalized absolute executable and working directory,
+fixed arguments, lowercase executable SHA-256, reviewed version, sandbox
+profile, identical narrow capabilities, and hard protocol/process ceilings.
+The initial registration has no environment, credential, mount, network, file,
+image, built-in, tool, continuation, reasoning, background, embedding, or code
+authority.
+
+The crate does not include a generic unsandboxed child-process launcher. A host
+implementation of `AiLocalHarnessProcessLauncher` must atomically verify and
+execute the registered image without a shell, clear the complete inherited
+environment, enforce the reviewed OS/container profile and denied network,
+contain descendants, apply memory/CPU/wall/output limits, and synchronously
+initiate process-tree termination on drop. Construction of the registration is
+syntactic validation, not proof that those deployment controls were applied.
+
+Every installed harness turn still enters through `AiProviderCallExecutor` as
+`ProviderKind::LocalHarness`, with current-principal reauthorization, exact
+egress audit, atomic budget reservation, fencing, bounded normalized output,
+usage reconciliation, and protected persistence. A logical local destination
+does not bypass disclosure or spend policy. The JSON-lines v1 protocol accepts
+only response-started, visible-text, bounded-usage, and response-completed
+events without response IDs; unsupported process events terminate the session
+and fail closed.
+
+This is a pre-1.0 public Rust API, Cargo feature, GraphQL SDL, configuration,
+provider, security, and operational contract change. Default features do not
+change. It adds no entity, field, index, constraint, persistent semantic, or
+backup/restore change. `AI_SCHEMA_MODULE_VERSION` remains `0.16.0`; no
+AI-owned or application-domain data migration is needed.
+
 ## Unreleased: native Ollama adapter (crate 0.13.0 to 0.14.0)
 
 Enabling `provider-ollama` now compiles the native HTTP adapter and its optional

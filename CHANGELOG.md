@@ -5,11 +5,19 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.14.0` and the AI
+This development line advances the pre-1.0 crate version to `0.15.0` and the AI
 schema module to `0.16.0`.
 
 ### Added
 
+- An optional installed local-harness foundation with immutable
+  deployment-owned logical-model registrations, fixed absolute executable and
+  arguments, mandatory executable digest/sandbox/resource contracts, a trusted
+  process-launcher seam, and a bounded JSON-lines provider driver. The safe
+  initial protocol is text/structured-output only and its deterministic fake
+  process suite covers fixed launch facts, environment/command
+  non-injection, framing, stderr/output limits, cancellation cleanup, swapped
+  budget/model proofs, secret non-persistence, and forbidden tool events.
 - A native feature-gated Ollama `/api/chat` adapter for bounded NDJSON text
   streaming, exact ephemeral PNG/JPEG/WebP image input, JSON-schema structured
   output, and authoritative prompt/evaluation token usage. Deployment endpoint
@@ -173,6 +181,11 @@ schema module to `0.16.0`.
 
 ### Changed
 
+- `ProviderKind` and the GraphQL `AiProviderKindInput` add `LocalHarness` with
+  stable value `local_harness`; provider-profile GraphQL may enable and route a
+  logical installed profile but cannot configure its process registration.
+  The new `local-harness` feature exports the registry, provider, protocol
+  driver, process boundary, limits, and non-sensitive transport errors.
 - `provider-ollama` now enables the optional HTTP/Base64 dependencies and
   exports `OllamaProvider`/`OllamaProviderConfig`. The initial adapter reports
   only its implemented capabilities; custom tools, provider built-ins, files,

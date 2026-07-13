@@ -36,6 +36,8 @@ mod error;
 mod execution;
 mod inbox;
 mod live_delta;
+#[cfg(feature = "local-harness")]
+mod local_harness;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_approvals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -97,6 +99,8 @@ pub use error::*;
 pub use execution::*;
 pub use inbox::*;
 pub use live_delta::*;
+#[cfg(feature = "local-harness")]
+pub use local_harness::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_approvals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

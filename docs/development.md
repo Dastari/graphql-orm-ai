@@ -4,10 +4,10 @@
 
 ```bash
 cargo fmt --check
-cargo test --features provider-openai,provider-ollama
-cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings
+cargo test --features provider-openai,provider-ollama,local-harness
+cargo clippy --all-targets --features provider-openai,provider-ollama,local-harness -- -D warnings
 RUSTDOCFLAGS="-D warnings -D missing_docs" \
-  cargo doc --features provider-openai,provider-ollama --no-deps
+  cargo doc --features provider-openai,provider-ollama,local-harness --no-deps
 ```
 
 Check the optional naming contract independently:
