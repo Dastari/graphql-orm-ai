@@ -84,6 +84,9 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ### Changed
 
+- Public Git builds now pin `graphql-orm` 0.7.0 and `agql-auth` 0.9.0 by exact
+  reviewed commit instead of requiring an adjacent local sibling checkout.
+  CI checks out the same revisions for baseline compatibility verification.
 - Crate version is now `0.2.0` because the public budget reconciliation and
   proof-serialization changes are pre-1.0 breaking API changes.
 - AI schema module version is now `0.8.0`. In addition to the `0.7.0` tool-call

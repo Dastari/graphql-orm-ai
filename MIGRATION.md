@@ -4,6 +4,21 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: upstream dependency alignment
+
+The public manifest now resolves one exact Git dependency universe:
+
+- `graphql-orm` 0.7.0 at
+  `f24db2f0e64dbc939ca875984d48326f47542aeb`; and
+- `agql-auth` 0.9.0 at
+  `2ab5dc1f963dad401a3393fd3af1392c2bb51e50`.
+
+Remove host patches or path overrides to older sibling versions. Hosts that
+also depend directly on either crate must use these exact revisions until a
+later coordinated release updates the dependency universe. This is a Rust
+dependency/source-identity migration only; it changes no GraphQL SDL, AI schema
+module version, persisted data, or application authorization policy.
+
 ## Unreleased: schema module 0.7.0 to 0.8.0
 
 Apply `AiSchemaModule` with provider starts and workers closed. This revision

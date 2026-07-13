@@ -18,10 +18,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: Dastari/graphql-orm
+          ref: f24db2f0e64dbc939ca875984d48326f47542aeb
           path: graphql-orm
       - uses: actions/checkout@v5
         with:
           repository: Dastari/agql-auth
+          ref: 2ab5dc1f963dad401a3393fd3af1392c2bb51e50
           path: agql-auth
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -60,10 +62,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: Dastari/graphql-orm
+          ref: v0.6.3
           path: graphql-orm
       - uses: actions/checkout@v5
         with:
           repository: Dastari/agql-auth
+          ref: v0.8.1
           path: agql-auth
       - name: Create baseline worktree
         run: git -C graphql-orm-ai worktree add ../graphql-orm-ai-baseline "${{ github.event.pull_request.base.sha }}"

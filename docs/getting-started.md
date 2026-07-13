@@ -2,12 +2,13 @@
 
 `graphql-orm-ai` is currently a Git-only pre-release crate. Use the same
 reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
-`agql-auth`; local sibling paths are for development only.
+`agql-auth`. The public manifest pins reviewed full Git revisions; local path
+overrides are unsupported release artifacts.
 
-The current public source snapshot consumes unreleased API additions in both
-upstream crates. It is available for review now, but a standalone clone will
-not compile against their public default branches until matching reviewed
-revisions are published.
+The current public source snapshot consumes candidate `graphql-orm` 0.7.0 and
+`agql-auth` 0.9.0 revisions. They are available by exact commit while their
+upstream PRs are reviewed, so standalone Git builds do not depend on whatever
+currently happens to be at the sibling default branches.
 
 ## Features
 
