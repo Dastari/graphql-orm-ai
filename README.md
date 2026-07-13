@@ -237,6 +237,11 @@ CI enforces that documentation bundle, crate/schema version movement,
 PascalCase SDL contract. Repository rules are recorded in
 [AGENTS.md](AGENTS.md).
 
+Development uses a single-owner workflow per repository. This crate's agent
+treats `agql-auth` and `graphql-orm` as read-only and sends reusable changes to
+their owning agents through explicit handoffs. See the
+[upstream contribution workflow](docs/upstream-contributions.md).
+
 ## License
 
 MIT

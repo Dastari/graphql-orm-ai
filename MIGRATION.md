@@ -4,6 +4,19 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: multi-repository ownership workflow
+
+Development now assigns one owning agent and isolated branch/worktree to each
+repository. The `graphql-orm-ai` agent may inspect `agql-auth` and
+`graphql-orm` read-only but sends requested changes to their owners instead of
+mutating sibling worktrees. Upstream crates merge first and report final commit
+SHAs; this crate then repins and verifies the reviewed dependency universe.
+
+This is a contributor workflow change only. It changes no consumer Rust API,
+GraphQL SDL, feature/default, configuration, authorization behavior, schema
+module, backup/restore contract, or persisted data. No consumer or data
+migration is required.
+
 ## Unreleased: documentation and release enforcement
 
 CI and the documented release gate now deny missing public Rust documentation

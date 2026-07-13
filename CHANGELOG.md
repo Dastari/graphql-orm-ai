@@ -85,6 +85,10 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ### Changed
 
+- Multi-repository development now uses one owning agent per repository.
+  `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
+  handoff prompts for upstream owners, and repin only reviewed final upstream
+  commits in dependency order.
 - Public Git builds now pin `graphql-orm` 0.7.0 and `agql-auth` 0.9.0 by exact
   reviewed commit instead of requiring an adjacent local sibling checkout.
   CI checks out the same revisions for baseline compatibility verification.

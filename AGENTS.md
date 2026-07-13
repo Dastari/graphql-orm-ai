@@ -16,6 +16,27 @@ These rules apply to every human or automated change in this repository.
   Authentication, principal lifecycle, assurance, and reusable delegation
   primitives belong in `agql-auth`.
 
+## Repository ownership and upstream handoffs
+
+- The agent working in this repository owns only `graphql-orm-ai`. Treat
+  sibling repositories, including `agql-auth` and `graphql-orm`, as read-only.
+  Do not edit, format, commit, rebase, merge, stash, clean, switch branches, or
+  otherwise mutate their worktrees or GitHub branches.
+- Read-only inspection of sibling source, tags, PRs, and dependency metadata is
+  allowed when needed to define an integration requirement.
+- When a reusable upstream change is required, stage a copy-ready prompt in
+  `.handoffs/` for the owning repository agent. That directory is deliberately
+  ignored so temporary coordination state is not published with the crate.
+- Use one owning agent and one isolated branch/worktree per repository. An
+  owning agent may create its repository's implementation PR; downstream
+  agents wait for the reviewed upstream merge and final commit SHA.
+- After an upstream merge, update exact dependency revisions only in this
+  repository, then regenerate `Cargo.lock`, verify one dependency universe,
+  update release documentation, and rerun the full matrix.
+- A squash or rebase merge invalidates downstream pins to PR-head commits. A
+  merge commit may retain ancestry, but downstream crates should still repin to
+  the reviewed final `main` or release-tag commit before merging.
+
 ## Database and integration safety
 
 - Never connect tests, migrations, diagnostics, or development commands to a
@@ -71,3 +92,4 @@ These rules apply to every human or automated change in this repository.
   exclusive.
 
 See `docs/development.md` and `docs/release-process.md` for exact commands.
+See `docs/upstream-contributions.md` for the multi-repository workflow.

@@ -10,6 +10,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Proposal and approval lifecycles](review-lifecycles.md)
 - [Development and verification](development.md)
 - [Release, SemVer, changelog, and migration process](release-process.md)
+- [Upstream contribution and multi-repository workflow](upstream-contributions.md)
 - [Implementation status](implementation-status.md)
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
