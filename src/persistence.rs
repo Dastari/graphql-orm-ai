@@ -439,6 +439,7 @@ pub(crate) struct AiBudgetReservationRecord {
     pub reserved_cost_microunits: i64,
     pub reserved_runs: i64,
     pub actual_input_tokens: Option<i64>,
+    pub actual_cached_input_tokens: Option<i64>,
     pub actual_output_tokens: Option<i64>,
     pub actual_tool_units: Option<i64>,
     pub actual_image_units: Option<i64>,
@@ -1504,16 +1505,28 @@ pub(crate) struct AiSkillVersionRecord {
 )]
 pub(crate) struct AiUsageEntryRecord {
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub budget_reservation_id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
     pub scope_kind: String,
+    #[filterable(type = "string")]
     pub scope_id: String,
+    #[filterable(type = "string")]
     pub tenant_id: Option<String>,
+    #[filterable(type = "string")]
+    pub principal_kind: String,
+    #[filterable(type = "string")]
     pub principal_subject: String,
     pub session_id: Option<graphql_orm::uuid::Uuid>,
     #[filterable(type = "uuid")]
     pub run_id: Option<graphql_orm::uuid::Uuid>,
+    #[filterable(type = "string")]
     pub provider_kind: String,
+    #[filterable(type = "string")]
     pub provider_model: String,
     pub input_tokens: i64,
     pub cached_input_tokens: i64,
@@ -1521,6 +1534,7 @@ pub(crate) struct AiUsageEntryRecord {
     pub tool_units: i64,
     pub image_units: i64,
     pub cost_microunits: Option<i64>,
+    #[filterable(type = "number")]
     #[sortable]
     pub created_at: i64,
 }
@@ -1720,7 +1734,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.16.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.17.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

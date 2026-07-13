@@ -1065,8 +1065,11 @@ mod tests {
             maximum_output_tokens: Some(32),
         };
 
+        let estimated_bytes = request.conservative_egress_bytes();
         assert!(matches!(
-            provider.stream(request, context("test-model", 1_000)).await,
+            provider
+                .stream(request, context("test-model", estimated_bytes))
+                .await,
             Err(ProviderError::EgressDenied)
         ));
     }
@@ -1101,8 +1104,9 @@ mod tests {
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
+        let estimated_bytes = request.conservative_egress_bytes();
         let events = provider
-            .stream(request, context("test-model", 1_000))
+            .stream(request, context("test-model", estimated_bytes))
             .await
             .expect("stream should start")
             .try_collect::<Vec<_>>()
@@ -1157,8 +1161,9 @@ mod tests {
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
+        let estimated_bytes = request.conservative_egress_bytes();
         let events = provider
-            .stream(request, context(&model, 1_000))
+            .stream(request, context(&model, estimated_bytes))
             .await
             .expect("live stream should start")
             .try_collect::<Vec<_>>()

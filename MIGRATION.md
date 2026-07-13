@@ -4,6 +4,79 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: authoritative usage ledger and reporting (crate/schema 0.16.0 to 0.17.0)
+
+Apply AI schema module `0.17.0` while provider workers, budget reconciliation,
+usage readers, backups, and restore callbacks are closed. Do not run 0.17.0
+code against module 0.16.0. The managed migration:
+
+- adds nullable `actual_cached_input_tokens` to
+  `graphql_orm_ai_budget_reservations`;
+- adds required, unique `budget_reservation_id` and required
+  `principal_kind` to append-only `graphql_orm_ai_usage_entries`;
+- adds generated query indexes for exact scope kind/ID/tenant, principal
+  kind/subject, provider kind/model, run, creation time, and reservation; and
+- advances `AI_SCHEMA_MODULE_VERSION` from `0.16.0` to `0.17.0` without adding
+  an entity (the module still owns 38 private records).
+
+The 0.16.0 usage entity was reserved private storage with no supported writer
+or reader and should be empty. If a deployment wrote private usage rows, do not
+invent a reservation, principal kind, tenant, or authority. While the runtime
+is closed, a dependency-owned migration must prove each row's exact committed
+budget reservation and matching run/session/scope/principal/provider/model,
+reject duplicates, validate cached input is no greater than total input, and
+then backfill it; otherwise remove those unsupported rows. Never expose an
+unproven legacy row through the new service.
+
+Existing committed reservations are not silently converted into historical
+usage facts. If historical reporting is required, backfill only from complete
+authoritative provider and committed-reservation evidence with a unique
+one-to-one reservation binding. An absence remains an explicit historical gap;
+estimated values must never be relabeled as actual usage. No consumer-owned
+application/domain data migration is needed.
+
+`AiBudgetReconciliation` gains `cached_input_tokens`. A committed result must
+supply `Some(value)` and prove it is no greater than total `actual.input_tokens`;
+an unused release must supply `None`; an uncertain result may carry an
+observation but creates no usage fact. `AiBudgetAmounts::input_tokens` and
+`AiProviderUsageObservation::input_tokens()` now explicitly mean total input,
+with cached input recorded as a subset rather than added to the total. Update
+every struct initializer and pricing implementation accordingly.
+
+On authoritative commit, the ORM budget service now appends exactly one usage
+fact in the counter/reservation transaction. Its unique reservation ID is the
+idempotency boundary. A replay must match the original actual and cached usage
+and returns the prior reconciliation; it never appends another fact. Release
+and uncertain outcomes append none.
+
+Hosts composing `AiQueryRoot` gain `aiUsage` (or `AiUsage` under
+`graphql-case-pascal`). Install `Arc<dyn AiUsageService>` in GraphQL context.
+`OrmAiUsageService` additionally requires an `AiUsageAccessPolicy`; return
+`OwnPrincipal` for personal reporting, `WholeScope` only for independently
+authorized scope administrators, and `Denied` otherwise. The policy result is
+read authority only and grants no provider, budget-management, transcript, or
+tool authority. Default pages contain at most 50 rows and the hard maximum is
+200. Time filtering requires both bounds, is limited to a 366-day interval,
+and uses the current generated GraphQL integer range.
+
+Backups and restores must preserve the usage table as immutable facts and
+validate: one usage fact per reservation; referenced reservations are
+committed; exact scope/principal/provider/model fields agree; numeric usage is
+non-negative; cached input does not exceed total input; and no report opens
+until restore reconciliation succeeds. Retention or correction of usage facts
+is not introduced by this release. Restore fact collectors must populate the
+new `AiRestoreSnapshotFacts::invalid_usage_fact_count`; any nonzero value adds
+the fatal `AI_RESTORE_USAGE_FACT_INVALID` issue and keeps readiness closed.
+
+This is a pre-1.0 public Rust API, GraphQL SDL, persistence, migration,
+backup/restore, reporting, budget-reconciliation, and behavioral contract
+change.
+
+Host egress planners should call the new public
+`ModelRequest::conservative_egress_bytes()` when constructing the inference
+manifest. It exposes the exact conservative calculation enforced by the
+provider context; callers must not reproduce the older input-only estimate.
+
 ## Unreleased: bounded complete provider request metadata (crate 0.15.0 to 0.16.0)
 
 `ModelRequest::validate` now rejects oversized instructions, text/JSON blocks,

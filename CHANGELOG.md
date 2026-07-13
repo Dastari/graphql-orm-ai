@@ -5,10 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.16.0` and the AI
-schema module to `0.16.0`.
+This development line advances the pre-1.0 crate version to `0.17.0` and the AI
+schema module to `0.17.0`.
 
 ### Added
+
+- An append-only authoritative usage ledger written exactly once in the same
+  state-machine transaction that commits a budget reservation. Each fact has a
+  unique reservation binding, exact scope and principal kind/subject,
+  provider/model, total and cached input tokens, output/tool/image units, and
+  settled cost; idempotent reconciliation cannot duplicate it.
+- Authenticated `aiUsage`/`AiUsage` reporting through the ordinary query root
+  and a separately composable usage root. Host policy grants either exact
+  current-principal or exact-scope visibility, and reads use bounded
+  bidirectional keysets with provider/model and bounded time filters without
+  exposing prompts, transcripts, tool content, pricing rules, or counter
+  internals.
+- Public `ModelRequest::conservative_egress_bytes` so host planners can bind
+  manifests to the same complete metadata and attachment-encoding ceiling the
+  provider boundary enforces.
 
 - An optional installed local-harness foundation with immutable
   deployment-owned logical-model registrations, fixed absolute executable and
@@ -265,7 +280,7 @@ schema module to `0.16.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.16.0`.
+  reconciliation. The current module is `0.17.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -275,7 +290,7 @@ schema module to `0.16.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.16.0`.
+  the current module is `0.17.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts

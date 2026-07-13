@@ -358,6 +358,7 @@ impl OrmAiBudgetService {
                             )?,
                             reserved_runs: amount_to_i64(request.estimate.runs)?,
                             actual_input_tokens: None,
+                            actual_cached_input_tokens: None,
                             actual_output_tokens: None,
                             actual_tool_units: None,
                             actual_image_units: None,
@@ -447,6 +448,7 @@ impl OrmAiBudgetService {
                     let actual = match validate_reconciliation_actual(
                         reserved,
                         reconciliation.actual,
+                        reconciliation.cached_input_tokens,
                         reconciliation.outcome,
                     ) {
                         Ok(value) => value,
@@ -520,6 +522,10 @@ impl OrmAiBudgetService {
                     let actual_input = actual
                         .map(|value| amount_to_i64(value.input_tokens))
                         .transpose()?;
+                    let actual_cached_input = reconciliation
+                        .cached_input_tokens
+                        .map(amount_to_i64)
+                        .transpose()?;
                     let actual_output = actual
                         .map(|value| amount_to_i64(value.output_tokens))
                         .transpose()?;
@@ -533,6 +539,31 @@ impl OrmAiBudgetService {
                         .map(|value| amount_to_i64(value.cost_microunits))
                         .transpose()?;
                     let actual_runs = actual.map(|value| amount_to_i64(value.runs)).transpose()?;
+                    if let Some(actual) = actual
+                        && reconciliation.outcome == AiBudgetReconciliationOutcome::Commit
+                    {
+                        tx.insert::<AiUsageEntryRecord>(CreateAiUsageEntryRecordInput {
+                            id: Uuid::new_v4(),
+                            budget_reservation_id: record.id,
+                            scope_kind: record.scope_kind.clone(),
+                            scope_id: record.scope_id.clone(),
+                            tenant_id: record.tenant_id.clone(),
+                            principal_kind: record.principal_kind.clone(),
+                            principal_subject: record.principal_subject.clone(),
+                            session_id: Some(record.session_id),
+                            run_id: Some(record.run_id),
+                            provider_kind: record.provider_kind.clone(),
+                            provider_model: record.provider_model.clone(),
+                            input_tokens: amount_to_i64(actual.input_tokens)?,
+                            cached_input_tokens: actual_cached_input.unwrap_or_default(),
+                            output_tokens: amount_to_i64(actual.output_tokens)?,
+                            tool_units: amount_to_i64(actual.tool_units)?,
+                            image_units: amount_to_i64(actual.image_units)?,
+                            cost_microunits: Some(amount_to_i64(actual.cost_microunits)?),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
                     let updated = match tx
                         .compare_and_swap::<AiBudgetReservationRecord>(
                             &record.id,
@@ -540,6 +571,7 @@ impl OrmAiBudgetService {
                             AiBudgetReservationRecordWhereInput::default(),
                             UpdateAiBudgetReservationRecordInput {
                                 actual_input_tokens: Some(actual_input),
+                                actual_cached_input_tokens: Some(actual_cached_input),
                                 actual_output_tokens: Some(actual_output),
                                 actual_tool_units: Some(actual_tools),
                                 actual_image_units: Some(actual_images),
@@ -953,12 +985,28 @@ fn match_existing_reconciliation(
     if actual != reconciliation.actual {
         return Some(Err(AiError::Conflict));
     }
+    let expected_cached_input = match reconciliation
+        .cached_input_tokens
+        .map(i64::try_from)
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return Some(Err(AiError::InvalidInput(
+                "cached input exceeds storage".to_owned(),
+            )));
+        }
+    };
+    if record.actual_cached_input_tokens != expected_cached_input {
+        return Some(Err(AiError::Conflict));
+    }
     Some(record_to_reconciliation_result(record))
 }
 
 fn validate_reconciliation_actual(
     reserved: AiBudgetAmounts,
     actual: Option<AiBudgetAmounts>,
+    cached_input_tokens: Option<u64>,
     outcome: AiBudgetReconciliationOutcome,
 ) -> Result<Option<AiBudgetAmounts>, AiError> {
     match outcome {
@@ -971,11 +1019,19 @@ fn validate_reconciliation_actual(
                     "actual budget run count does not match reservation".to_owned(),
                 ));
             }
+            let cached_input_tokens = cached_input_tokens.ok_or_else(|| {
+                AiError::InvalidInput("committed cached-token usage is required".to_owned())
+            })?;
+            if cached_input_tokens > actual.input_tokens {
+                return Err(AiError::InvalidInput(
+                    "cached input exceeds total input usage".to_owned(),
+                ));
+            }
             stored_amounts(actual)?;
             Ok(Some(actual))
         }
         AiBudgetReconciliationOutcome::ReleaseUnused => {
-            if actual.is_some() {
+            if actual.is_some() || cached_input_tokens.is_some() {
                 return Err(AiError::InvalidInput(
                     "unused budget release cannot include usage".to_owned(),
                 ));
@@ -989,7 +1045,16 @@ fn validate_reconciliation_actual(
                         "uncertain budget run count does not match reservation".to_owned(),
                     ));
                 }
+                if cached_input_tokens.is_some_and(|cached| cached > actual.input_tokens) {
+                    return Err(AiError::InvalidInput(
+                        "cached input exceeds uncertain input usage".to_owned(),
+                    ));
+                }
                 stored_amounts(actual)?;
+            } else if cached_input_tokens.is_some() {
+                return Err(AiError::InvalidInput(
+                    "cached input requires uncertain usage".to_owned(),
+                ));
             }
             Ok(actual)
         }
@@ -1543,6 +1608,21 @@ mod tests {
             .expect("counter count should succeed")
     }
 
+    async fn usage_entries(database: &Database<SqliteBackend>) -> Vec<AiUsageEntryRecord> {
+        database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiUsageEntryRecord>()
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("usage query should succeed")
+    }
+
     #[tokio::test]
     async fn concurrent_reservations_cannot_overspend_one_counter() {
         let fixture = fixture(100).await;
@@ -1695,6 +1775,7 @@ mod tests {
                 cost_microunits: 80,
                 runs: 1,
             }),
+            cached_input_tokens: Some(4),
             outcome: AiBudgetReconciliationOutcome::Commit,
         };
         let committed = fixture
@@ -1711,6 +1792,16 @@ mod tests {
         assert_eq!(committed.committed.input_tokens, 40);
         assert_eq!(committed.released.input_tokens, 20);
         assert_eq!(committed.released.output_tokens, 5);
+
+        let usage = usage_entries(&fixture.database).await;
+        assert_eq!(usage.len(), 1, "an exact replay must not duplicate usage");
+        assert_eq!(usage[0].budget_reservation_id, reservation.id().0);
+        assert_eq!(usage[0].principal_kind, "user");
+        assert_eq!(usage[0].principal_subject, SUBJECT);
+        assert_eq!(usage[0].input_tokens, 40);
+        assert_eq!(usage[0].cached_input_tokens, 4);
+        assert_eq!(usage[0].output_tokens, 5);
+        assert_eq!(usage[0].cost_microunits, Some(80));
 
         let counter = only_counter(&fixture.database).await;
         assert_eq!(counter.reserved_input_tokens, 0);
@@ -1752,6 +1843,7 @@ mod tests {
             attempt_id: run.2,
             lease_generation: 1,
             actual: None,
+            cached_input_tokens: None,
             outcome: AiBudgetReconciliationOutcome::MarkUncertain,
         };
         let held = fixture
@@ -1790,6 +1882,7 @@ mod tests {
                         attempt_id: run.2,
                         lease_generation: 1,
                         actual: None,
+                        cached_input_tokens: None,
                         outcome: AiBudgetReconciliationOutcome::ReleaseUnused,
                     },
                 )
@@ -1813,6 +1906,7 @@ mod tests {
                         cost_microunits: 80,
                         runs: 1,
                     }),
+                    cached_input_tokens: Some(5),
                     outcome: AiBudgetReconciliationOutcome::Commit,
                 },
             )

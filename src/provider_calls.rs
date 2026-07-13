@@ -607,7 +607,7 @@ impl AiProviderUsageObservation {
         &self.pricing_policy_version
     }
 
-    /// Provider-reported non-cached input tokens.
+    /// Provider-reported total input tokens.
     pub const fn input_tokens(&self) -> u64 {
         self.input_tokens
     }
@@ -1081,6 +1081,7 @@ impl AiProviderCallExecutor {
                     attempt_id: lease.attempt_id(),
                     lease_generation: lease.lease_generation(),
                     actual: None,
+                    cached_input_tokens: None,
                     outcome: AiBudgetReconciliationOutcome::MarkUncertain,
                 },
             )
@@ -1314,6 +1315,7 @@ impl AiProviderCallExecutor {
                     attempt_id: lease.attempt_id(),
                     lease_generation: lease.lease_generation(),
                     actual: Some(actual),
+                    cached_input_tokens: Some(cached_input_tokens),
                     outcome: AiBudgetReconciliationOutcome::Commit,
                 },
             )
@@ -1464,6 +1466,7 @@ impl AiProviderCallExecutor {
                     attempt_id: lease.attempt_id(),
                     lease_generation: lease.lease_generation(),
                     actual: None,
+                    cached_input_tokens: None,
                     outcome: AiBudgetReconciliationOutcome::ReleaseUnused,
                 },
             )
@@ -2109,6 +2112,7 @@ mod tests {
             idempotency_key: format!("provider:{}:1", fixture.lease.attempt_id()),
             expires_at: OffsetDateTime::now_utc() + Duration::minutes(2),
         };
+        let estimated_bytes = request.conservative_egress_bytes();
         let manifest = AiEgressManifest {
             provider_profile_id: "mock-profile".to_owned(),
             provider_kind: ProviderKind::OpenAiCompatible.as_str().to_owned(),
@@ -2125,7 +2129,7 @@ mod tests {
                 classification: DataClassification::Internal,
                 trust: AiSourceTrust::UserProvided,
             }],
-            estimated_bytes: 1_024,
+            estimated_bytes,
             estimated_tokens: 100,
             attachment_count: 0,
             purpose: "test_inference".to_owned(),
@@ -2165,6 +2169,7 @@ mod tests {
             parameters: descriptor.argument_schema.clone(),
             strict: true,
         }];
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
         AiProviderCallPlan::new_with_tools(
             base.provider_kind,
             base.request,
@@ -2190,7 +2195,7 @@ mod tests {
             .expect("attachment source should be canonical");
         base.request.input.push(attachment);
         base.budget.estimate.image_units = 1;
-        let estimated_bytes = 4_096;
+        let estimated_bytes = base.request.conservative_egress_bytes();
         base.transfers[0].attachment_count = 1;
         base.transfers[0].estimated_bytes = estimated_bytes;
         let image_manifest = AiEgressManifest {
@@ -2250,6 +2255,7 @@ mod tests {
             parameters: descriptor.argument_schema.clone(),
             strict: true,
         }];
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
         AiProviderCallPlan::new_with_supervised_tools(
             base.provider_kind,
             base.request,

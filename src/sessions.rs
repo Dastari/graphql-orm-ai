@@ -10,7 +10,10 @@ use graphql_orm::graphql::pagination::{
 };
 use uuid::Uuid;
 
-use crate::{AiError, AiInboxEventPage, AiInboxService, AiScope, AiSessionId};
+use crate::{
+    AiError, AiInboxEventPage, AiInboxService, AiScope, AiSessionId, AiUsageConnection,
+    AiUsageFilterInput,
+};
 
 /// Scope input for session creation/configuration.
 #[derive(Clone, Debug, InputObject)]
@@ -301,6 +304,17 @@ pub struct AiQueryRoot;
 )]
 #[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
 impl AiQueryRoot {
+    /// Returns a bounded keyset window of immutable provider usage.
+    async fn ai_usage(
+        &self,
+        context: &Context<'_>,
+        scope: AiScopeInput,
+        #[graphql(default)] filter: AiUsageFilterInput,
+        #[graphql(default)] page: KeysetConnectionInput,
+    ) -> async_graphql::Result<AiUsageConnection> {
+        crate::usage::resolve_usage(context, scope, filter, page).await
+    }
+
     /// Returns bounded session shells.
     async fn ai_sessions(
         &self,

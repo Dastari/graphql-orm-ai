@@ -6,6 +6,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Architecture and crate boundaries](architecture.md)
 - [Security model](security.md)
 - [Durable worker and provider turn](worker-provider-turn.md)
+- [Usage ledger, budgets, and reporting](usage-and-budgets.md)
 - [Protected live streaming](live-streaming.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)

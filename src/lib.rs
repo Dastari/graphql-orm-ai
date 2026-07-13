@@ -68,6 +68,8 @@ mod orm_sessions;
 mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_usage;
 mod persistence;
 mod proposals;
 mod provider;
@@ -82,6 +84,7 @@ mod secrets;
 mod sessions;
 mod subscriptions;
 mod tools;
+mod usage;
 
 pub use access::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -131,6 +134,8 @@ pub use orm_sessions::*;
 pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_usage::*;
 pub use persistence::*;
 pub use proposals::*;
 pub use provider::*;
@@ -145,6 +150,7 @@ pub use secrets::*;
 pub use sessions::*;
 pub use subscriptions::*;
 pub use tools::*;
+pub use usage::*;
 
 /// Common imports for host integrations.
 pub mod prelude {
@@ -160,7 +166,8 @@ pub mod prelude {
         AiRemoteGraphqlAuthority, AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
         AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiToolAuthorizationPolicy,
-        AiToolCatalog, AiToolDescriptor, DataClassification, SecretRef, ToolMaturity,
+        AiToolCatalog, AiToolDescriptor, AiUsageAccessPolicy, AiUsageService, DataClassification,
+        SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
@@ -177,7 +184,7 @@ pub mod prelude {
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
         OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
         OrmAiLiveDeltaService, OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
-        ai_scope_key,
+        OrmAiUsageService, ai_scope_key,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

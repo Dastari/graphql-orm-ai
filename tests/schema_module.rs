@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.16.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.17.0");
     assert_eq!(catalog.entities().len(), 38);
     assert!(
         catalog
@@ -58,6 +58,12 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 "idempotency_key".to_owned(),
             ]
     }));
+    assert!(
+        reservation
+            .columns
+            .iter()
+            .any(|column| { column.name == "actual_cached_input_tokens" && column.nullable })
+    );
     let inbox_stream = schema
         .tables
         .iter()
@@ -96,6 +102,37 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .iter()
             .any(|column| { column.name == "scope_key" && column.nullable && !column.is_unique })
     );
+    let usage = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_usage_entries")
+        .expect("usage table should exist");
+    assert!(usage.columns.iter().any(|column| {
+        column.name == "budget_reservation_id" && column.is_unique && !column.nullable
+    }));
+    assert!(
+        usage
+            .columns
+            .iter()
+            .any(|column| column.name == "principal_kind" && !column.nullable)
+    );
+    for indexed_column in [
+        "scope_kind",
+        "scope_id",
+        "tenant_id",
+        "principal_kind",
+        "principal_subject",
+        "provider_kind",
+        "provider_model",
+        "created_at",
+    ] {
+        assert!(
+            usage
+                .indexes
+                .iter()
+                .any(|index| { index.columns == [indexed_column] && !index.is_unique })
+        );
+    }
     assert!(
         retention
             .indexes

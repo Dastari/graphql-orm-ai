@@ -56,6 +56,15 @@ estimate and is still committed truthfully; this can exhaust a policy but must
 not be hidden. Only proven unused capacity is released. Ordinary workers cannot
 release a reservation already classified as uncertain.
 
+An authoritative commit appends one immutable usage fact in the same
+transaction and binds it uniquely to the reservation. Idempotent replay cannot
+duplicate spend. Usage reporting is not inferred from tool or session access:
+the host must independently return current-principal-only, exact-scope, or
+denied authority for each requested scope. The query exposes only redacted
+accounting dimensions and bounded keyset windows; it never exposes provider
+payloads, transcripts, tool arguments/results, pricing rules, or budget-counter
+internals. Cached input is validated as a subset of total input.
+
 Both allowed and denied provider transfers are appended to the immutable ORM
 egress audit using the exact decision ID and manifest hash. The transport proof
 is not used when that write fails. If no transport occurred, capacity may be

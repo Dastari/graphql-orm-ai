@@ -25,6 +25,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("aiSessionEvents(sessionId:"));
         assert!(sdl.contains("aiInboxEventPage("));
         assert!(sdl.contains("aiInboxEvents("));
+        assert!(sdl.contains("aiUsage(scope:"));
         assert!(configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("AiSessions("));
     }
@@ -37,6 +38,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("AiSessionEvents(SessionId:"));
         assert!(sdl.contains("AiInboxEventPage("));
         assert!(sdl.contains("AiInboxEvents("));
+        assert!(sdl.contains("AiUsage(Scope:"));
         assert!(configuration_sdl.contains("LocalHarness"));
         assert!(!configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("aiSessions("));

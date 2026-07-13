@@ -49,7 +49,10 @@ camelCase to PascalCase.
    ordinary query/subscription roots. Configure `OrmAiConfigurationService`
    retention policy access, then schedule `OrmAiInboxPruningService` only as a
    trusted bounded host worker.
-9. Apply/validate migrations and restore reconciliation, then open the runtime
+9. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
+   `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
+   exact-scope reporting needs separate administrative authorization.
+10. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
@@ -160,7 +163,7 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
-upload/search/deletion, attachment quotas/derivatives, budget/usage GraphQL
+upload/search/deletion, attachment quotas/derivatives, budget-policy/pricing GraphQL
 management, per-session live-delta retention, provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in

@@ -13,7 +13,10 @@ use crate::{
 /// Token, cost, and unit capacity reserved or consumed by one provider call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiBudgetAmounts {
-    /// Estimated or actual non-cached input tokens.
+    /// Estimated or actual total input tokens.
+    ///
+    /// Provider-reported cached input is a subset recorded separately during
+    /// reconciliation; it must not be added to this total.
     pub input_tokens: u64,
     /// Maximum or actual output tokens.
     pub output_tokens: u64,
@@ -309,6 +312,9 @@ pub struct AiBudgetReconciliation {
     pub lease_generation: i64,
     /// Authoritative actual usage when known.
     pub actual: Option<AiBudgetAmounts>,
+    /// Provider-reported cached input tokens. Required for committed usage,
+    /// absent for an unused release, and optional while an outcome is uncertain.
+    pub cached_input_tokens: Option<u64>,
     /// Safe final classification.
     pub outcome: AiBudgetReconciliationOutcome,
 }

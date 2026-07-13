@@ -96,6 +96,13 @@ principal/idempotency binding, and reconciles every counter exactly once.
 Unknown external outcomes retain their full reservation; the ordinary worker
 path cannot release uncertain capacity.
 
+Authoritative reconciliation appends one immutable usage fact in that same
+transaction, uniquely bound to the reservation. Reporting is a separate
+authenticated projection: host policy selects exact current-principal or
+exact-scope visibility before stable keyset pagination, and the public view
+never includes prompt, transcript, tool, pricing-policy, or counter content.
+See [usage and budgets](usage-and-budgets.md).
+
 ## Durable worker and provider turn
 
 `OrmAiRunService` is the concrete SQLite/PostgreSQL queue boundary. A claim

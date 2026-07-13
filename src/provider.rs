@@ -308,7 +308,14 @@ impl ModelRequest {
         Ok(())
     }
 
-    fn estimated_payload_bytes(&self) -> u64 {
+    /// Returns the conservative byte ceiling an inference egress manifest must
+    /// cover for this complete provider-neutral request.
+    ///
+    /// The value includes fixed serialization overhead, every instruction and
+    /// input block, tool and built-in definitions, continuation/output schema,
+    /// and Base64 expansion of declared attachment bytes. It is an egress
+    /// capacity bound, not an exact provider wire-size or authorization proof.
+    pub fn conservative_egress_bytes(&self) -> u64 {
         let serialized_bytes = self.serialized_metadata_bytes().unwrap_or(u64::MAX);
         let encoded_attachment_bytes = self
             .input
@@ -638,7 +645,7 @@ impl ProviderRequestContext {
             .iter()
             .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
             .count() as u32;
-        let estimated_bytes = request.estimated_payload_bytes();
+        let estimated_bytes = request.conservative_egress_bytes();
 
         self.require_capability(
             provider_kind,

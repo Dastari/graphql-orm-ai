@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.16.0`) and 38 private records
+- AI schema-module identity (currently version `0.17.0`) and 38 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -59,6 +59,11 @@ production-ready behavior.
   multi-counter reservation, stable window keys, unique content-bound
   idempotency, bounded serialization retries, exact-once usage reconciliation,
   truthful over-estimate accounting, and conservative uncertain capacity.
+- Authoritative usage facts append exactly once in the budget reconciliation
+  transaction with a unique reservation binding, exact scope/principal and
+  provider/model dimensions, total/cached token separation, units, and settled
+  cost. Authenticated GraphQL reporting is exact-principal or exact-scope by
+  host policy, redacted, filterable, and bounded by bidirectional keysets.
 - In-memory SQLite budget tests prove concurrent calls cannot overspend one
   counter, a later applicable policy rolls the whole reservation back, stale
   principal/fence inputs fail closed, reconciliation is idempotent, and only
@@ -247,10 +252,10 @@ production-ready behavior.
   Exact inline image/file input is implemented and remains independently gated
   by host MIME policy, budget, egress, current authority, and reopening limits.
 - Provider webhooks/background processing.
-- Authenticated GraphQL budget-policy management, usage reporting, pricing
-  catalog validation, privileged uncertain-call recovery, retention/purge, and
-  telemetry sinks. The ordinary transactional reservation/reconciliation path
-  is implemented.
+- Authenticated GraphQL budget-policy management, immutable pricing-catalog
+  validation, privileged uncertain-call recovery, retention/purge, and
+  telemetry sinks. Ordinary transactional reservation/reconciliation and
+  authenticated usage reporting are implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
   application-tool checkpoints and provider-independent stateless
   continuation. Exact completed read-only tool-batch adoption, the bounded
@@ -277,8 +282,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add authenticated budget-policy, usage, and immutable pricing-catalog
-   GraphQL surfaces plus bounded session-event/content retention workers.
+1. Add authenticated budget-policy and immutable pricing-catalog GraphQL
+   surfaces plus bounded session-event/content retention workers.
 2. Add provider-independent stateless conversation checkpoints for safe Ollama
    and installed-harness tool continuation, then a separately reviewed
    production OS/container launcher; provider-persistent file lifecycle
