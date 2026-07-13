@@ -72,6 +72,10 @@ lower-level concrete provider path is deliberately explicit:
    `OrmAiEgressDecisionAudit`. Supply `AiProviderUsageAccounting` backed by an
    immutable deployment pricing catalog; it must settle the exact pricing
    version rather than substituting current rates or reserved estimates.
+   To emit provisional visible output, explicitly install
+   `OrmAiLiveDeltaService` with `with_live_delta_sink`. Use the same runtime,
+   run service, current-principal/access/protection boundaries, and validated
+   coalescing/persistence limits. The default executor emits no live events.
 3. If the provider result is terminal and has no application-tool calls,
    persist it with `OrmAiProviderOutputService::persist`. This reauthorizes
    again, protects content, writes windowable blocks and a session event, and
@@ -111,10 +115,11 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Attachment handling,
-budget/usage GraphQL management, provider-turn/partial-batch restart adoption, durable live
-delta persistence, and top-level approval-wait coordination remain under
-implementation. The proposal/approval GraphQL lifecycles and consequential
-executor are implemented; approval consumption is always followed by fresh
-ordinary resolver authorization in that path. See the
+budget/usage GraphQL management, live-delta retention, provider-turn/partial-
+batch restart adoption, and top-level approval-wait coordination remain under
+implementation. Protected provisional live output is opt-in and documented in
+the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL
+lifecycles and consequential executor are implemented; approval consumption is
+always followed by fresh ordinary resolver authorization in that path. See the
 [proposal and approval lifecycle guide](review-lifecycles.md) and
 [supervised tool guide](supervised-tool-loop.md).

@@ -86,9 +86,10 @@ adapters listed below are still being implemented.
   new worker freshly reauthorizes, reopens and validates every durable result
   and egress proof, reconstructs bounded continuation state, and consumes the
   checkpoint before the next provider transport.
-- UTF-8-safe live-delta coalescing primitives capped at 50 ms / 4 KiB. Durable
-  protected delta-event wiring remains gated; a batch alone is not permission
-  to disclose content.
+- Optional protected durable provisional output. Only visible text and
+  reasoning summaries are UTF-8-coalesced within 50 ms / 4 KiB; each batch is
+  freshly authorized, protected, exact-fence/budget validated, and committed
+  as a cursor event before subscription wakeup.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -210,9 +211,8 @@ preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
-top-level supervised approval-wait coordinator,
-durable protected live-delta persistence, authenticated budget-policy/usage
-GraphQL lifecycles,
+top-level supervised approval-wait coordinator, authenticated
+budget-policy/usage GraphQL lifecycles and live-delta retention/purge,
 per-item proposal review, attachment pipeline, production mutable secret
 stores/keyrings, other provider adapters,
 deployment-specific delegated credential issuers/private HTTP transports,
@@ -220,6 +220,9 @@ generated resolver disclosure metadata, Ollama/OpenAI-compatible and
 allowlisted installed local-harness drivers, and Docker-owned PostgreSQL parity
 testing. Details live in
 [implementation status](docs/implementation-status.md).
+
+See [protected live streaming](docs/live-streaming.md) for the opt-in sink,
+provisional-event contract, client reconciliation rules, and failure model.
 
 Local execution remains in scope. Ollama and OpenAI-compatible loopback servers
 will use ordinary provider adapters. Installed CLI/ACP agents will use a

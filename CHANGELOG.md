@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.7.0` and the AI
-schema module to `0.12.0`.
+This development line advances the pre-1.0 crate version to `0.8.0` and the AI
+schema module to `0.13.0`.
 
 ### Added
 
@@ -122,9 +122,22 @@ schema module to `0.12.0`.
   tool batches. Adoption reopens protected arguments/results, validates the
   original budget, tool, step, disclosure and egress records, reconstructs the
   bounded loop guard, and atomically consumes the checkpoint before transport.
+- `AiLiveDeltaSink`, its private-field exact persistence context, and
+  `OrmAiLiveDeltaService` for optional protected durable provisional model
+  output. The provider executor coalesces only visible text and reasoning
+  summaries, applies sequential persistence backpressure, and appends a
+  cursor-addressable session event only after fresh authority, scope,
+  protection-policy, run-fence, and uncertain-budget validation.
 
 ### Changed
 
+- `AiProviderCallExecutor` can opt into durable live output with
+  `with_live_delta_sink`. Visible batches are bounded to no weaker than 50 ms
+  or 4 KiB and are committed before a subscription wakeup. The default remains
+  no provisional event persistence.
+- AI schema module version is now `0.13.0` for the persistent meaning of the
+  protected `provider_live_delta` session-event type. Entity shape and public
+  GraphQL SDL are unchanged.
 - `AiReadOnlyAgentCoordinator::new` now requires both an
   `AiAgentCheckpointWriter` and `AiAgentCheckpointAdopter`. Accepted provider
   results are checkpointed before tool/output consumption, and a completed
@@ -135,7 +148,7 @@ schema module to `0.12.0`.
   private `protected_state`. Existing final-output checkpoints remain valid
   with no protected state, while older active runs gain no inferred resume
   authority.
-- AI schema module version is now `0.12.0` for the new persistent semantics of
+- AI schema module `0.12.0` introduced the persistent semantics of
   checkpoint adoption eligibility, cross-generation checkpoint retention, and
   one-shot pre-provider consumption. The entity shape is unchanged.
 - `GraphqlRequestContextFactory::build` now receives the complete validated
@@ -149,7 +162,7 @@ schema module to `0.12.0`.
 - The supervised-tool slice introduced AI schema module `0.10.0`. Existing
   tool-call history keeps nullable provider/audit fields; a waiting
   pre-`0.10.0` consequential row cannot be resumed and fails closed for
-  reconciliation. The current module is `0.12.0`.
+  reconciliation. The current module is `0.13.0`.
 - Approval principal freshness is sampled after asynchronous rehydration,
   avoiding false future-timestamp rejection with sub-second system clocks.
 
@@ -159,7 +172,7 @@ schema module to `0.12.0`.
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` now reports safely finalized output checkpoints in its
   `completed` counter. That checkpoint slice introduced schema module `0.9.0`;
-  the current module is `0.12.0`.
+  the current module is `0.13.0`.
 - `AiRunRecoveryReport` adds `checkpoint_requeued`. Expired `Running` attempts
   requeue only an exact hash-bound, committed, complete tool-batch checkpoint;
   provider-turn, partial, malformed, consumed, or exhausted adoption attempts
@@ -218,6 +231,12 @@ schema module to `0.12.0`.
 
 ### Security
 
+- Durable live output never receives raw provider frames, tool arguments,
+  structured tool events, or hidden reasoning. Every batch is reauthorized and
+  protected before a serializable transaction validates the exact active run
+  fence and uncertain budget reservation. A sink failure after transport keeps
+  provider usage uncertain and must not trigger replay. Provisional events are
+  historical progress, not proof of final assistant completion.
 - Durable coordinator checkpoints rehydrate the principal and re-resolve an
   unchanged ready protection policy around asynchronous protection. Payloads
   bind the exact attempt/generation, provider result, loop counts, scope,

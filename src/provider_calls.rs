@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use agql_auth::Clock;
 use async_trait::async_trait;
@@ -10,9 +11,10 @@ use futures::StreamExt;
 use crate::{
     AiBudgetAmounts, AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservation,
     AiBudgetReservationId, AiBudgetReservationRequest, AiBudgetService, AiEgressCapability,
-    AiEgressDecisionAudit, AiEgressManifest, AiError, AiRunLease, AiRunState, AiRuntime,
-    AiSessionAction, AiToolPolicySet, ModelBuiltinTool, ModelContinuation, ModelRequest,
-    ProviderEvent, ProviderKind, ProviderRequestContext,
+    AiEgressDecisionAudit, AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer,
+    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiRunLease,
+    AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet, ModelBuiltinTool,
+    ModelContinuation, ModelRequest, ProviderEvent, ProviderKind, ProviderRequestContext,
 };
 
 /// Deployment-owned bounds for a single normalized provider stream.
@@ -760,6 +762,8 @@ pub struct AiProviderCallExecutor {
     usage_accounting: Arc<dyn AiProviderUsageAccounting>,
     clock: Arc<dyn Clock>,
     limits: AiProviderCallLimits,
+    live_delta_sink: Option<Arc<dyn AiLiveDeltaSink>>,
+    live_delta_limits: AiLiveDeltaCoalescerLimits,
 }
 
 impl AiProviderCallExecutor {
@@ -779,7 +783,26 @@ impl AiProviderCallExecutor {
             usage_accounting,
             clock,
             limits,
+            live_delta_sink: None,
+            live_delta_limits: AiLiveDeltaCoalescerLimits::default(),
         }
+    }
+
+    /// Enables protected durable visible-delta persistence for this executor.
+    ///
+    /// Without a sink the provider result remains fully bounded and durable
+    /// final output is unchanged, but no provisional session events are
+    /// emitted. The sink never receives structured tool arguments or hidden
+    /// reasoning.
+    #[must_use]
+    pub fn with_live_delta_sink(
+        mut self,
+        sink: Arc<dyn AiLiveDeltaSink>,
+        limits: AiLiveDeltaCoalescerLimits,
+    ) -> Self {
+        self.live_delta_sink = Some(sink);
+        self.live_delta_limits = limits;
+        self
     }
 
     /// Executes one exact provider turn for a current running lease.
@@ -904,6 +927,9 @@ impl AiProviderCallExecutor {
             .await?;
 
         let provider_model = plan.request.model.clone();
+        let live_scope = plan.budget.scope.clone();
+        let live_correlation_id = plan.correlation_id.clone();
+        let live_provider_kind = plan.provider_kind.clone();
         let builtin_tools = plan.request.builtin_tools.clone();
         let previous_response_id = plan.request.continuation.as_ref().map(|continuation| {
             let ModelContinuation::ProviderResponse { response_id } = continuation;
@@ -934,7 +960,39 @@ impl AiProviderCallExecutor {
         let mut completed_tool_calls = BTreeMap::new();
         let mut tool_call_order = Vec::new();
         let mut tool_argument_bytes = BTreeMap::<String, usize>::new();
-        while let Some(item) = stream.next().await {
+        let mut live_coalescer = self
+            .live_delta_sink
+            .as_ref()
+            .map(|_| AiLiveDeltaCoalescer::new(self.live_delta_limits));
+        loop {
+            let item = if live_coalescer.is_some() {
+                tokio::select! {
+                    item = stream.next() => item,
+                    () = tokio::time::sleep(self.live_delta_limits.maximum_delay()) => {
+                        let batches = live_coalescer
+                            .as_mut()
+                            .ok_or(AiError::ProviderFailed)?
+                            .flush_due(Instant::now())?;
+                        self.persist_live_batches(
+                            lease,
+                            &live_scope,
+                            &live_correlation_id,
+                            &live_provider_kind,
+                            &provider_model,
+                            provider_response_id.as_deref(),
+                            reservation.id(),
+                            &batches,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            } else {
+                stream.next().await
+            };
+            let Some(item) = item else {
+                break;
+            };
             let event = item.map_err(|_| AiError::ProviderFailed)?;
             let event_bytes = serde_json::to_vec(&event)
                 .map_err(|_| AiError::ProviderFailed)?
@@ -1020,7 +1078,35 @@ impl AiProviderCallExecutor {
                 }
                 _ => {}
             }
+            if let Some(coalescer) = live_coalescer.as_mut() {
+                let batches = coalescer.push_event(&event, Instant::now())?;
+                self.persist_live_batches(
+                    lease,
+                    &live_scope,
+                    &live_correlation_id,
+                    &live_provider_kind,
+                    &provider_model,
+                    provider_response_id.as_deref(),
+                    reservation.id(),
+                    &batches,
+                )
+                .await?;
+            }
             events.push(event);
+        }
+        if let Some(coalescer) = live_coalescer.as_mut() {
+            let batches = coalescer.flush_all()?;
+            self.persist_live_batches(
+                lease,
+                &live_scope,
+                &live_correlation_id,
+                &live_provider_kind,
+                &provider_model,
+                provider_response_id.as_deref(),
+                reservation.id(),
+                &batches,
+            )
+            .await?;
         }
         let Some((input_tokens, output_tokens, cached_input_tokens)) = usage else {
             return Err(AiError::ProviderFailed);
@@ -1088,6 +1174,36 @@ impl AiProviderCallExecutor {
             previous_response_id,
             tool_calls,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_live_batches(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        correlation_id: &str,
+        provider_kind: &ProviderKind,
+        provider_model: &str,
+        provider_response_id: Option<&str>,
+        budget_reservation_id: AiBudgetReservationId,
+        batches: &[AiLiveDeltaBatch],
+    ) -> Result<(), AiError> {
+        let Some(sink) = &self.live_delta_sink else {
+            return Ok(());
+        };
+        for batch in batches {
+            let context = AiLiveDeltaPersistenceContext::new(
+                lease,
+                scope.clone(),
+                correlation_id.to_owned(),
+                provider_kind.clone(),
+                provider_model.to_owned(),
+                provider_response_id.map(str::to_owned),
+                budget_reservation_id,
+            );
+            sink.persist_batch(lease, &context, batch).await?;
+        }
+        Ok(())
     }
 
     async fn authorize_and_audit_transfers(
@@ -1359,6 +1475,20 @@ mod tests {
             &self,
             _manifest: &AiEgressManifest,
             _decision: &AiEgressDecision,
+        ) -> Result<(), AiError> {
+            Err(AiError::PersistenceFailed)
+        }
+    }
+
+    struct RejectLiveSink;
+
+    #[async_trait]
+    impl AiLiveDeltaSink for RejectLiveSink {
+        async fn persist_batch(
+            &self,
+            _lease: &AiRunLease,
+            _context: &AiLiveDeltaPersistenceContext,
+            _batch: &AiLiveDeltaBatch,
         ) -> Result<(), AiError> {
             Err(AiError::PersistenceFailed)
         }
@@ -1976,6 +2106,13 @@ mod tests {
             },
         ])
         .await;
+        let live_sink = Arc::new(OrmAiLiveDeltaService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            Arc::new(SystemClock),
+            AiLiveDeltaPersistenceLimits::new(4_096, Duration::seconds(30))
+                .expect("test live persistence limits should validate"),
+        ));
         let executor = AiProviderCallExecutor::new(
             fixture.runtime.clone(),
             fixture.budget_service.clone(),
@@ -1984,6 +2121,11 @@ mod tests {
             Arc::new(SystemClock),
             AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
                 .expect("test provider limits should validate"),
+        )
+        .with_live_delta_sink(
+            live_sink,
+            AiLiveDeltaCoalescerLimits::new(std::time::Duration::from_millis(50), 4_096)
+                .expect("test live coalescer limits should validate"),
         );
         let result = executor
             .execute(&fixture.lease, plan(&fixture))
@@ -1996,6 +2138,65 @@ mod tests {
         assert_eq!(result.cached_input_tokens(), 2);
         assert_eq!(result.provider_response_id(), Some("mock-response"));
         assert_eq!(reservation_state(&fixture.database).await, "committed");
+
+        let live_events = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiSessionEventRecord>()
+                        .filter(AiSessionEventRecordWhereInput {
+                            event_type: Some(graphql_orm::graphql::filters::StringFilter {
+                                eq: Some("provider_live_delta".to_owned()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(4)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("live events should query");
+        assert_eq!(live_events.len(), 1);
+        assert_eq!(live_events[0].run_id, Some(fixture.lease.run_id().0));
+        assert_eq!(
+            live_events[0]
+                .protected_payload
+                .get("value")
+                .and_then(|value| value.get("text"))
+                .and_then(serde_json::Value::as_str),
+            Some("hello back")
+        );
+        assert_eq!(
+            live_events[0]
+                .protected_payload
+                .get("value")
+                .and_then(|value| value.get("provisional"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let session_service = OrmAiSessionService::new(
+            fixture.database.clone(),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+        );
+        let live_page = session_service
+            .session_event_page(&fixture.principal, fixture.lease.session_id(), 0, 10)
+            .await
+            .expect("authorized session window should open live content");
+        assert_eq!(live_page.events.len(), 1);
+        assert_eq!(live_page.events[0].event_type, "provider_live_delta");
+        assert_eq!(
+            live_page.events[0]
+                .payload
+                .0
+                .get("text")
+                .and_then(serde_json::Value::as_str),
+            Some("hello back")
+        );
 
         let audit_count = fixture
             .database
@@ -2060,6 +2261,46 @@ mod tests {
             )
             .await
             .expect("caller can terminally finish after handling the result");
+    }
+
+    #[tokio::test]
+    async fn live_delta_persistence_failure_keeps_provider_usage_uncertain() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("live-failure-response".to_owned()),
+            },
+            ProviderEvent::TextDelta {
+                text: "must persist before delivery".to_owned(),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("live-failure-response".to_owned()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        )
+        .with_live_delta_sink(
+            Arc::new(RejectLiveSink),
+            AiLiveDeltaCoalescerLimits::default(),
+        );
+
+        assert!(matches!(
+            executor.execute(&fixture.lease, plan(&fixture)).await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
     }
 
     #[tokio::test]

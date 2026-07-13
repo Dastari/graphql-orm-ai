@@ -47,6 +47,8 @@ mod orm_coordinator;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_egress;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_live_delta;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_proposals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
@@ -100,6 +102,8 @@ pub use orm_coordinator::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_egress::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_live_delta::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_proposals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
@@ -132,9 +136,9 @@ pub mod prelude {
         AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiBudgetReservation,
         AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
         AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
-        AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider,
-        AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
-        AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
+        AiLiveDeltaCoalescerLimits, AiProposalAccessPolicy, AiProposalCatalog,
+        AiProposalTypeDescriptor, AiProvider, AiRemoteAuthenticatedGraphqlAdapter,
+        AiRemoteGraphqlAuthority, AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiRuntime, AiRuntimeBuilder,
         AiScope, AiSecretStore, AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor,
         DataClassification, SecretRef, ToolMaturity,
@@ -144,14 +148,14 @@ pub mod prelude {
         AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
         AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
         AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
-        AiCoordinatorCheckpointLimits, AiProposalServiceLimits, AiProviderCallExecutor,
-        AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
-        AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,
-        AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
-        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiBudgetService,
-        OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-        OrmAiEgressDecisionAudit, OrmAiProposalService, OrmAiProviderOutputService,
-        OrmAiRunService,
+        AiCoordinatorCheckpointLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
+        AiLiveDeltaSink, AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
+        AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
+        AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
+        AiRequestedConsequentialToolCall, AiRunServiceLimits, OrmAiApplicationToolCallService,
+        OrmAiApprovalService, OrmAiBudgetService, OrmAiConsequentialToolCallService,
+        OrmAiCoordinatorCheckpointService, OrmAiEgressDecisionAudit, OrmAiLiveDeltaService,
+        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

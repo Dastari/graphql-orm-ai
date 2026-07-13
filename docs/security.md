@@ -103,8 +103,13 @@ must atomically consume that link before provider transport. Provider-turn and
 partial-batch work still becomes `RecoveryRequired`.
 Live-delta batches contain sensitive plaintext inside the trusted process;
 coalescing supplies only UTF-8/time/byte bounds and never authorizes delivery.
-Until protected fenced delta-event persistence is wired, batches must not be
-treated as durable cursor events or sent across an external boundary.
+The optional ORM sink rehydrates authority, resolves and rechecks protection
+policy, and commits a protected cursor event only after validating the exact
+active fence and uncertain budget. Tool arguments, raw frames, structured
+events, and hidden reasoning never enter this path. Sink failure after
+transport remains uncertain and cannot trigger replay. A committed delta is
+provisional history, not proof of a completed assistant message; see the
+[live-streaming guide](live-streaming.md).
 
 The read-only coordinator accepts only exact enabled idempotent queries with no
 approval requirement. The separate supervised service accepts only exact

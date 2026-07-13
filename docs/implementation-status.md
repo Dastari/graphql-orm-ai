@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.12.0`) and 37 private records
+- AI schema-module identity (currently version `0.13.0`) and 37 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -91,9 +91,11 @@ production-ready behavior.
   budget, ordered tool/step rows, disclosure blocks and immutable egress allow
   audits under current authority, reconstructs bounded continuation state, and
   consumes the checkpoint before provider transport.
-- UTF-8-safe visible text/reasoning-summary coalescer primitives enforcing a
-  maximum 50 ms / 4 KiB batch and excluding structured/tool events. The
-  primitive performs no persistence or disclosure by itself.
+- Optional protected durable visible provider output. UTF-8-safe coalescing
+  enforces a maximum 50 ms / 4 KiB batch and excludes structured/tool events;
+  the ORM sink freshly validates authority and protection policy, then commits
+  a provisional cursor event through the exact active fence and uncertain
+  budget before wakeup.
 - Secret-store contract plus explicit, read-only, allowlist-mapped environment
   bootstrap store. Runtime construction now requires a secret store.
 - Per-scope content-protection policy/envelope/protector contracts with a
@@ -204,11 +206,11 @@ production-ready behavior.
   telemetry sinks. The ordinary transactional reservation/reconciliation path
   is implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
-  application-tool checkpoints, ORM-backed protected live-delta persistence,
-  and provider-independent stateless continuation. Exact completed read-only
-  tool-batch adoption, the bounded coordinator, protected stateful checkpoints/
-  continuation, live batching primitive, and final-output crash reconciliation
-  are implemented; all other ambiguous resume remains closed.
+  application-tool checkpoints and provider-independent stateless
+  continuation. Exact completed read-only tool-batch adoption, the bounded
+  coordinator, protected stateful checkpoints/continuation, protected live
+  output, and final-output crash reconciliation are implemented; all other
+  ambiguous resume remains closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -227,20 +229,17 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Wire coalesced live batches to protected durable cursor events, while
-   keeping provider-turn and partial-batch adoption closed until provider-
-   specific replay semantics can be proven.
-2. Add the attachment quarantine/scanning/storage pipeline and connect its
+1. Add the attachment quarantine/scanning/storage pipeline and connect its
    authorized image/file resolution to provider adapters.
-3. Add the per-principal inbox stream and retention/pruning worker, then the
+2. Add the per-principal inbox stream and retention/pruning worker, then the
    remaining provider/configuration surfaces, including Ollama and the
    deterministic fake-process foundation for an allowlisted local harness.
-4. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
+3. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 36 integration tests and 44 active
+- `cargo test --features provider-openai`: 36 integration tests and 47 active
   unit tests passed; one explicit live-provider test remained ignored. Thirty
   generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:

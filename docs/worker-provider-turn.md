@@ -101,11 +101,14 @@ into separately fetched blocks, keeps the message preview bounded, applies the
 current scope content-protection policy to every stored value, and emits one
 completed-message session event.
 
-`AiLiveDeltaCoalescer` now provides UTF-8-safe time/byte batching no weaker than
-the 50 ms / 4 KiB contract and accepts only visible text or visible reasoning
-summary events. It is synchronous proof-oriented state, not a durable sink or
-disclosure decision. Clients continue to consume durable cursor windows while
-protected fenced delta-event persistence remains a later slice.
+`AiLiveDeltaCoalescer` provides UTF-8-safe time/byte batching no weaker than the
+50 ms / 4 KiB contract and accepts only visible text or visible reasoning
+summary events. When explicitly configured, `OrmAiLiveDeltaService` rechecks
+current authority and protection policy for each batch and appends a protected
+`provider_live_delta` cursor event only through the exact live fence and
+uncertain budget. The default executor has no live sink. These events are
+provisional; clients reconcile them with the final protected message as
+described in the [live-streaming guide](live-streaming.md).
 
 ## Implemented read-only tool boundary
 

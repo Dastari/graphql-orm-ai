@@ -127,10 +127,11 @@ or turn retention on.
 - Cross-generation adoption is intentionally limited to exact completed
   read-only tool batches. Provider-turn, partial-batch, consequential, and
   provider-independent stateless continuation adoption remain unimplemented.
-- `AiLiveDeltaCoalescer` bounds visible text/reasoning-summary batches to no
-  more than 50 ms / 4 KiB and excludes structured/tool events, but protected
-  durable session-event persistence is not wired yet. A raw batch is not an
-  egress proof and must remain inside the trusted backend.
+- Optional protected live persistence is implemented for visible text and
+  reasoning summaries. It excludes structured/tool events and validates fresh
+  authority, protection policy, the exact run fence, and uncertain budget for
+  every durable batch. It does not grant egress authority or change the
+  coordinator's deliberately closed replay rules.
 - Tool enablement management is not yet exposed through its final
   authenticated GraphQL configuration lifecycle.
 - Provider-independent stateless continuation and Anthropic/xAI/Ollama tool

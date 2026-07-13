@@ -2,6 +2,11 @@
 
 use std::time::Instant;
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use async_trait::async_trait;
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::{AiBudgetReservationId, AiRunId, AiRunLease, AiScope, AiSessionId, ProviderKind};
 use crate::{AiError, ProviderEvent};
 
 /// Model-visible live delta class.
@@ -55,6 +60,15 @@ impl AiLiveDeltaCoalescerLimits {
     }
 }
 
+impl Default for AiLiveDeltaCoalescerLimits {
+    fn default() -> Self {
+        Self {
+            maximum_delay: std::time::Duration::from_millis(50),
+            maximum_bytes: 4_096,
+        }
+    }
+}
+
 /// One bounded model-visible live batch.
 ///
 /// Text remains sensitive application content. A trusted backend sink must
@@ -84,6 +98,131 @@ impl AiLiveDeltaBatch {
     pub fn text(&self) -> &str {
         &self.text
     }
+}
+
+/// Exact server-owned binding for one provisional provider-visible batch.
+///
+/// The context binds a batch to the current session/run attempt, settled
+/// provider route selection, uncertain budget reservation, scope, and audit
+/// correlation. It proves no current access, content protection, durable
+/// persistence, or client disclosure by itself; an [`AiLiveDeltaSink`] must
+/// recheck those properties for every batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub struct AiLiveDeltaPersistenceContext {
+    session_id: AiSessionId,
+    run_id: AiRunId,
+    attempt_id: uuid::Uuid,
+    lease_generation: i64,
+    scope: AiScope,
+    correlation_id: String,
+    provider_kind: ProviderKind,
+    provider_model: String,
+    provider_response_id: Option<String>,
+    budget_reservation_id: AiBudgetReservationId,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl AiLiveDeltaPersistenceContext {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        lease: &AiRunLease,
+        scope: AiScope,
+        correlation_id: String,
+        provider_kind: ProviderKind,
+        provider_model: String,
+        provider_response_id: Option<String>,
+        budget_reservation_id: AiBudgetReservationId,
+    ) -> Self {
+        Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            scope,
+            correlation_id,
+            provider_kind,
+            provider_model,
+            provider_response_id,
+            budget_reservation_id,
+        }
+    }
+
+    /// Session receiving the protected durable event.
+    pub const fn session_id(&self) -> AiSessionId {
+        self.session_id
+    }
+
+    /// Run producing the provisional content.
+    pub const fn run_id(&self) -> AiRunId {
+        self.run_id
+    }
+
+    /// Exact provider-call attempt.
+    pub const fn attempt_id(&self) -> uuid::Uuid {
+        self.attempt_id
+    }
+
+    /// Exact durable fencing generation.
+    pub const fn lease_generation(&self) -> i64 {
+        self.lease_generation
+    }
+
+    /// Application-defined access and protection scope.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
+    /// Server-owned correlation identifier.
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
+
+    /// Provider family selected by the host plan.
+    pub const fn provider_kind(&self) -> &ProviderKind {
+        &self.provider_kind
+    }
+
+    /// Exact selected provider model.
+    pub fn provider_model(&self) -> &str {
+        &self.provider_model
+    }
+
+    /// Provider response reference observed before this batch, when available.
+    pub fn provider_response_id(&self) -> Option<&str> {
+        self.provider_response_id.as_deref()
+    }
+
+    /// Atomic budget reservation currently marked uncertain for this turn.
+    pub const fn budget_reservation_id(&self) -> AiBudgetReservationId {
+        self.budget_reservation_id
+    }
+}
+
+/// Protected durable persistence boundary for provisional visible provider
+/// batches.
+///
+/// Implementations must rehydrate current authority, verify the live run fence
+/// and uncertain provider budget, protect the batch, and commit its durable
+/// cursor event before returning. They must never persist tool arguments,
+/// hidden reasoning, raw provider frames, or unbounded content.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[async_trait]
+pub trait AiLiveDeltaSink: Send + Sync {
+    /// Persists one exact ordered visible batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale fencing, current access/protection
+    /// denial, mismatched provider/budget binding, malformed content, or a
+    /// persistence failure. An error occurs after provider transport began and
+    /// therefore must not cause automatic provider replay.
+    async fn persist_batch(
+        &self,
+        lease: &AiRunLease,
+        context: &AiLiveDeltaPersistenceContext,
+        batch: &AiLiveDeltaBatch,
+    ) -> Result<(), AiError>;
 }
 
 struct PendingDelta {

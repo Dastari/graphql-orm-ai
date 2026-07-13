@@ -4,6 +4,45 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: schema module 0.12.0 to 0.13.0 and protected live output (crate 0.7.0 to 0.8.0)
+
+This pre-1.0 release adds an optional durable provisional-output boundary to
+`AiProviderCallExecutor`. Existing construction is unchanged and emits no
+provisional events. To enable it, construct `OrmAiLiveDeltaService` with the
+same run service, runtime, trusted clock, and validated protection/freshness
+limits, then pass it to `with_live_delta_sink` together with validated
+coalescing limits.
+
+The new public `AiLiveDeltaSink` receives only bounded visible text or visible
+reasoning-summary batches plus an immutable private-field context. A conforming
+sink must rehydrate current authority, protect content, and validate the exact
+session/run/attempt/generation/provider/model/budget binding. The built-in sink
+does this for every batch, rechecks policy after protection, and commits a
+protected `provider_live_delta` session event before the ordinary commit-only
+subscription wakeup. Sink failure occurs after provider transport and therefore
+leaves usage uncertain; do not automatically replay the provider call.
+
+Clients must treat these events as provisional progress. The authoritative
+`assistant_message_completed` event and windowed message blocks remain the
+final transcript. A provisional event from an attempt later classified
+`RecoveryRequired` remains partial history and must not be presented as a
+completed assistant answer. Event payload format version 1 binds the run,
+attempt, generation, provider/model/optional response, budget reservation,
+batch sequence, visible kind, text, and byte count.
+
+Advance `AiSchemaModule` to `0.13.0` through the managed `graphql-orm` schema
+manager while provider starts and subscriptions remain closed. No entity,
+field, index, constraint, public GraphQL root, client SDL, Cargo feature, or
+default changes. No existing AI row or application-domain data rewrite is
+required. The managed migration may be structurally empty, but the module bump
+is mandatory because `graphql_orm_ai_session_events` gains the persistent
+semantic contract for `provider_live_delta`; never relabel an applied `0.12.0`
+module. Restore reconciliation must validate module `0.13.0` before reopening.
+
+This slice does not add delta retention/purge. Existing retention policy fields
+remain configuration only until the bounded pruning worker lands; do not delete
+event rows manually or break session cursor monotonicity.
+
 ## Unreleased: schema module 0.11.0 to 0.12.0 and exact tool-batch adoption (crate 0.6.0 to 0.7.0)
 
 This pre-1.0 release makes the read-only coordinator constructor deliberately
@@ -222,10 +261,10 @@ validation and restore reconciliation report module `0.9.0` ready.
   directly must retain the exact `AiAgentContinuation` and call
   `new_continuation_with_tools`.
 - `AiRunRecoveryReport` has a new public `completed` counter.
-- `AiLiveDeltaCoalescer` and related public types provide synchronous bounded
-  batching only. Batches contain sensitive content and are not authorization or
-  durability proofs; hosts must not emit them externally. ORM-backed protected
-  durable live-batch persistence remains an explicit implementation gate.
+- In that release, `AiLiveDeltaCoalescer` and related public types provided
+  synchronous bounded batching only. A raw batch remains neither authorization
+  nor a durability proof. The later crate `0.8.0` contract at the top of this
+  guide supplies the optional protected ORM sink.
 
 This adds no public GraphQL root or client-visible SDL. The new generated ORM
 records remain private implementation entities.
