@@ -30,12 +30,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo test --features provider-openai
+      - run: cargo test --features provider-openai,provider-ollama
       - run: cargo test --features graphql-case-pascal --test graphql_naming
       - run: cargo check --no-default-features --features postgres
       - run: cargo check --no-default-features --features mssql
-      - run: cargo clippy --all-targets --features provider-openai -- -D warnings
-      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features provider-openai --no-deps
+      - run: cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features provider-openai,provider-ollama --no-deps
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features graphql-case-pascal --no-deps
 
   release-policy:

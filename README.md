@@ -44,9 +44,10 @@ adapters listed below are still being implemented.
 - Fresh `agql-auth` principal rehydration before application tools, with the
   host's ordinary GraphQL context, resolver authorization, row policy,
   assurance, rate limits, and audit remaining authoritative.
-- Provider-neutral streaming events, deterministic network-free mocks, and a
-  feature-gated OpenAI Responses/SSE adapter. Anthropic, xAI, Ollama, and
-  explicitly profiled OpenAI-compatible adapters have reserved feature gates.
+- Provider-neutral streaming events, deterministic network-free mocks, a
+  feature-gated OpenAI Responses/SSE adapter, and a native Ollama `/api/chat`
+  adapter for streaming text, exact images, and structured output. Anthropic,
+  xAI, and explicitly profiled OpenAI-compatible adapters remain reserved.
 - Separate, exact proofs for provider egress and atomic budget reservation.
   Provider built-ins such as web search, file search, code execution, image
   analysis, and image generation require their own authorized transfer.
@@ -152,7 +153,7 @@ Exactly one persistence backend should be selected:
 | `provider-openai` | no | Native OpenAI Responses/SSE adapter |
 | `provider-anthropic` | no | Reserved; adapter not implemented yet |
 | `provider-xai` | no | Reserved; adapter not implemented yet |
-| `provider-ollama` | no | Reserved; adapter not implemented yet |
+| `provider-ollama` | no | Native Ollama chat: streaming text, exact images, structured output |
 | `provider-openai-compatible` | no | Reserved; requires explicit endpoint profiles |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
@@ -240,7 +241,7 @@ per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings, other provider adapters,
 deployment-specific delegated credential issuers/private HTTP transports,
-generated resolver disclosure metadata, Ollama/OpenAI-compatible and
+generated resolver disclosure metadata, OpenAI-compatible and
 allowlisted installed local-harness drivers, and Docker-owned PostgreSQL parity
 testing. Details live in
 [implementation status](docs/implementation-status.md).
@@ -250,8 +251,10 @@ provisional-event contract, client reconciliation rules, and failure model.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 
-Local execution remains in scope. Ollama and OpenAI-compatible loopback servers
-will use ordinary provider adapters. Installed CLI/ACP agents will use a
+Local execution remains in scope. The initial native Ollama adapter is
+implemented; its exact supported and deliberately gated behaviors are in the
+[Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers will use a
+separately profiled provider adapter. Installed CLI/ACP agents will use a
 separate deployment-registered subprocess driver with no shell, fixed command
 and arguments, sanitized environment, sandbox/resource limits, and mediated
 tool callbacks through this runtime; GraphQL may select an approved logical
@@ -267,9 +270,9 @@ forbidden. Consumer-application integration tests belong to those consumers.
 
 ```bash
 cargo fmt --check
-cargo test --features provider-openai
-cargo clippy --all-targets --features provider-openai -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai --no-deps
+cargo test --features provider-openai,provider-ollama
+cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-ollama --no-deps
 cargo test --features graphql-case-pascal --test graphql_naming
 cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql

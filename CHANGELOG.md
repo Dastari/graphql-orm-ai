@@ -5,11 +5,16 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.13.0` and the AI
+This development line advances the pre-1.0 crate version to `0.14.0` and the AI
 schema module to `0.16.0`.
 
 ### Added
 
+- A native feature-gated Ollama `/api/chat` adapter for bounded NDJSON text
+  streaming, exact ephemeral PNG/JPEG/WebP image input, JSON-schema structured
+  output, and authoritative prompt/evaluation token usage. Deployment endpoint
+  policy remains mandatory, redirects and URL credentials are forbidden, and
+  local execution does not bypass exact egress or atomic budget proofs.
 - Durable exact-principal cross-session inbox sequencing with protected
   lifecycle/message/assistant-output events committed atomically with their
   source state, bounded catch-up pages, receiver-before-replay subscriptions,
@@ -168,6 +173,11 @@ schema module to `0.16.0`.
 
 ### Changed
 
+- `provider-ollama` now enables the optional HTTP/Base64 dependencies and
+  exports `OllamaProvider`/`OllamaProviderConfig`. The initial adapter reports
+  only its implemented capabilities; custom tools, provider built-ins, files,
+  and continuation fail closed pending provider-independent stateless
+  conversation checkpoints.
 - AI schema module `0.16.0` adds principal inbox stream heads, exact
   principal-sequence uniqueness, captured event scope identity, and nullable
   migration-gated inbox fields plus a stable scope key on retention policies.

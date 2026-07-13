@@ -34,6 +34,11 @@ production-ready behavior.
   citations, forward-compatible unknown events, and no hidden reasoning
   persistence. Exact released PNG/JPEG/WEBP/GIF and direct file inputs are
   encoded inline without creating provider-persistent file IDs.
+- Native feature-gated Ollama `/api/chat` adapter with deployment-authorized
+  fixed root endpoint, redirects disabled, bounded NDJSON normalization,
+  exact PNG/JPEG/WebP image reopening, JSON-schema output, and authoritative
+  prompt/evaluation token usage. It explicitly omits thinking and rejects
+  tools, files, built-ins, and continuation until stateless checkpoints land.
 - Exact provider request binding: an egress proof cannot be paired with a
   changed provider/model/session/run/payload estimate, every built-in or
   attachment capability requires its own matching authorized transfer, and an
@@ -225,7 +230,7 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- Provider HTTP adapters for Anthropic, xAI, Ollama, and explicitly profiled
+- Provider HTTP adapters for Anthropic, xAI, and explicitly profiled
   OpenAI-compatible endpoints.
 - OpenAI background/webhooks, provider-persistent file upload/search/deletion,
   richer provider file-type preflight, and full built-in result normalization.
@@ -251,10 +256,10 @@ production-ready behavior.
   transports. The generic exact-binding adapter is implemented; credential
   format, fixed destination mapping, network isolation, and application audit
   integration intentionally remain host-owned.
-- Ollama/OpenAI-compatible local provider adapters and the allowlisted installed
-  local-harness/ACP process driver. Local execution remains in scope; no model
-  may choose a command, arguments, working directory, environment, mount, or
-  network authority.
+- Ollama custom-tool/stateless-continuation support, OpenAI-compatible local
+  provider profiles, and the allowlisted installed local-harness/ACP process
+  driver. Local execution remains in scope; no model may choose a command,
+  arguments, working directory, environment, mount, or network authority.
 - Any consumer integration testing or migration. That work is explicitly left
   to each consumer project/agent.
 
@@ -262,20 +267,22 @@ production-ready behavior.
 
 1. Add authenticated budget-policy, usage, and immutable pricing-catalog
    GraphQL surfaces plus bounded session-event/content retention workers.
-2. Add the remaining provider/configuration surfaces, beginning with Ollama
-   and the deterministic fake-process foundation for an allowlisted local
-   harness; provider-persistent file lifecycle remains separately gated.
+2. Add the deterministic fake-process foundation for an allowlisted local
+   harness, then provider-independent stateless conversation checkpoints for
+   safe Ollama tool continuation; provider-persistent file lifecycle remains
+   separately gated.
 3. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 44 integration tests and 47 active
-  unit tests passed; one explicit live-provider test remained ignored. Thirty
-  generated private-ORM search doctests remained intentionally ignored.
-- `cargo clippy --all-targets --features provider-openai -- -D warnings`:
+- `cargo test --features provider-openai,provider-ollama`: full SQLite,
+  OpenAI-mock, and native Ollama loopback-mock coverage passed; one explicit
+  live-provider test remained ignored. Generated private-ORM search doctests
+  remained intentionally ignored.
+- `cargo clippy --all-targets --features provider-openai,provider-ollama -- -D warnings`:
   passed.
-- Warnings-denied Rustdoc passed for `provider-openai` and
+- Warnings-denied Rustdoc passed for both provider adapters and
   `graphql-case-pascal`.
 - PascalCase SDL contract test passed with no camelCase aliases.
 - `cargo check --no-default-features --features postgres`: passed, compile-only.

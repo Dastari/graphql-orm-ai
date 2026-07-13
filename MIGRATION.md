@@ -4,6 +4,38 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: native Ollama adapter (crate 0.13.0 to 0.14.0)
+
+Enabling `provider-ollama` now compiles the native HTTP adapter and its optional
+Base64/Reqwest dependencies. Construct `OllamaProvider` with
+`OllamaProviderConfig` and a deployment-owned `AiProviderEndpointPolicy`. The
+configured value must be a root `http` or `https` origin without URL
+credentials, query, fragment, or path. Redirects are disabled. Endpoint policy
+is still responsible for exact host/port allowlisting, DNS rebinding defenses,
+and network-zone isolation; the configuration value is not an SSRF proof.
+
+The adapter supports bounded native `/api/chat` NDJSON text streaming,
+ephemeral inline PNG/JPEG/WebP inputs, JSON-schema structured output, and
+reported prompt/evaluation token usage. Every call still requires a matching
+model-inference egress proof and atomic budget proof. Each image additionally
+requires its exact image-analysis transfer and freshly reopened attachment
+bytes. A local destination does not imply disclosure authorization.
+
+Custom tools, provider built-ins, non-image files, provider-response
+continuation, and model thinking output are not supported by this adapter.
+They fail closed rather than silently losing conversation state or persisting
+hidden reasoning. Native Ollama tool calling remains gated until the runtime
+can durably checkpoint and reconstruct a provider-independent stateless
+conversation. No API key is required by this adapter; if a deployment places
+authentication in front of Ollama, it must use a separately reviewed fixed
+transport boundary rather than URL credentials.
+
+This is an additive pre-1.0 public Rust API, feature, dependency, and provider
+behavior change. Default features and GraphQL SDL do not change. It adds no
+entity, field, index, constraint, persistent semantic, or backup/restore
+change. `AI_SCHEMA_MODULE_VERSION` remains `0.16.0`; no AI-owned or
+application-domain data migration is needed.
+
 ## Unreleased: schema module 0.15.0 to 0.16.0 and principal inbox (crate 0.12.0 to 0.13.0)
 
 Apply AI schema module `0.16.0` while session writes, provider-output commits,

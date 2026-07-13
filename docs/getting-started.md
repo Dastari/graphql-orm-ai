@@ -19,8 +19,10 @@ Exactly one persistence backend is currently required:
 - `mssql` (schema/compile support until ORM write parity lands)
 
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
-Responses adapter. `graphql-case-pascal` changes the complete GraphQL naming
-contract from default camelCase to PascalCase.
+Responses adapter. `provider-ollama` enables the native Ollama `/api/chat`
+adapter; it needs an explicit deployment endpoint policy even for loopback.
+`graphql-case-pascal` changes the complete GraphQL naming contract from default
+camelCase to PascalCase.
 
 ## Host integration outline
 
@@ -47,6 +49,13 @@ contract from default camelCase to PascalCase.
    trusted bounded host worker.
 9. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
+
+For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
+and pass the same exact egress and atomic budget proofs as any remote provider.
+The initial adapter supports streaming text, exact PNG/JPEG/WebP input, and
+structured output. It deliberately rejects tools and continuation until a
+provider-independent stateless checkpoint can reconstruct the full chat. See
+the [Ollama guide](ollama.md).
 
 The principal inbox lets a virtualized chat drawer refresh bounded session
 shells across multiple conversations without loading transcript history. Its

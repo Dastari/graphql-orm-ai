@@ -9,6 +9,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Protected live streaming](live-streaming.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
+- [Native Ollama provider](ollama.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)
 - [Protected coordinator checkpoints](coordinator-checkpoints.md)
 - [Supervised mutation and approval execution](supervised-tool-loop.md)
