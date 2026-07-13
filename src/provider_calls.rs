@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agql_auth::Clock;
+use agql_auth::{Clock, ResolvedPrincipal};
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -12,9 +12,11 @@ use crate::{
     AiBudgetAmounts, AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservation,
     AiBudgetReservationId, AiBudgetReservationRequest, AiBudgetService, AiEgressCapability,
     AiEgressDecisionAudit, AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer,
-    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiRunLease,
-    AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet, ModelBuiltinTool,
-    ModelContinuation, ModelRequest, ProviderEvent, ProviderKind, ProviderRequestContext,
+    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink,
+    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiResolvedProviderAttachment,
+    AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet, ModelBuiltinTool,
+    ModelContinuation, ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind,
+    ProviderRequestContext,
 };
 
 /// Deployment-owned bounds for a single normalized provider stream.
@@ -73,6 +75,69 @@ impl AiProviderCallLimits {
         }
         self.maximum_tool_calls = maximum_tool_calls;
         Ok(self)
+    }
+}
+
+/// Deployment raw-byte and cardinality limits for provider attachment reopening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiProviderAttachmentResolutionLimits {
+    maximum_attachments: usize,
+    maximum_attachment_bytes: u64,
+    maximum_total_bytes: u64,
+}
+
+impl AiProviderAttachmentResolutionLimits {
+    /// Creates validated resolver limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless attachment count is in
+    /// `1..=32`, per-object bytes are in `1..=100 MiB`, total bytes are at
+    /// least the object limit, and total bytes do not exceed 100 MiB.
+    pub fn new(
+        maximum_attachments: usize,
+        maximum_attachment_bytes: u64,
+        maximum_total_bytes: u64,
+    ) -> Result<Self, AiError> {
+        if !(1..=32).contains(&maximum_attachments)
+            || !(1..=100 * 1024 * 1024).contains(&maximum_attachment_bytes)
+            || maximum_total_bytes < maximum_attachment_bytes
+            || maximum_total_bytes > 100 * 1024 * 1024
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid provider attachment resolution limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_attachments,
+            maximum_attachment_bytes,
+            maximum_total_bytes,
+        })
+    }
+
+    /// Maximum exact attachment inputs in one turn.
+    pub const fn maximum_attachments(self) -> usize {
+        self.maximum_attachments
+    }
+
+    /// Maximum raw bytes reopened for one attachment.
+    pub const fn maximum_attachment_bytes(self) -> u64 {
+        self.maximum_attachment_bytes
+    }
+
+    /// Maximum combined raw bytes reopened for one turn.
+    pub const fn maximum_total_bytes(self) -> u64 {
+        self.maximum_total_bytes
+    }
+}
+
+impl Default for AiProviderAttachmentResolutionLimits {
+    fn default() -> Self {
+        Self {
+            maximum_attachments: 8,
+            maximum_attachment_bytes: 25 * 1024 * 1024,
+            maximum_total_bytes: 50 * 1024 * 1024,
+        }
     }
 }
 
@@ -764,6 +829,8 @@ pub struct AiProviderCallExecutor {
     limits: AiProviderCallLimits,
     live_delta_sink: Option<Arc<dyn AiLiveDeltaSink>>,
     live_delta_limits: AiLiveDeltaCoalescerLimits,
+    attachment_resolver: Option<Arc<dyn AiProviderAttachmentResolver>>,
+    attachment_limits: AiProviderAttachmentResolutionLimits,
 }
 
 impl AiProviderCallExecutor {
@@ -785,6 +852,8 @@ impl AiProviderCallExecutor {
             limits,
             live_delta_sink: None,
             live_delta_limits: AiLiveDeltaCoalescerLimits::default(),
+            attachment_resolver: None,
+            attachment_limits: AiProviderAttachmentResolutionLimits::default(),
         }
     }
 
@@ -802,6 +871,21 @@ impl AiProviderCallExecutor {
     ) -> Self {
         self.live_delta_sink = Some(sink);
         self.live_delta_limits = limits;
+        self
+    }
+
+    /// Enables exact released-attachment reopening for provider inputs.
+    ///
+    /// Without this resolver every provider plan containing an attachment
+    /// fails before the uncertain/transport boundary.
+    #[must_use]
+    pub fn with_attachment_resolver(
+        mut self,
+        resolver: Arc<dyn AiProviderAttachmentResolver>,
+        limits: AiProviderAttachmentResolutionLimits,
+    ) -> Self {
+        self.attachment_resolver = Some(resolver);
+        self.attachment_limits = limits;
         self
     }
 
@@ -874,7 +958,7 @@ impl AiProviderCallExecutor {
             )
             .map_err(|_| AiError::BudgetDenied)?;
 
-        let context = match self
+        let mut context = match self
             .authorize_and_audit_transfers(lease, &plan, authorized_budget)
             .await
         {
@@ -885,10 +969,17 @@ impl AiProviderCallExecutor {
             }
         };
 
-        let current = self
+        let mut current = match self
             .runtime
             .resolve_current_principal(lease.principal_reference())
-            .await?;
+            .await
+        {
+            Ok(current) => current,
+            Err(error) => {
+                self.release_unstarted(lease, &reservation).await?;
+                return Err(error);
+            }
+        };
         if !self
             .runtime
             .access_policy()
@@ -912,6 +1003,75 @@ impl AiProviderCallExecutor {
         {
             self.release_unstarted(lease, &reservation).await?;
             return Err(AiError::Forbidden);
+        }
+        if plan
+            .request
+            .input
+            .iter()
+            .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))
+        {
+            let Some(resolver) = &self.attachment_resolver else {
+                self.release_unstarted(lease, &reservation).await?;
+                return Err(AiError::RuntimeNotReady);
+            };
+            let resolved = match self
+                .resolve_provider_attachments(
+                    resolver.as_ref(),
+                    &current,
+                    lease,
+                    &plan.budget.scope,
+                    &plan.request,
+                )
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    self.release_unstarted(lease, &reservation).await?;
+                    return Err(error);
+                }
+            };
+            context = match context.with_resolved_attachments(&plan.request, resolved) {
+                Ok(context) => context,
+                Err(_) => {
+                    self.release_unstarted(lease, &reservation).await?;
+                    return Err(AiError::ReauthorizationFailed);
+                }
+            };
+            current = match self
+                .runtime
+                .resolve_current_principal(lease.principal_reference())
+                .await
+            {
+                Ok(current) => current,
+                Err(error) => {
+                    self.release_unstarted(lease, &reservation).await?;
+                    return Err(error);
+                }
+            };
+            if !self
+                .runtime
+                .access_policy()
+                .can_access_scope(
+                    current.principal(),
+                    &plan.budget.scope,
+                    AiSessionAction::Write,
+                )
+                .await
+                .is_allowed()
+                || !self
+                    .runtime
+                    .access_policy()
+                    .can_access_session(
+                        current.principal(),
+                        lease.session_id(),
+                        AiSessionAction::Write,
+                    )
+                    .await
+                    .is_allowed()
+            {
+                self.release_unstarted(lease, &reservation).await?;
+                return Err(AiError::Forbidden);
+            }
         }
         self.budget_service
             .reconcile(
@@ -1176,6 +1336,54 @@ impl AiProviderCallExecutor {
         })
     }
 
+    async fn resolve_provider_attachments(
+        &self,
+        resolver: &dyn AiProviderAttachmentResolver,
+        principal: &ResolvedPrincipal,
+        lease: &AiRunLease,
+        scope: &AiScope,
+        request: &ModelRequest,
+    ) -> Result<Vec<AiResolvedProviderAttachment>, AiError> {
+        let attachment_requests = request
+            .input
+            .iter()
+            .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
+            .map(AiProviderAttachmentRequest::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        if attachment_requests.len() > self.attachment_limits.maximum_attachments {
+            return Err(AiError::InvalidInput(
+                "provider attachment count exceeds deployment limit".to_owned(),
+            ));
+        }
+        let mut total_bytes = 0_u64;
+        let mut resolved = Vec::with_capacity(attachment_requests.len());
+        for attachment in attachment_requests {
+            if attachment.byte_count() > self.attachment_limits.maximum_attachment_bytes {
+                return Err(AiError::InvalidInput(
+                    "provider attachment exceeds deployment byte limit".to_owned(),
+                ));
+            }
+            total_bytes = total_bytes
+                .checked_add(attachment.byte_count())
+                .ok_or_else(|| {
+                    AiError::InvalidInput("provider attachment total overflow".to_owned())
+                })?;
+            if total_bytes > self.attachment_limits.maximum_total_bytes {
+                return Err(AiError::InvalidInput(
+                    "provider attachments exceed deployment total byte limit".to_owned(),
+                ));
+            }
+            let item = resolver
+                .resolve_for_provider(principal, lease.session_id(), scope, &attachment)
+                .await?;
+            if item.request() != &attachment {
+                return Err(AiError::ReauthorizationFailed);
+            }
+            resolved.push(item);
+        }
+        Ok(resolved)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn persist_live_batches(
         &self,
@@ -1286,6 +1494,7 @@ mod tests {
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule, TransactionMode};
     use graphql_orm::prelude::{Database, SqliteBackend};
     use serde_json::json;
+    use sha2::Digest;
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
@@ -1491,6 +1700,29 @@ mod tests {
             _batch: &AiLiveDeltaBatch,
         ) -> Result<(), AiError> {
             Err(AiError::PersistenceFailed)
+        }
+    }
+
+    struct ExactAttachmentResolver {
+        bytes: Arc<[u8]>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AiProviderAttachmentResolver for ExactAttachmentResolver {
+        async fn resolve_for_provider(
+            &self,
+            _principal: &ResolvedPrincipal,
+            _session_id: AiSessionId,
+            _scope: &AiScope,
+            request: &AiProviderAttachmentRequest,
+        ) -> Result<AiResolvedProviderAttachment, AiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            AiResolvedProviderAttachment::new(
+                request.clone(),
+                "provider-test.png",
+                self.bytes.clone(),
+            )
         }
     }
 
@@ -1798,12 +2030,14 @@ mod tests {
                 allowed_capabilities: [
                     AiEgressCapability::ModelInference,
                     AiEgressCapability::ToolResult,
+                    AiEgressCapability::ImageAnalysis,
+                    AiEgressCapability::ProviderFile,
                 ]
                 .into_iter()
                 .collect(),
                 maximum_classification: DataClassification::Internal,
                 maximum_bytes: 16_384,
-                maximum_attachments: 0,
+                maximum_attachments: 8,
             })
             .maximum_tool_maturity(ToolMaturity::SupervisedWrite)
             .tool_catalog(tool_catalog)
@@ -1941,6 +2175,58 @@ mod tests {
             &policy,
         )
         .expect("registered enabled read-only tool plan should validate")
+    }
+
+    fn attachment_plan(fixture: &Fixture, bytes: &[u8]) -> AiProviderCallPlan {
+        let mut base = plan(fixture);
+        let attachment = ModelInputBlock::Attachment {
+            attachment_id: Uuid::new_v4().to_string(),
+            mime: "image/png".to_owned(),
+            byte_count: bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(bytes)),
+        };
+        let exact_reference = attachment
+            .attachment_egress_reference()
+            .expect("attachment source should be canonical");
+        base.request.input.push(attachment);
+        base.budget.estimate.image_units = 1;
+        let estimated_bytes = 4_096;
+        base.transfers[0].attachment_count = 1;
+        base.transfers[0].estimated_bytes = estimated_bytes;
+        let image_manifest = AiEgressManifest {
+            provider_profile_id: "mock-profile".to_owned(),
+            provider_kind: ProviderKind::OpenAiCompatible.as_str().to_owned(),
+            model: base.request.model.clone(),
+            destination: "local-mock".to_owned(),
+            destination_trust: AiDestinationTrust::Local,
+            capability: AiEgressCapability::ImageAnalysis,
+            scope: fixture.scope.clone(),
+            session_id: Some(fixture.lease.session_id()),
+            run_id: Some(fixture.lease.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "attachment".to_owned(),
+                reference: exact_reference,
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::UserProvided,
+            }],
+            estimated_bytes,
+            estimated_tokens: 100,
+            attachment_count: 1,
+            purpose: "test_image_analysis".to_owned(),
+            retention: "none".to_owned(),
+            residency: None,
+            policy_version: "egress-v1".to_owned(),
+            consent_reference: None,
+        };
+        base.transfers.push(image_manifest);
+        AiProviderCallPlan::new(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+        )
+        .expect("exact attachment provider plan should validate")
     }
 
     fn supervised_tool_plan(fixture: &Fixture) -> AiProviderCallPlan {
@@ -2352,6 +2638,75 @@ mod tests {
         ));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_state(&fixture.database).await, "released");
+    }
+
+    #[tokio::test]
+    async fn attachment_plan_without_reopener_fails_before_transport_and_releases_capacity() {
+        let fixture = fixture(vec![ProviderEvent::Unknown {
+            event_type: "must_not_run".to_owned(),
+        }])
+        .await;
+        let bytes = b"exact-provider-image".to_vec();
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+
+        assert!(matches!(
+            executor
+                .execute(&fixture.lease, attachment_plan(&fixture, &bytes))
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
+    }
+
+    #[tokio::test]
+    async fn attachment_plan_reopens_exact_bytes_before_uncertain_transport_boundary() {
+        let fixture = fixture(vec![
+            ProviderEvent::Usage {
+                input_tokens: 5,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("attachment-response".to_owned()),
+            },
+        ])
+        .await;
+        let bytes: Arc<[u8]> = Arc::from(b"exact-provider-image".as_slice());
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        )
+        .with_attachment_resolver(
+            Arc::new(ExactAttachmentResolver {
+                bytes: bytes.clone(),
+                calls: resolver_calls.clone(),
+            }),
+            AiProviderAttachmentResolutionLimits::default(),
+        );
+
+        let result = executor
+            .execute(&fixture.lease, attachment_plan(&fixture, &bytes))
+            .await
+            .expect("exact attachment provider turn should complete");
+        assert_eq!(result.provider_response_id(), Some("attachment-response"));
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(reservation_state(&fixture.database).await, "committed");
     }
 
     #[tokio::test]

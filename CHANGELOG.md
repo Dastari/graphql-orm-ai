@@ -5,11 +5,21 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.11.0` and the AI
+This development line advances the pre-1.0 crate version to `0.12.0` and the AI
 schema module to `0.15.0`.
 
 ### Added
 
+- Exact, provider-neutral attachment reopening through
+  `AiProviderAttachmentResolver`, private-field request/resolved payload types,
+  deployment raw-byte/cardinality limits, and the ORM attachment service. The
+  resolver rechecks current owner/session/scope and released/clean/linked state,
+  streams only the exact opaque object, verifies metadata/length/SHA-256, and
+  detects durable row changes around storage I/O.
+- Native OpenAI Responses image/file input using ephemeral inline data URLs.
+  Supported image MIME types map to `input_image`; other accepted files map to
+  `input_file` under the provider's per-request raw-file limit. No provider file
+  ID, storage URL, or provider-side cleanup obligation is created.
 - Host-only `AiAttachmentCleanupService` and ORM implementation for bounded
   expired-ticket, interrupted upload/removal, and orphan-reference cleanup.
   Claims use monotonic generations, expiring row-version fences, confirmed
@@ -147,6 +157,16 @@ schema module to `0.15.0`.
 
 ### Changed
 
+- `AiProviderCallExecutor` optionally accepts the exact attachment resolver and
+  validated reopening limits. Attachment turns fail before transport when it
+  is absent, and current scope/session access is checked again after storage
+  I/O before budget state becomes uncertain.
+- Provider payload estimation now conservatively includes Base64 expansion for
+  attachment bytes, and request validation rejects duplicate attachment IDs.
+  Existing server-authored manifests may need larger `estimated_bytes` bounds.
+- The OpenAI adapter now advertises image/file input capability when
+  `provider-openai` is enabled; that feature also enables its private optional
+  Base64 dependency.
 - AI schema module version is now `0.15.0`. Attachment rows add nullable
   processing/cleanup deadlines, cleanup generation, retry count and next
   attempt metadata; lifecycle state fields are now privately filterable for
@@ -261,6 +281,12 @@ schema module to `0.15.0`.
 
 ### Security
 
+- Attachment contents are never resolved from a model-visible storage
+  reference. Exact budget and audited egress proofs precede reopening; resolved
+  bytes remain redacted from `Debug`, are rebound to request metadata, and are
+  accepted by provider context only with complete one-to-one request coverage.
+  A missing resolver, changed row/object, owner mismatch, changed checksum, or
+  lost authorization releases an unstarted reservation and prevents transport.
 - Expired/interrupted attachment cleanup never lists arbitrary storage
   prefixes, reads content, or trusts a stale row. Every candidate is reloaded
   and CAS-claimed; ambiguous deletion retains opaque references and moves to

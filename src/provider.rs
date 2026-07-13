@@ -11,7 +11,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError, AiRunId, AiSessionId,
+    AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError,
+    AiProviderAttachmentRequest, AiResolvedProviderAttachment, AiRunId, AiSessionId,
     AuthorizedBudgetReservation, AuthorizedEgress,
 };
 
@@ -206,6 +207,7 @@ impl ModelRequest {
             return Err(ProviderError::InvalidRequest);
         }
         let mut tool_result_call_ids = BTreeSet::new();
+        let mut attachment_ids = BTreeSet::new();
         for block in &self.input {
             if let ModelInputBlock::ToolResult {
                 call_id,
@@ -231,7 +233,8 @@ impl ModelRequest {
                     || !crate::valid_mime(mime)
                     || *byte_count == 0
                     || *byte_count > 100 * 1024 * 1024
-                    || !crate::valid_sha256(sha256))
+                    || !crate::valid_sha256(sha256)
+                    || !attachment_ids.insert(attachment_id.as_str()))
             {
                 return Err(ProviderError::InvalidRequest);
             }
@@ -265,7 +268,13 @@ impl ModelRequest {
                     .len()
                     .saturating_add(mime.len())
                     .saturating_add(sha256.len())
-                    .saturating_add(usize::try_from(*byte_count).unwrap_or(usize::MAX)),
+                    .saturating_add(
+                        (usize::try_from(*byte_count)
+                            .unwrap_or(usize::MAX)
+                            .saturating_add(2)
+                            / 3)
+                        .saturating_mul(4),
+                    ),
                 ModelInputBlock::Json { value } => value.to_string().len(),
                 ModelInputBlock::ToolResult {
                     call_id,
@@ -374,6 +383,7 @@ pub struct ProviderRequestContext {
     correlation_id: String,
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
+    resolved_attachments: Vec<AiResolvedProviderAttachment>,
 }
 
 impl ProviderRequestContext {
@@ -397,6 +407,7 @@ impl ProviderRequestContext {
             correlation_id: correlation_id.into(),
             budget,
             transfers: Vec::new(),
+            resolved_attachments: Vec::new(),
         }
         .with_authorized_transfer(manifest, proof)
     }
@@ -420,6 +431,60 @@ impl ProviderRequestContext {
         self.transfers
             .push(AuthorizedProviderTransfer { manifest, proof });
         Ok(self)
+    }
+
+    /// Installs exact reopened attachment payloads for this provider request.
+    ///
+    /// Callers must obtain these values from a trusted
+    /// [`crate::AiProviderAttachmentResolver`] under a freshly rehydrated
+    /// principal. This method validates exact request coverage but does not
+    /// itself perform authorization or storage access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidRequest`] unless every attachment block
+    /// has exactly one matching resolved payload and there are no extras.
+    pub fn with_resolved_attachments(
+        mut self,
+        request: &ModelRequest,
+        resolved: Vec<AiResolvedProviderAttachment>,
+    ) -> Result<Self, ProviderError> {
+        let expected = request
+            .input
+            .iter()
+            .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
+            .map(AiProviderAttachmentRequest::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        if expected.len() != resolved.len()
+            || expected
+                .iter()
+                .any(|request| !resolved.iter().any(|item| item.request() == request))
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
+        self.resolved_attachments = resolved;
+        Ok(self)
+    }
+
+    /// Returns exact reopened bytes for one attachment request.
+    ///
+    /// The returned payload was installed by the provider executor after
+    /// current-principal resolution. Adapters must use it only for the current
+    /// request transport and must not log, persist, or cache its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::EgressDenied`] when the exact attachment was
+    /// not freshly resolved into this request context.
+    pub fn resolved_attachment(
+        &self,
+        request: &AiProviderAttachmentRequest,
+    ) -> Result<&AiResolvedProviderAttachment, ProviderError> {
+        self.resolved_attachments
+            .iter()
+            .find(|attachment| attachment.request() == request)
+            .ok_or(ProviderError::EgressDenied)
     }
 
     /// Session ID.
@@ -483,6 +548,8 @@ impl ProviderRequestContext {
         for block in &request.input {
             match block {
                 ModelInputBlock::Attachment { mime, .. } => {
+                    let attachment_request = AiProviderAttachmentRequest::try_from(block)
+                        .map_err(|_| ProviderError::InvalidRequest)?;
                     let capability = if mime.starts_with("image/") {
                         AiEgressCapability::ImageAnalysis
                     } else {
@@ -511,6 +578,7 @@ impl ProviderRequestContext {
                     }) {
                         return Err(ProviderError::EgressDenied);
                     }
+                    self.resolved_attachment(&attachment_request)?;
                 }
                 ModelInputBlock::ToolResult {
                     call_id,

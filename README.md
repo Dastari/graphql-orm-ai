@@ -97,6 +97,9 @@ adapters listed below are still being implemented.
 - Exact attachment model-input binding: ID, MIME, verified bytes and SHA-256
   must match a separately authorized image/file manifest source before any
   provider adapter can start transport.
+- Fresh exact attachment reopening through the current principal and durable
+  ORM state, with bounded object streaming, post-I/O reauthorization, and
+  ephemeral inline OpenAI image/file input that creates no provider file ID.
 - A host-only, bounded attachment maintenance worker that fences cleanup
   generations, expires abandoned tickets/processing, confirms idempotent blob
   deletion, audits outcomes, and backs off safely on ambiguous storage errors.
@@ -206,8 +209,9 @@ large histories instead of receiving or rendering the entire session.
 Attachments use opaque AI-owned references. Ticketed streaming upload,
 ownership, byte/hash checks, quarantine, scanning, acceptance, promotion,
 release, protected events, and message linkage are implemented. Provider
-file/image resolution, derivative artifacts, quotas, and retention cleanup
-remain gated.
+file/image reopening and OpenAI inline input are implemented; derivative
+artifacts, quotas, retention purge, and provider-persistent file/search
+lifecycle remain gated.
 
 ## Current maturity
 
@@ -225,8 +229,8 @@ implemented through authenticated, optionally PascalCase GraphQL roots.
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authenticated
 budget-policy/usage GraphQL lifecycles and live-delta retention/purge,
-per-item proposal review, provider attachment resolution/retention and
-attachment cleanup/derivatives, production mutable secret
+per-item proposal review, provider-persistent file/search lifecycle,
+attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings, other provider adapters,
 deployment-specific delegated credential issuers/private HTTP transports,
 generated resolver disclosure metadata, Ollama/OpenAI-compatible and

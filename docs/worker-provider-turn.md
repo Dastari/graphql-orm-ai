@@ -13,6 +13,9 @@ of these contracts permits arbitrary provider calls or model-authored GraphQL.
 - `OrmAiEgressDecisionAudit` appends the exact redacted allow/deny decision ID
   and manifest hash. A failed audit write closes transport.
 - `AiProviderCallExecutor` performs one security-ordered provider turn.
+- `AiProviderAttachmentResolver` is required only for attachment turns. The
+  ORM attachment service provides an exact current-authority implementation;
+  deployment-owned limits bound reopened object count and raw bytes.
 - `AiProviderUsageAccounting` settles the exact immutable pricing-policy
   version into authoritative cost/tool/image units after provider token usage.
 - `OrmAiProviderOutputService` reauthorizes and persists a successful result as
@@ -42,6 +45,7 @@ Queued/RetryScheduled
         ▼
       Running
         │ fresh access → atomic budget → egress decisions + immutable audit
+        │ optional exact attachment reopen → fresh access again
         │ mark budget Uncertain immediately before provider transport
         ▼
   provider event stream
@@ -77,6 +81,9 @@ the newly returned value. A cloned older value is expected to fail with
 
 - Before transport, a denied or unauditable egress decision releases capacity
   only while the reservation is still provably unstarted.
+- A missing attachment resolver, object/row mismatch, exceeded reopening
+  bound, or lost post-I/O authorization also fails before transport and
+  releases capacity while the reservation remains provably unstarted.
 - Immediately before transport, the reservation becomes `Uncertain`.
 - Provider rejection, stream error, missing authoritative usage/completion,
   unknown pricing version, settlement failure, oversized output, unoffered or

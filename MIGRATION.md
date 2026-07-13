@@ -4,6 +4,50 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: exact provider attachment reopening (crate 0.11.0 to 0.12.0)
+
+Provider turns containing `ModelInputBlock::Attachment` now require exact
+freshly reopened bytes in addition to the attachment egress proof introduced
+in 0.10.0. Configure `AiProviderCallExecutor::with_attachment_resolver` with a
+trusted `AiProviderAttachmentResolver` and validated
+`AiProviderAttachmentResolutionLimits`. SQLite/PostgreSQL hosts can use the
+same `OrmAiAttachmentService` that owns intake. A missing resolver fails before
+provider transport; do not replace it with a signed URL, raw storage key, or
+model-selected object lookup.
+
+The new public `AiProviderAttachmentRequest` and
+`AiResolvedProviderAttachment` values bind opaque ID, scanner-detected MIME,
+raw byte count, lowercase SHA-256, sanitized filename, and content. The
+resolved type validates length/hash but is not authorization proof. Resolver
+implementations must use the supplied fresh `ResolvedPrincipal`, recheck the
+current session/scope/owner and released/clean/message-linked state, read only
+the exact durable object, and fail if either object facts or the row changes.
+`ProviderRequestContext::with_resolved_attachments` requires one-to-one exact
+coverage; provider adapters retrieve content with `resolved_attachment`.
+
+`ModelRequest::validate` now rejects duplicate attachment IDs. Its estimated
+payload includes conservative Base64 expansion, so existing inference and
+image/file manifests may need larger `estimated_bytes` values. The exact
+capability manifest is still separate and must carry the canonical attachment
+source. Deployment limits may only narrow the model/request hard limits.
+
+With `provider-openai`, supported PNG/JPEG/WEBP/GIF inputs are sent as
+ephemeral Responses `input_image` data URLs. Host scanning/acceptance must
+reject animated GIFs because OpenAI accepts only non-animated GIF input. Other
+host-accepted files are sent as inline `input_file` data under the adapter's
+less-than-50-MiB
+per-file and 50-MiB combined raw-file bounds. This path creates no provider
+file ID and therefore no provider-file deletion lifecycle. Hosts remain
+responsible for MIME acceptance and must separately authorize `ImageAnalysis`
+or `ProviderFile`; provider rejection remains a normal uncertain transport
+failure. The feature now enables an optional Base64 dependency; default
+features are unchanged.
+
+This pre-1.0 release adds public Rust APIs and changes provider behavior and
+payload estimates. It adds no GraphQL SDL, entity, field, index, constraint,
+backup/restore, or persistent semantic change. `AI_SCHEMA_MODULE_VERSION`
+remains `0.15.0`; no AI-owned or application-domain data migration is needed.
+
 ## Unreleased: schema module 0.14.0 to 0.15.0 and attachment cleanup (crate 0.10.0 to 0.11.0)
 
 Apply AI schema module `0.15.0` before starting the new worker. The existing

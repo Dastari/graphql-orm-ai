@@ -32,7 +32,8 @@ production-ready behavior.
   immediately before each request, structured output, custom functions,
   built-in web/file/code/image request mapping, typed normalization, usage,
   citations, forward-compatible unknown events, and no hidden reasoning
-  persistence.
+  persistence. Exact released PNG/JPEG/WEBP/GIF and direct file inputs are
+  encoded inline without creating provider-persistent file IDs.
 - Exact provider request binding: an egress proof cannot be paired with a
   changed provider/model/session/run/payload estimate, every built-in or
   attachment capability requires its own matching authorized transfer, and an
@@ -106,6 +107,12 @@ production-ready behavior.
   fresh CAS reload, monotonic generations, reclaimable leases, confirmed
   idempotent exact-reference deletion, redacted audit, capped retry backoff,
   legacy interrupted-state handling, and concurrent-worker tests.
+- Provider-neutral exact attachment reopening with private-field request and
+  resolved payloads, deployment raw-byte/cardinality limits, current owner/
+  session/scope checks, released/clean/message-linked enforcement, object
+  length/hash validation, durable row recheck around storage I/O, complete
+  provider-context coverage, and post-I/O principal reauthorization before
+  transport becomes uncertain.
 - Secret-store contract plus explicit, read-only, allowlist-mapped environment
   bootstrap store. Runtime construction now requires a secret store.
 - Per-scope content-protection policy/envelope/protector contracts with a
@@ -196,9 +203,11 @@ production-ready behavior.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
-- Attachment quotas, derivative artifacts, provider-file/image resolution and
-  provider-side deletion. Core ticketed quarantine/scan/promotion/release and
-  expired/interrupted exact-reference cleanup are implemented.
+- Attachment quotas, derivative artifacts, retention purge, and
+  provider-persistent file upload/search/deletion. Core ticketed quarantine/
+  scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
+  image/file input, and expired/interrupted exact-reference cleanup are
+  implemented.
 - Top-level supervised coordinator for heartbeating long human approval waits,
   restart adoption, and exact provider continuation. The generic consequential
   executor and preview-builder seam are implemented; the read-only coordinator
@@ -208,10 +217,10 @@ production-ready behavior.
   linkage are implemented.
 - Provider HTTP adapters for Anthropic, xAI, Ollama, and explicitly profiled
   OpenAI-compatible endpoints.
-- OpenAI attachment/file upload resolution, background/webhooks, provider file
-  deletion, image/file input, and full built-in result normalization. The
-  current adapter intentionally rejects local opaque attachment IDs until that
-  pipeline exists.
+- OpenAI background/webhooks, provider-persistent file upload/search/deletion,
+  richer provider file-type preflight, and full built-in result normalization.
+  Exact inline image/file input is implemented and remains independently gated
+  by host MIME policy, budget, egress, current authority, and reopening limits.
 - Provider webhooks/background processing.
 - Authenticated GraphQL budget-policy management, usage reporting, pricing
   catalog validation, privileged uncertain-call recovery, retention/purge, and

@@ -103,13 +103,39 @@ storage prefixes from application code.
 
 ## Provider boundary
 
-Release is not provider egress permission. Before image/file model input, a
-future provider resolver must rehydrate current authority, reopen the exact
-released object, verify bytes/hash/MIME, and require a separately audited
-attachment/image egress manifest. `ModelInputBlock::Attachment` already binds
-ID, MIME, exact bytes and SHA-256; its capability manifest must contain the
-canonical user-provided source returned by
-`ModelInputBlock::attachment_egress_reference`, preventing content or metadata
-swaps before transport. The current OpenAI adapter continues to
-reject opaque local attachment IDs until that exact resolver/file-lifecycle
-slice lands.
+Release is not provider egress permission. Build each
+`ModelInputBlock::Attachment` from the released row's opaque ID, detected MIME,
+exact raw byte count, and lowercase SHA-256. Its separate `ImageAnalysis` or
+`ProviderFile` manifest must contain the canonical user-provided source from
+`ModelInputBlock::attachment_egress_reference`. The inference and capability
+manifests must cover the full estimated request, including Base64 expansion.
+
+Install the attachment service on `AiProviderCallExecutor` with
+`with_attachment_resolver` and deployment-owned
+`AiProviderAttachmentResolutionLimits`. The executor first obtains atomic
+budget and audited exact egress proofs, then supplies a freshly resolved
+principal to `AiProviderAttachmentResolver`. `OrmAiAttachmentService` reopens
+only a current same-owner, same-session, message-linked, released, clean,
+complete object. It verifies object metadata, bounded stream length and
+SHA-256, reloads the row after storage I/O, and fails if the row or object facts
+changed. The executor rehydrates and reauthorizes again after that potentially
+slow read and before marking budget capacity uncertain for transport.
+
+`AiResolvedProviderAttachment` redacts bytes from `Debug` and validates its
+request binding, but is not authorization proof by itself. Do not construct it
+from a caller-provided URL/key, persist it, cache it between turns, or expose it
+through GraphQL. `ProviderRequestContext` requires exact one-to-one coverage,
+so missing, duplicate, swapped, or extra content fails closed.
+
+The native OpenAI adapter sends supported image inputs as inline Responses
+`input_image` data URLs and other accepted files as inline `input_file` data.
+This follows OpenAI's [image input](https://developers.openai.com/api/docs/guides/images-vision)
+and [file input](https://developers.openai.com/api/docs/guides/file-inputs)
+formats while avoiding provider-persistent file IDs. PNG, JPEG, WEBP, and GIF
+are the adapter's accepted image MIME types; host scanning/acceptance must
+reject animated GIFs. Direct files must be under 50 MiB each, and all inline
+image/file content must be no more than 50 MiB combined. The executor's safer
+default is at most eight attachments, 25 MiB each, and 50 MiB total. Hosts
+should normally narrow those limits and MIME acceptance. Inline input creates
+no provider-side delete obligation; provider-file upload/search lifecycle
+remains a separate future capability.

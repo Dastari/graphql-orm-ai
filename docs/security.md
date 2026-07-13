@@ -119,8 +119,14 @@ message linkage. Scanner/policy/storage ambiguity remains closed; a released
 attachment still has no provider-egress authority. Provider input additionally
 requires a canonical user-provided source proof bound to the exact attachment
 ID, MIME type, byte count, SHA-256 checksum, provider, model, and capability;
-swapping any of those values invalidates the egress decision. See the
-[attachment guide](attachments.md).
+swapping any of those values invalidates the egress decision. Exact bytes are
+reopened only after budget and audited egress authorization under a freshly
+resolved principal. The ORM resolver checks current owner/session/scope and
+released/clean/linked state, validates the object, and detects row changes
+around storage I/O. The executor rehydrates and reauthorizes once more before
+transport. Resolved bytes are redacted from `Debug`, are not persisted or
+cached by the runtime, and require complete exact coverage in the provider
+context. See the [attachment guide](attachments.md).
 
 Attachment maintenance is a host-only delete capability over exact opaque
 references already selected by durable lifecycle state. Each row is freshly

@@ -5,8 +5,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use agql_auth::{AuthPrincipal, Clock};
+use agql_auth::{AuthPrincipal, Clock, ResolvedPrincipal};
 use async_trait::async_trait;
+use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
@@ -30,7 +31,8 @@ use crate::{
     AiAttachmentCleanupService, AiAttachmentConnection, AiAttachmentEdge, AiAttachmentScanRequest,
     AiAttachmentScanVerdict, AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService,
     AiAttachmentUploadTicket, AiAttachmentView, AiContentProtectionPolicy,
-    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiScope, AiSessionAction,
+    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiProviderAttachmentRequest,
+    AiProviderAttachmentResolver, AiResolvedProviderAttachment, AiScope, AiSessionAction,
     AiSessionId, AiSessionWakeup, ContentProtectionContext, CreateAiAttachmentUploadInput,
     valid_mime, valid_safe_reference, valid_sha256,
 };
@@ -1329,6 +1331,92 @@ impl AiAttachmentCleanupService for OrmAiAttachmentService {
 }
 
 #[async_trait]
+impl AiProviderAttachmentResolver for OrmAiAttachmentService {
+    async fn resolve_for_provider(
+        &self,
+        principal: &ResolvedPrincipal,
+        session_id: AiSessionId,
+        scope: &AiScope,
+        request: &AiProviderAttachmentRequest,
+    ) -> Result<AiResolvedProviderAttachment, AiError> {
+        let session = self
+            .visible_session(principal.principal(), session_id, AiSessionAction::Read)
+            .await?;
+        if session_scope(&session) != *scope {
+            return Err(AiError::Forbidden);
+        }
+        let attachment = AiAttachmentRecord::find_by_id(&self.database, &request.attachment_id())
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        if !is_attachment_owner(principal.principal(), &attachment)
+            || attachment.session_id != session_id.0
+            || attachment.message_id.is_none()
+            || attachment.quarantine_state != "released"
+            || attachment.scan_state != "clean"
+            || attachment.processing_state != "complete"
+            || attachment.deleted_at.is_some()
+            || attachment.detected_mime.as_deref() != Some(request.mime())
+            || attachment
+                .byte_count
+                .and_then(|value| u64::try_from(value).ok())
+                != Some(request.byte_count())
+            || attachment.sha256.as_deref() != Some(request.sha256())
+            || attachment.quarantine_blob_reference.is_some()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let blob_reference = attachment
+            .blob_reference
+            .as_deref()
+            .ok_or(AiError::ReauthorizationFailed)?;
+        let blob = self
+            .blob_store
+            .get_blob(blob_reference)
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?;
+        if blob.key != blob_reference
+            || blob.metadata.as_ref().is_some_and(|metadata| {
+                metadata.key != blob_reference
+                    || metadata
+                        .size_bytes
+                        .is_some_and(|size| size != request.byte_count())
+                    || metadata
+                        .sha256_hex
+                        .as_deref()
+                        .is_some_and(|sha256| sha256 != request.sha256())
+            })
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let bytes = collect_exact_provider_attachment(blob.body, request.byte_count()).await?;
+        let current = AiAttachmentRecord::find_by_id(&self.database, &request.attachment_id())
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::ReauthorizationFailed)?;
+        if current.row_version != attachment.row_version
+            || current.owner_principal_kind != attachment.owner_principal_kind
+            || current.owner_subject != attachment.owner_subject
+            || current.session_id != attachment.session_id
+            || current.blob_reference != attachment.blob_reference
+            || current.message_id != attachment.message_id
+            || current.safe_filename != attachment.safe_filename
+            || current.detected_mime != attachment.detected_mime
+            || current.byte_count != attachment.byte_count
+            || current.sha256 != attachment.sha256
+            || current.quarantine_state != "released"
+            || current.scan_state != "clean"
+            || current.processing_state != "complete"
+            || current.quarantine_blob_reference.is_some()
+            || current.deleted_at.is_some()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        AiResolvedProviderAttachment::new(request.clone(), attachment.safe_filename, bytes)
+    }
+}
+
+#[async_trait]
 impl AiAttachmentUploadService for OrmAiAttachmentService {
     async fn upload(
         &self,
@@ -1640,6 +1728,32 @@ fn is_cleanup_eligible(record: &AiAttachmentRecord, now: i64) -> bool {
             _ => false,
         },
     }
+}
+
+async fn collect_exact_provider_attachment(
+    body: StorageByteStream,
+    expected_bytes: u64,
+) -> Result<Arc<[u8]>, AiError> {
+    if body
+        .size_hint()
+        .is_some_and(|size_hint| size_hint != expected_bytes)
+    {
+        return Err(AiError::ReauthorizationFailed);
+    }
+    let capacity = usize::try_from(expected_bytes).map_err(|_| AiError::PersistenceFailed)?;
+    let mut collected = Vec::with_capacity(capacity);
+    let mut stream = body.into_inner();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AiError::PersistenceFailed)?;
+        if collected.len().saturating_add(chunk.len()) > capacity {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        collected.extend_from_slice(&chunk);
+    }
+    if collected.len() != capacity {
+        return Err(AiError::ReauthorizationFailed);
+    }
+    Ok(Arc::from(collected))
 }
 
 fn sanitize_filename(value: &str, maximum_bytes: usize) -> Result<String, AiError> {

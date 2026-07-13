@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use agql_auth::AuthPrincipal;
+use agql_auth::{AuthPrincipal, ResolvedPrincipal};
 use async_graphql::{Context, ErrorExtensions, InputObject, Object, SimpleObject};
 use async_trait::async_trait;
 use graphql_orm::graphql::pagination::{
@@ -11,9 +11,10 @@ use graphql_orm::graphql::pagination::{
 };
 use graphql_orm_storage::StorageByteStream;
 use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{AiAccessDecision, AiError, AiScope, AiSessionId};
+use crate::{AiAccessDecision, AiError, AiScope, AiSessionId, ModelInputBlock};
 
 /// Bounded client-visible attachment metadata.
 ///
@@ -441,6 +442,189 @@ pub trait AiAttachmentCleanupService: Send + Sync {
     /// Returns a safe persistence error when candidates cannot be loaded,
     /// claimed, or durably finalized.
     async fn cleanup_once(&self) -> Result<AiAttachmentCleanupReport, AiError>;
+}
+
+/// Exact released attachment metadata requested by a provider turn.
+///
+/// This value contains no storage reference. It is not authorization proof;
+/// a trusted [`AiProviderAttachmentResolver`] must reopen the current durable
+/// row and object under fresh authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiProviderAttachmentRequest {
+    attachment_id: Uuid,
+    mime: String,
+    byte_count: u64,
+    sha256: String,
+}
+
+impl AiProviderAttachmentRequest {
+    /// AI-owned attachment identifier.
+    pub const fn attachment_id(&self) -> Uuid {
+        self.attachment_id
+    }
+
+    /// Exact scanner-detected MIME requested by the provider plan.
+    pub fn mime(&self) -> &str {
+        &self.mime
+    }
+
+    /// Exact verified raw bytes requested by the provider plan.
+    pub const fn byte_count(&self) -> u64 {
+        self.byte_count
+    }
+
+    /// Exact lowercase SHA-256 requested by the provider plan.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Canonical redacted source reference used by the egress manifest.
+    pub fn egress_reference(&self) -> String {
+        format!(
+            "v1:{}:{}:{}:{}",
+            self.attachment_id, self.byte_count, self.mime, self.sha256
+        )
+    }
+}
+
+impl TryFrom<&ModelInputBlock> for AiProviderAttachmentRequest {
+    type Error = AiError;
+
+    fn try_from(block: &ModelInputBlock) -> Result<Self, Self::Error> {
+        let ModelInputBlock::Attachment {
+            attachment_id,
+            mime,
+            byte_count,
+            sha256,
+        } = block
+        else {
+            return Err(AiError::InvalidInput(
+                "provider attachment request requires an attachment block".to_owned(),
+            ));
+        };
+        let attachment_id = Uuid::parse_str(attachment_id).map_err(|_| {
+            AiError::InvalidInput("invalid provider attachment identifier".to_owned())
+        })?;
+        if !valid_mime(mime)
+            || *byte_count == 0
+            || *byte_count > 100 * 1024 * 1024
+            || !valid_sha256(sha256)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid provider attachment metadata".to_owned(),
+            ));
+        }
+        Ok(Self {
+            attachment_id,
+            mime: mime.clone(),
+            byte_count: *byte_count,
+            sha256: sha256.clone(),
+        })
+    }
+}
+
+/// Exact attachment bytes reopened for one provider turn.
+///
+/// Construction validates content length and SHA-256 against the request, but
+/// does not itself prove owner/session access, released state, current policy,
+/// or egress authorization. Those guarantees come from the trusted resolver,
+/// provider executor, and exact manifest proof together.
+#[derive(Clone)]
+pub struct AiResolvedProviderAttachment {
+    request: AiProviderAttachmentRequest,
+    safe_filename: String,
+    bytes: Arc<[u8]>,
+}
+
+impl AiResolvedProviderAttachment {
+    /// Constructs an exact resolved payload after a trusted resolver reopens
+    /// and verifies the durable object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidInput`] for an unsafe filename or when bytes
+    /// do not exactly match the requested byte count and SHA-256.
+    pub fn new(
+        request: AiProviderAttachmentRequest,
+        safe_filename: impl Into<String>,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, AiError> {
+        let safe_filename = safe_filename.into();
+        let bytes = bytes.into();
+        let filename_is_safe = valid_safe_reference(&safe_filename, 255)
+            && safe_filename != "."
+            && safe_filename != ".."
+            && !safe_filename.chars().any(char::is_control)
+            && !safe_filename
+                .bytes()
+                .any(|byte| matches!(byte, b'/' | b'\\' | b':'));
+        let observed_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let observed_sha256 = hex::encode(Sha256::digest(bytes.as_ref()));
+        if !filename_is_safe
+            || observed_count != request.byte_count
+            || observed_sha256 != request.sha256
+        {
+            return Err(AiError::InvalidInput(
+                "resolved attachment does not match requested content".to_owned(),
+            ));
+        }
+        Ok(Self {
+            request,
+            safe_filename,
+            bytes,
+        })
+    }
+
+    /// Exact request metadata bound to these bytes.
+    pub const fn request(&self) -> &AiProviderAttachmentRequest {
+        &self.request
+    }
+
+    /// Sanitized display filename used only as provider file metadata.
+    pub fn safe_filename(&self) -> &str {
+        &self.safe_filename
+    }
+
+    /// Sensitive attachment bytes for an authorized provider adapter.
+    ///
+    /// Callers must not log, persist, cache, or expose this slice outside the
+    /// exact provider transport authorized by its request context.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for AiResolvedProviderAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiResolvedProviderAttachment")
+            .field("request", &self.request)
+            .field("safe_filename", &self.safe_filename)
+            .field("bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Fresh-authority boundary that reopens released attachment bytes.
+///
+/// Implementations must recheck owner, session, scope, released/clean/linked
+/// state, exact metadata, and the exact current object. They must not return a
+/// storage key, signed URL, or provider-persistent file reference.
+#[async_trait]
+pub trait AiProviderAttachmentResolver: Send + Sync {
+    /// Resolves one exact attachment for an imminent provider call.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale principal, authorization/state mismatch,
+    /// missing content, size/hash mismatch, or storage ambiguity.
+    async fn resolve_for_provider(
+        &self,
+        principal: &ResolvedPrincipal,
+        session_id: AiSessionId,
+        scope: &AiScope,
+        request: &AiProviderAttachmentRequest,
+    ) -> Result<AiResolvedProviderAttachment, AiError>;
 }
 
 /// Composable attachment query root.

@@ -1,6 +1,7 @@
 use futures::TryStreamExt;
 use graphql_orm_ai::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -183,11 +184,12 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
     let session_id = AiSessionId::new();
     let run_id = AiRunId::new();
     let attachment_id = Uuid::new_v4();
-    let sha256 = "a".repeat(64);
+    let attachment_bytes = b"must-not-appear-in-provider-context-debug".to_vec();
+    let sha256 = hex::encode(Sha256::digest(&attachment_bytes));
     let attachment_block = ModelInputBlock::Attachment {
         attachment_id: attachment_id.to_string(),
         mime: "image/png".to_owned(),
-        byte_count: 1_024,
+        byte_count: attachment_bytes.len() as u64,
         sha256: sha256.clone(),
     };
     let exact_reference = attachment_block
@@ -233,7 +235,21 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
     )
     .expect("inference proof should bind")
     .with_authorized_transfer(image.clone(), proof(&image))
-    .expect("exact image proof should bind");
+    .expect("exact image proof should bind")
+    .with_resolved_attachments(
+        &attachment_request,
+        vec![
+            AiResolvedProviderAttachment::new(
+                AiProviderAttachmentRequest::try_from(&attachment_request.input[0])
+                    .expect("attachment request should parse"),
+                "test.png",
+                attachment_bytes,
+            )
+            .expect("attachment bytes should bind"),
+        ],
+    )
+    .expect("resolved attachment should bind");
+    assert!(!format!("{context:?}").contains("must-not-appear-in-provider-context-debug"));
     let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted {
         response_id: Some("mock".to_owned()),
     }]);

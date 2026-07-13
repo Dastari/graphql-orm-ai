@@ -5,7 +5,8 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use agql_auth::{
-    AccessTokenMetadata, AuthPrincipal, AuthUser, Clock, FixedClock, SessionContext, SystemClock,
+    AccessTokenMetadata, AuthPrincipal, AuthUser, Clock, FixedClock, ResolvedPrincipal,
+    SessionContext, SystemClock,
 };
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
@@ -17,6 +18,7 @@ use graphql_orm_storage::{
     StorageBackend, StorageByteStream, StorageError, collect_storage_stream, sha256_hex,
 };
 use secrecy::{ExposeSecret, SecretString};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 struct AllowAll;
@@ -404,7 +406,7 @@ async fn ticket_is_owner_bound_scanned_promoted_released_and_message_linked() {
             &owner,
             ticket.attachment().id,
             SecretString::from(ticket.secret().expose_secret().to_owned()),
-            StorageByteStream::from_bytes(bytes),
+            StorageByteStream::from_bytes(bytes.clone()),
         )
         .await
         .expect("clean exact body should become ready");
@@ -443,6 +445,59 @@ async fn ticket_is_owner_bound_scanned_promoted_released_and_message_linked() {
         .await
         .expect("released owned attachment should link through normal message mutation");
     assert!(!sent.message_id.is_nil());
+    let request_block = ModelInputBlock::Attachment {
+        attachment_id: released.id.to_string(),
+        mime: "image/png".to_owned(),
+        byte_count: bytes.len() as u64,
+        sha256: sha256_hex(&bytes),
+    };
+    let request = AiProviderAttachmentRequest::try_from(&request_block)
+        .expect("released attachment request should validate");
+    let scope = AiScope::new("collection", "54").with_tenant_id("tenant-1");
+    let resolved_owner =
+        ResolvedPrincipal::new(owner.reference(), owner.clone(), OffsetDateTime::now_utc())
+            .expect("owner principal should resolve");
+    let resolved = fixture
+        .attachment_service
+        .resolve_for_provider(&resolved_owner, AiSessionId(session.id), &scope, &request)
+        .await
+        .expect("linked released bytes should reopen exactly for their owner");
+    assert_eq!(resolved.request(), &request);
+    assert_eq!(resolved.safe_filename(), "example.png");
+    assert_eq!(resolved.bytes(), bytes);
+    let resolved_stranger = ResolvedPrincipal::new(
+        stranger.reference(),
+        stranger.clone(),
+        OffsetDateTime::now_utc(),
+    )
+    .expect("stranger principal should resolve");
+    assert!(matches!(
+        fixture
+            .attachment_service
+            .resolve_for_provider(
+                &resolved_stranger,
+                AiSessionId(session.id),
+                &scope,
+                &request,
+            )
+            .await,
+        Err(AiError::NotFound | AiError::ReauthorizationFailed)
+    ));
+    {
+        let mut blobs = fixture.blobs.blobs.lock().expect("blob lock");
+        let stored = blobs
+            .values_mut()
+            .next()
+            .expect("released object should still exist");
+        stored[0] ^= 0xff;
+    }
+    assert!(matches!(
+        fixture
+            .attachment_service
+            .resolve_for_provider(&resolved_owner, AiSessionId(session.id), &scope, &request)
+            .await,
+        Err(AiError::ReauthorizationFailed)
+    ));
     assert!(matches!(
         fixture
             .attachment_service

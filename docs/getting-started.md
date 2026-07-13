@@ -50,7 +50,12 @@ full-object scanner, separate fail-closed acceptance policy, and clock. Compose
 the attachment roots for ticket/finalization metadata, and route large bytes
 through a host-owned authenticated streaming handler using
 `AiAttachmentUploadService`; never accept file bytes in ordinary GraphQL JSON.
-See the [attachment guide](attachments.md).
+Install the same service on `AiProviderCallExecutor` with
+`with_attachment_resolver` only when provider image/file input is enabled, and
+set deployment-owned reopening limits. This does not authorize disclosure:
+each exact input still needs atomic budget proof plus separate audited
+inference and attachment capability manifests. See the
+[attachment guide](attachments.md).
 
 For private routed/direct targets, use one cloned
 `AiRemoteAuthenticatedGraphqlAdapter` as both request-context factory and
@@ -84,6 +89,8 @@ lower-level concrete provider path is deliberately explicit:
    `OrmAiLiveDeltaService` with `with_live_delta_sink`. Use the same runtime,
    run service, current-principal/access/protection boundaries, and validated
    coalescing/persistence limits. The default executor emits no live events.
+   Attachment turns also require explicitly installing a trusted
+   `AiProviderAttachmentResolver`; without it they fail before transport.
 3. If the provider result is terminal and has no application-tool calls,
    persist it with `OrmAiProviderOutputService::persist`. This reauthorizes
    again, protects content, writes windowable blocks and a session event, and
@@ -122,8 +129,8 @@ ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md).
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
-[implementation status](implementation-status.md). Provider attachment
-resolution/retention, attachment cleanup/derivatives, budget/usage GraphQL
+[implementation status](implementation-status.md). Provider-persistent file
+upload/search/deletion, attachment quotas/derivatives, budget/usage GraphQL
 management, live-delta retention, provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in

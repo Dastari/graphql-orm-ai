@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use crate::{
-    AiProvider, AiSecretStore, ModelBuiltinTool, ModelContinuation, ModelInputBlock, ModelRequest,
-    ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
-    ProviderRequestContext, SecretRef,
+    AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
+    ModelInputBlock, ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent,
+    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
 };
 
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
@@ -140,12 +141,17 @@ impl OpenAiProvider {
         Ok(headers)
     }
 
-    fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
+    fn request_body(
+        &self,
+        request: &ModelRequest,
+        context: &ProviderRequestContext,
+    ) -> Result<Value, ProviderError> {
         if request.input.is_empty() {
             return Err(ProviderError::InvalidRequest);
         }
         let mut content = Vec::with_capacity(request.input.len());
         let mut tool_outputs = Vec::new();
+        let mut direct_input_bytes = 0_u64;
         for block in &request.input {
             match block {
                 ModelInputBlock::Text { text } => {
@@ -157,12 +163,44 @@ impl OpenAiProvider {
                         "text": value.to_string()
                     }));
                 }
-                ModelInputBlock::Attachment { .. } => {
-                    // Attachment IDs are local opaque references. A separate
-                    // authorized upload/resolution pipeline must turn them into
-                    // provider file/image inputs before this adapter accepts
-                    // them.
-                    return Err(ProviderError::Unsupported);
+                ModelInputBlock::Attachment { mime, .. } => {
+                    let attachment_request = AiProviderAttachmentRequest::try_from(block)
+                        .map_err(|_| ProviderError::InvalidRequest)?;
+                    let attachment = context.resolved_attachment(&attachment_request)?;
+                    let is_supported_image = matches!(
+                        mime.as_str(),
+                        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                    );
+                    if mime.starts_with("image/") && !is_supported_image {
+                        return Err(ProviderError::Unsupported);
+                    }
+                    if !mime.starts_with("image/")
+                        && attachment_request.byte_count() >= 50 * 1024 * 1024
+                    {
+                        return Err(ProviderError::Unsupported);
+                    }
+                    direct_input_bytes = direct_input_bytes
+                        .checked_add(attachment_request.byte_count())
+                        .ok_or(ProviderError::InvalidRequest)?;
+                    if direct_input_bytes > 50 * 1024 * 1024 {
+                        return Err(ProviderError::Unsupported);
+                    }
+                    let encoded =
+                        base64::engine::general_purpose::STANDARD.encode(attachment.bytes());
+                    let data_url = format!("data:{mime};base64,{encoded}");
+                    if is_supported_image {
+                        content.push(json!({
+                            "type": "input_image",
+                            "image_url": data_url,
+                            "detail": "auto"
+                        }));
+                    } else {
+                        content.push(json!({
+                            "type": "input_file",
+                            "filename": attachment.safe_filename(),
+                            "file_data": data_url
+                        }));
+                    }
                 }
                 ModelInputBlock::ToolResult {
                     call_id, output, ..
@@ -238,8 +276,8 @@ impl AiProvider for OpenAiProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             streaming: true,
-            image_input: false,
-            file_input: false,
+            image_input: true,
+            file_input: true,
             custom_tools: true,
             parallel_tool_calls: false,
             structured_output: true,
@@ -266,7 +304,7 @@ impl AiProvider for OpenAiProvider {
         {
             return Err(ProviderError::EgressDenied);
         }
-        let body = self.request_body(&request)?;
+        let body = self.request_body(&request, &context)?;
         let secret = self
             .secrets
             .resolve(&self.config.credential)
@@ -714,6 +752,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::TryStreamExt;
     use secrecy::SecretString;
+    use sha2::Digest;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -905,8 +944,9 @@ mod tests {
             secrets.clone(),
         )
         .expect("default provider should build");
+        let provider_context = context("test-model", 1_000);
         assert!(matches!(
-            provider.request_body(&request),
+            provider.request_body(&request, &provider_context),
             Err(ProviderError::Unsupported)
         ));
 
@@ -915,12 +955,91 @@ mod tests {
         let provider =
             OpenAiProvider::new(config, secrets).expect("retained-response provider should build");
         let body = provider
-            .request_body(&request)
+            .request_body(&request, &provider_context)
             .expect("explicitly retained continuation should map");
         assert_eq!(body["previous_response_id"], "resp-1");
         assert_eq!(body["input"][0]["type"], "function_call_output");
         assert_eq!(body["input"][0]["call_id"], "call-1");
         assert_eq!(body["store"], true);
+    }
+
+    #[test]
+    fn exact_resolved_attachments_map_to_inline_image_and_file_inputs() {
+        let reference =
+            SecretRef::parse("openai/attachment-test").expect("test secret reference should parse");
+        let provider = OpenAiProvider::new(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+        )
+        .expect("provider should build");
+        let image_bytes = b"synthetic-png".to_vec();
+        let file_bytes = b"synthetic text file".to_vec();
+        let image_block = ModelInputBlock::Attachment {
+            attachment_id: uuid::Uuid::new_v4().to_string(),
+            mime: "image/png".to_owned(),
+            byte_count: image_bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(&image_bytes)),
+        };
+        let file_block = ModelInputBlock::Attachment {
+            attachment_id: uuid::Uuid::new_v4().to_string(),
+            mime: "text/plain".to_owned(),
+            byte_count: file_bytes.len() as u64,
+            sha256: hex::encode(sha2::Sha256::digest(&file_bytes)),
+        };
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec![],
+            input: vec![image_block.clone(), file_block.clone()],
+            continuation: None,
+            tools: vec![],
+            builtin_tools: vec![],
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+        let resolved = vec![
+            crate::AiResolvedProviderAttachment::new(
+                AiProviderAttachmentRequest::try_from(&image_block)
+                    .expect("image attachment should parse"),
+                "image.png",
+                image_bytes.clone(),
+            )
+            .expect("image bytes should bind"),
+            crate::AiResolvedProviderAttachment::new(
+                AiProviderAttachmentRequest::try_from(&file_block)
+                    .expect("file attachment should parse"),
+                "notes.txt",
+                file_bytes.clone(),
+            )
+            .expect("file bytes should bind"),
+        ];
+        let provider_context = context("test-model", 100_000)
+            .with_resolved_attachments(&request, resolved)
+            .expect("resolved attachments should bind");
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("inline attachments should map");
+
+        let content = body["input"][0]["content"]
+            .as_array()
+            .expect("user content should be an array");
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[0]["detail"], "auto");
+        assert_eq!(
+            content[0]["image_url"],
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(image_bytes)
+            )
+        );
+        assert_eq!(content[1]["type"], "input_file");
+        assert_eq!(content[1]["filename"], "notes.txt");
+        assert_eq!(
+            content[1]["file_data"],
+            format!(
+                "data:text/plain;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(file_bytes)
+            )
+        );
     }
 
     #[tokio::test]
