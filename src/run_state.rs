@@ -33,6 +33,41 @@ pub enum AiRunState {
 }
 
 impl AiRunState {
+    /// Stable durable storage value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Leased => "leased",
+            Self::Running => "running",
+            Self::WaitingApproval => "waiting_approval",
+            Self::WaitingTool => "waiting_tool",
+            Self::WaitingReauth => "waiting_reauth",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::RecoveryRequired => "recovery_required",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn from_persisted(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "leased" => Some(Self::Leased),
+            "running" => Some(Self::Running),
+            "waiting_approval" => Some(Self::WaitingApproval),
+            "waiting_tool" => Some(Self::WaitingTool),
+            "waiting_reauth" => Some(Self::WaitingReauth),
+            "retry_scheduled" => Some(Self::RetryScheduled),
+            "recovery_required" => Some(Self::RecoveryRequired),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
     /// Returns whether no further worker transition is allowed.
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)

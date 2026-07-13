@@ -28,6 +28,9 @@ pub enum AiError {
     /// External disclosure was denied.
     #[error("AI data egress denied")]
     EgressDenied,
+    /// No applicable atomic budget had enough capacity for the operation.
+    #[error("AI budget denied")]
+    BudgetDenied,
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),
@@ -59,6 +62,7 @@ impl AiError {
             Self::Forbidden => "AI_FORBIDDEN",
             Self::RecentMfaRequired => "AI_RECENT_MFA_REQUIRED",
             Self::EgressDenied => "AI_EGRESS_DENIED",
+            Self::BudgetDenied => "AI_BUDGET_DENIED",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",

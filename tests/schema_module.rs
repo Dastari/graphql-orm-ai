@@ -1,5 +1,5 @@
 use graphql_orm::graphql::orm::SchemaModuleCatalog;
-use graphql_orm_ai::{AI_TABLE_NAMESPACE, AiSchemaModule};
+use graphql_orm_ai::{AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule};
 
 #[test]
 fn ai_schema_module_owns_only_reserved_namespace_tables() {
@@ -7,7 +7,8 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
     let catalog = SchemaModuleCatalog::compose(&[&module]).expect("AI module should validate");
 
     assert_eq!(catalog.modules().len(), 1);
-    assert_eq!(catalog.entities().len(), 35);
+    assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
+    assert_eq!(catalog.entities().len(), 36);
     assert!(
         catalog
             .entities()
@@ -21,6 +22,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .filter(|entity| matches!(
                 entity.table_name,
                 "graphql_orm_ai_run_attempts"
+                    | "graphql_orm_ai_run_attempt_outcomes"
                     | "graphql_orm_ai_skill_versions"
                     | "graphql_orm_ai_usage_entries"
                     | "graphql_orm_ai_audit_events"
@@ -29,4 +31,40 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .all(|entity| entity.append_only)
     );
     assert_eq!(catalog.modules()[0].restore_hooks.len(), 4);
+
+    let schema = catalog.schema_model();
+    let counter = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_budget_counters")
+        .expect("budget counter table should exist");
+    assert!(
+        counter.composite_unique_indexes.iter().any(|columns| {
+            columns == &["budget_policy_id".to_owned(), "period_key".to_owned()]
+        })
+    );
+    let reservation = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_budget_reservations")
+        .expect("budget reservation table should exist");
+    assert!(reservation.composite_unique_indexes.iter().any(|columns| {
+        columns
+            == &[
+                "principal_kind".to_owned(),
+                "principal_subject".to_owned(),
+                "idempotency_key".to_owned(),
+            ]
+    }));
+    let attempt_outcome = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_run_attempt_outcomes")
+        .expect("run attempt outcome table should exist");
+    assert!(
+        attempt_outcome
+            .columns
+            .iter()
+            .any(|column| column.name == "attempt_id" && column.is_unique)
+    );
 }

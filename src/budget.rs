@@ -82,8 +82,8 @@ pub struct AiBudgetReservationRequest {
     pub expires_at: OffsetDateTime,
 }
 
-/// Persistable exact reservation returned by an atomic budget service.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Exact durable reservation returned by an atomic budget service.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiBudgetReservation {
     id: AiBudgetReservationId,
     run_id: AiRunId,
@@ -93,6 +93,7 @@ pub struct AiBudgetReservation {
     model: String,
     pricing_policy_version: String,
     reserved: AiBudgetAmounts,
+    actual: Option<AiBudgetAmounts>,
     state: AiBudgetReservationState,
     expires_at: OffsetDateTime,
 }
@@ -100,6 +101,10 @@ pub struct AiBudgetReservation {
 impl AiBudgetReservation {
     /// Creates a reserved result after an implementation has atomically updated
     /// every applicable counter.
+    ///
+    /// This constructor performs no persistence. It exists for trusted custom
+    /// [`AiBudgetService`] implementations; constructing the value alone does
+    /// not prove that counters were reserved.
     ///
     /// # Errors
     ///
@@ -140,9 +145,41 @@ impl AiBudgetReservation {
             model,
             pricing_policy_version,
             reserved,
+            actual: None,
             state: AiBudgetReservationState::Reserved,
             expires_at,
         })
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persisted(
+        id: AiBudgetReservationId,
+        run_id: AiRunId,
+        attempt_id: Uuid,
+        lease_generation: i64,
+        provider_kind: ProviderKind,
+        model: impl Into<String>,
+        pricing_policy_version: impl Into<String>,
+        reserved: AiBudgetAmounts,
+        actual: Option<AiBudgetAmounts>,
+        state: AiBudgetReservationState,
+        expires_at: OffsetDateTime,
+    ) -> Result<Self, AiError> {
+        let mut reservation = Self::new_reserved(
+            id,
+            run_id,
+            attempt_id,
+            lease_generation,
+            provider_kind,
+            model,
+            pricing_policy_version,
+            reserved,
+            expires_at,
+        )?;
+        reservation.actual = actual;
+        reservation.state = state;
+        Ok(reservation)
     }
 
     /// Returns the durable reservation identifier.
@@ -153,6 +190,21 @@ impl AiBudgetReservation {
     /// Returns the exact reserved capacity.
     pub const fn reserved(&self) -> AiBudgetAmounts {
         self.reserved
+    }
+
+    /// Returns authoritative usage recorded during reconciliation, when known.
+    pub const fn actual(&self) -> Option<AiBudgetAmounts> {
+        self.actual
+    }
+
+    /// Returns the durable reservation state.
+    pub const fn state(&self) -> AiBudgetReservationState {
+        self.state
+    }
+
+    /// Returns the deadline for starting the bound provider call.
+    pub const fn expires_at(&self) -> OffsetDateTime {
+        self.expires_at
     }
 
     /// Returns the immutable pricing-policy version.
@@ -261,10 +313,30 @@ pub struct AiBudgetReconciliation {
     pub outcome: AiBudgetReconciliationOutcome,
 }
 
+/// Durable result of an idempotent budget reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AiBudgetReconciliationResult {
+    /// Reservation after the transaction committed.
+    pub reservation: AiBudgetReservation,
+    /// Capacity moved from reserved to committed counters.
+    pub committed: AiBudgetAmounts,
+    /// Proven unused capacity released from reserved counters.
+    pub released: AiBudgetAmounts,
+    /// Capacity still held because external execution is uncertain.
+    pub held: AiBudgetAmounts,
+}
+
 /// Transactional budget boundary implemented with `graphql-orm` operations.
 #[async_trait]
 pub trait AiBudgetService: Send + Sync {
     /// Atomically checks and reserves every applicable budget counter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when principal freshness, scope/fence binding,
+    /// idempotency, configuration, persistence, or any applicable capacity
+    /// check fails.
     async fn reserve(
         &self,
         principal: &ResolvedPrincipal,
@@ -272,9 +344,19 @@ pub trait AiBudgetService: Send + Sync {
     ) -> Result<AiBudgetReservation, AiError>;
 
     /// Reconciles actual usage or retains capacity for uncertain recovery.
+    ///
+    /// Orchestration must durably mark a reservation uncertain immediately
+    /// before handing its already-authorized proof to provider transport. This
+    /// prevents an unobserved/ambiguous call from later taking the ordinary
+    /// unused-release path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale principal/fence state, a conflicting replay,
+    /// malformed usage, missing counters, or persistence failure.
     async fn reconcile(
         &self,
         principal: &ResolvedPrincipal,
         reconciliation: AiBudgetReconciliation,
-    ) -> Result<(), AiError>;
+    ) -> Result<AiBudgetReconciliationResult, AiError>;
 }

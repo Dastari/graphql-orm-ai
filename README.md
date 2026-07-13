@@ -8,13 +8,16 @@ keeping application authorization, disclosure policy, approvals, spend, and
 durable history under server control.
 
 This crate is an active, unpublished pre-release. The concrete session,
-configuration, subscription, provider, and security foundations compile and
-are tested; the durable orchestration worker and several operational adapters
-listed below are still being implemented.
+configuration, subscription, fenced worker, provider-turn, protected
+read-only application-tool/result, bounded continuation, protected output, and
+security foundations compile and are tested. Protected proposal review and
+exact one-shot approval lifecycles also compile and are tested. A
+crash-resumable top-level loop, consequential tool executor, and several
+operational adapters listed below are still being implemented.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 35 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 36 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
   budgets, usage, egress, audit, skills, and restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
@@ -38,8 +41,22 @@ listed below are still being implemented.
 - Structured AI-owned proposals and exact one-shot approval envelopes bound to
   resource versions, policy/auth state, actor/delegation, target/schema/
   document/projection, and a server-generated canonical action preview.
+- ORM-backed, authenticated proposal/approval GraphQL lifecycles: proposal
+  acceptance changes only protected AI-owned staging data; approval decisions
+  are CAS-bound and optional-recent-MFA-gated; exact consumption rehydrates the
+  original actor, advances the run fence, and still grants no resolver
+  authority.
 - Fenced run/attempt contracts, fail-closed startup, and restore reconciliation
   that treats uncertain external effects as uncertain rather than replayable.
+- A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
+  immutable attempt outcomes, and recovery; plus a mock-tested provider turn
+  that durably audits egress before transport and persists protected assistant
+  output through the exact current fence.
+- A deliberately narrow read-only application-tool path that persists
+  protected arguments before ordinary resolver execution, applies static
+  disclosure, separately authorizes and audits result egress, persists the
+  protected result, renews the exact run fence, and creates bounded exact
+  provider continuations.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -148,15 +165,21 @@ full attachment storage/scanning pipeline is not production-ready yet.
 ## Current maturity
 
 Implemented and tested foundations include ORM-backed SQLite/PostgreSQL
-session and configuration services, resumable session events, OpenAI and mock
-provider contracts, content protection, egress proofs, logical GraphQL target
-contracts, static disclosure validation, atomic budget proof types, exact
-approval binding, proposal schemas, fenced state transitions, and restore
-planning.
+session and configuration services, resumable session events, durable run
+claim/heartbeat/retry/recovery, OpenAI and mock provider contracts, immutable
+egress audit, protected windowed assistant-output persistence, content
+protection, egress proofs, logical GraphQL target contracts, static disclosure
+validation, an atomic ORM-backed budget reservation/reconciliation service,
+exact approval binding, proposal schemas, fenced state transitions, and restore
+planning. Protected proposal creation/review/outcome linkage and canonical-
+preview approval request/decision/revocation/one-shot consumption are also
+implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include the durable orchestration worker, transactional
-budget counter service, approval/proposal/usage GraphQL lifecycles, attachment
-pipeline, production mutable secret stores/keyrings, other provider adapters,
+Production blockers include the durable multi-turn registered-tool/approval
+coordinator, the consequential tool executor that uses consumed approvals,
+live delta coalescing, authenticated budget-policy/usage GraphQL lifecycles,
+per-item proposal review, attachment pipeline, production mutable secret
+stores/keyrings, other provider adapters,
 remote delegated credential implementation, generated resolver disclosure
 metadata, Ollama/OpenAI-compatible and allowlisted installed local-harness
 drivers, and Docker-owned PostgreSQL parity testing. Details live in

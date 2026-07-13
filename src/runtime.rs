@@ -127,6 +127,15 @@ impl AiToolExecutionResult {
     pub fn authorization_state_digest(&self) -> &str {
         &self.authorization_state_digest
     }
+
+    /// Builds the bounded provider-facing result. Host audit references remain
+    /// local and are deliberately excluded.
+    pub fn model_output(&self) -> serde_json::Value {
+        serde_json::json!({
+            "data": self.response.data,
+            "errorCodes": self.response.error_codes,
+        })
+    }
 }
 
 impl AiRuntime {
@@ -177,6 +186,17 @@ impl AiRuntime {
         &self,
     ) -> &Arc<dyn AiContentProtectionPolicyResolver> {
         &self.content_protection_policy_resolver
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn resolve_current_principal(
+        &self,
+        reference: &PrincipalReference,
+    ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
+        self.principal_resolver
+            .resolve(reference)
+            .await
+            .map_err(|_| AiError::ReauthorizationFailed)
     }
 
     /// Applies deployment hard limits and scope policy to an exact egress
@@ -233,6 +253,25 @@ impl AiRuntime {
             .execute(principal_reference, descriptor, request)
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?;
+        if response.error_codes.len() > 32
+            || response.error_codes.iter().any(|code| {
+                code.is_empty()
+                    || code.len() > 100
+                    || !code.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            || response
+                .application_audit_ref
+                .as_ref()
+                .is_some_and(|reference| {
+                    reference.is_empty()
+                        || reference.len() > 1_024
+                        || !reference.bytes().all(|byte| byte.is_ascii_graphic())
+                })
+        {
+            return Err(AiError::ToolExecutionFailed);
+        }
         let response_bytes = serde_json::to_vec(&response.data)
             .map_err(|_| AiError::ToolExecutionFailed)?
             .len() as u64;

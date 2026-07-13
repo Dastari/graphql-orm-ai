@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -45,7 +45,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 time = { version = "0.3", features = ["serde"] }
-tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 

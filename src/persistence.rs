@@ -324,15 +324,21 @@ pub(crate) struct AiBudgetPolicyRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
     pub scope_kind: String,
+    #[filterable(type = "string")]
     pub scope_id: String,
     pub tenant_id: Option<String>,
+    pub principal_kind: Option<String>,
     pub principal_subject: Option<String>,
     pub interval_kind: String,
     pub maximum_input_tokens: Option<i64>,
     pub maximum_output_tokens: Option<i64>,
+    pub maximum_tool_units: Option<i64>,
+    pub maximum_image_units: Option<i64>,
     pub maximum_cost_microunits: Option<i64>,
     pub maximum_runs: Option<i64>,
+    #[filterable(type = "boolean")]
     pub enabled: bool,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
@@ -350,7 +356,9 @@ pub(crate) struct AiBudgetPolicyRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_budget_counters",
     plural = "GraphqlOrmAiBudgetCounters",
-    default_sort = "period_started_at DESC"
+    default_sort = "period_started_at DESC",
+    unique_composite = "budget_policy_id, period_key",
+    upsert = "budget_policy_id, period_key"
 )]
 pub(crate) struct AiBudgetCounterRecord {
     #[primary_key]
@@ -359,14 +367,20 @@ pub(crate) struct AiBudgetCounterRecord {
     #[filterable(type = "uuid")]
     pub budget_policy_id: graphql_orm::uuid::Uuid,
     pub policy_version: i64,
+    #[filterable(type = "string")]
+    pub period_key: String,
     pub period_started_at: i64,
     pub period_ends_at: i64,
     pub reserved_input_tokens: i64,
     pub reserved_output_tokens: i64,
+    pub reserved_tool_units: i64,
+    pub reserved_image_units: i64,
     pub reserved_cost_microunits: i64,
     pub reserved_runs: i64,
     pub committed_input_tokens: i64,
     pub committed_output_tokens: i64,
+    pub committed_tool_units: i64,
+    pub committed_image_units: i64,
     pub committed_cost_microunits: i64,
     pub committed_runs: i64,
     #[graphql_orm(version, default = "0")]
@@ -385,7 +399,8 @@ pub(crate) struct AiBudgetCounterRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_budget_reservations",
     plural = "GraphqlOrmAiBudgetReservations",
-    default_sort = "created_at DESC"
+    default_sort = "created_at DESC",
+    unique_composite = "principal_kind, principal_subject, idempotency_key"
 )]
 pub(crate) struct AiBudgetReservationRecord {
     #[primary_key]
@@ -396,6 +411,9 @@ pub(crate) struct AiBudgetReservationRecord {
     pub scope_kind: String,
     pub scope_id: String,
     pub tenant_id: Option<String>,
+    #[filterable(type = "string")]
+    pub principal_kind: String,
+    #[filterable(type = "string")]
     pub principal_subject: String,
     pub session_id: graphql_orm::uuid::Uuid,
     #[filterable(type = "uuid")]
@@ -416,6 +434,8 @@ pub(crate) struct AiBudgetReservationRecord {
     pub actual_tool_units: Option<i64>,
     pub actual_image_units: Option<i64>,
     pub actual_cost_microunits: Option<i64>,
+    pub actual_runs: Option<i64>,
+    #[filterable(type = "string")]
     pub idempotency_key: String,
     #[filterable(type = "string")]
     pub state: String,
@@ -864,6 +884,49 @@ pub(crate) struct AiRunAttemptRecord {
     pub outcome_code: Option<String>,
 }
 
+/// Immutable terminal/retry/recovery fact for one run attempt.
+///
+/// Attempt claims and their outcomes are separate append-only rows so worker
+/// history never depends on mutating an already-recorded fence claim.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_run_attempt_outcomes",
+    plural = "GraphqlOrmAiRunAttemptOutcomes",
+    default_sort = "finished_at ASC",
+    append_only = true
+)]
+pub(crate) struct AiRunAttemptOutcomeRecord {
+    /// Outcome fact ID.
+    #[primary_key]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Exact claim/attempt receiving this outcome. At most one outcome exists.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub attempt_id: graphql_orm::uuid::Uuid,
+    /// Owning run.
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Exact fencing generation of the claim.
+    pub lease_generation: i64,
+    /// Worker that owned the claim.
+    pub worker_id: String,
+    /// Durable run state reached by this attempt.
+    #[filterable(type = "string")]
+    pub final_state: String,
+    /// Safe machine-readable outcome classification.
+    pub outcome_code: String,
+    /// Optional provider response reference; never response content.
+    pub provider_response_id: Option<String>,
+    /// Completion/recovery timestamp.
+    #[sortable]
+    pub finished_at: i64,
+}
+
 /// Ordered run step.
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -879,6 +942,7 @@ pub(crate) struct AiRunAttemptRecord {
 pub(crate) struct AiRunStepRecord {
     /// Step ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Run ID.
@@ -920,11 +984,21 @@ pub(crate) struct AiRunStepRecord {
 pub(crate) struct AiToolCallRecord {
     /// Tool-call ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Run ID.
     #[filterable(type = "uuid")]
     pub run_id: graphql_orm::uuid::Uuid,
+    /// Unique hash of run ID and opaque provider call ID.
+    #[unique]
+    pub provider_call_key: String,
+    /// Opaque provider call ID required for exact continuation binding.
+    pub provider_call_id: String,
+    /// Zero-based provider turn within the bounded agent loop.
+    pub provider_turn_index: i64,
+    /// Zero-based call order within the provider turn.
+    pub tool_call_index: i64,
     /// Stable tool ID.
     pub tool_id: String,
     /// Exact descriptor fingerprint.
@@ -941,6 +1015,20 @@ pub(crate) struct AiToolCallRecord {
     pub risk: String,
     /// Authorization decision code.
     pub authorization_code: Option<String>,
+    /// Current host tool-policy version used at execution.
+    pub authorization_policy_version: Option<String>,
+    /// Safe current authorization-state digest.
+    pub authorization_state_digest: Option<String>,
+    /// Exact static result-disclosure schema fingerprint.
+    pub disclosure_schema_fingerprint: Option<String>,
+    /// Highest static/runtime-tightened result classification.
+    pub result_classification: Option<String>,
+    /// Immutable egress decision authorizing the result's model disclosure.
+    pub result_egress_decision_id: Option<graphql_orm::uuid::Uuid>,
+    /// Exact redacted manifest hash bound to the egress decision.
+    pub result_egress_manifest_hash: Option<String>,
+    /// Safe ordinary application audit correlation, never provider-facing.
+    pub application_audit_ref: Option<String>,
     /// Approval ID.
     pub approval_id: Option<graphql_orm::uuid::Uuid>,
     /// Stable idempotency key when supported.
@@ -969,17 +1057,20 @@ pub(crate) struct AiToolCallRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_approvals",
     plural = "GraphqlOrmAiApprovals",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC",
+    keyset = "created_at asc, id asc"
 )]
 pub(crate) struct AiApprovalRecord {
     /// Approval ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Tool call.
     #[filterable(type = "uuid")]
     pub tool_call_id: graphql_orm::uuid::Uuid,
     /// Session.
+    #[filterable(type = "uuid")]
     pub session_id: graphql_orm::uuid::Uuid,
     /// Principal subject requesting/approving.
     pub principal_subject: String,
@@ -1054,11 +1145,13 @@ pub(crate) struct AiApprovalRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_proposals",
     plural = "GraphqlOrmAiProposals",
-    default_sort = "created_at DESC"
+    default_sort = "created_at DESC",
+    keyset = "created_at desc, id desc"
 )]
 pub(crate) struct AiProposalRecord {
     /// Proposal ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Session ID.
@@ -1075,6 +1168,8 @@ pub(crate) struct AiProposalRecord {
     pub proposal_type: String,
     /// Registered schema version.
     pub schema_version: String,
+    /// Validated logical review-item count.
+    pub item_count: i64,
     /// Protected/ciphertext structured payload envelope.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_payload: serde_json::Value,
@@ -1119,6 +1214,7 @@ pub(crate) struct AiProposalRecord {
 )]
 pub(crate) struct AiProposalItemRecord {
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     #[filterable(type = "uuid")]
@@ -1396,6 +1492,7 @@ pub(crate) struct AiSecretCleanupRecord {
 pub(crate) struct AiEgressEventRecord {
     /// Decision ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Optional run.
@@ -1477,7 +1574,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.5.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.8.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -1540,6 +1637,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiAttachmentArtifactRecord::metadata(),
                 AiRunRecord::metadata(),
                 AiRunAttemptRecord::metadata(),
+                AiRunAttemptOutcomeRecord::metadata(),
                 AiRunStepRecord::metadata(),
                 AiToolCallRecord::metadata(),
                 AiApprovalRecord::metadata(),

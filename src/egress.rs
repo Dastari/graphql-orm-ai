@@ -242,6 +242,26 @@ pub trait AiEgressPolicy: Send + Sync {
     ) -> AiEgressDecision;
 }
 
+/// Durable append-only audit boundary for exact egress decisions.
+///
+/// Provider orchestration must record both allow and deny outcomes. An allow
+/// proof must not cross the transport boundary when this audit write fails.
+#[async_trait]
+pub trait AiEgressDecisionAudit: Send + Sync {
+    /// Records the exact redacted manifest and its policy decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the decision does not bind the manifest, values
+    /// exceed durable bounds, an idempotent replay conflicts, or persistence
+    /// fails.
+    async fn record(
+        &self,
+        manifest: &AiEgressManifest,
+        decision: &AiEgressDecision,
+    ) -> Result<(), AiError>;
+}
+
 /// Fail-closed default policy.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DenyAllEgressPolicy;

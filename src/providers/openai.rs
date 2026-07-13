@@ -11,7 +11,7 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use crate::{
-    AiProvider, AiSecretStore, ModelBuiltinTool, ModelInputBlock, ModelRequest,
+    AiProvider, AiSecretStore, ModelBuiltinTool, ModelContinuation, ModelInputBlock, ModelRequest,
     ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
     ProviderRequestContext, SecretRef,
 };
@@ -145,6 +145,7 @@ impl OpenAiProvider {
             return Err(ProviderError::InvalidRequest);
         }
         let mut content = Vec::with_capacity(request.input.len());
+        let mut tool_outputs = Vec::new();
         for block in &request.input {
             match block {
                 ModelInputBlock::Text { text } => {
@@ -163,6 +164,15 @@ impl OpenAiProvider {
                     // them.
                     return Err(ProviderError::Unsupported);
                 }
+                ModelInputBlock::ToolResult {
+                    call_id, output, ..
+                } => {
+                    tool_outputs.push(json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output.to_string()
+                    }));
+                }
             }
         }
 
@@ -180,14 +190,25 @@ impl OpenAiProvider {
             tools.push(openai_builtin(builtin)?);
         }
 
+        let mut input = Vec::with_capacity(usize::from(!content.is_empty()) + tool_outputs.len());
+        if !content.is_empty() {
+            input.push(json!({"role": "user", "content": content}));
+        }
+        input.extend(tool_outputs);
         let mut body = json!({
             "model": request.model,
-            "input": [{"role": "user", "content": content}],
+            "input": input,
             "stream": true,
             "store": self.config.store_responses,
             "tools": tools,
             "parallel_tool_calls": false
         });
+        if let Some(ModelContinuation::ProviderResponse { response_id }) = &request.continuation {
+            if !self.config.store_responses {
+                return Err(ProviderError::Unsupported);
+            }
+            body["previous_response_id"] = Value::String(response_id.clone());
+        }
         if !request.instructions.is_empty() {
             body["instructions"] = Value::String(request.instructions.join("\n\n"));
         }
@@ -240,6 +261,11 @@ impl AiProvider for OpenAiProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&ProviderKind::OpenAi, &request)?;
+        if self.config.store_responses
+            && !context.permits_retained_response(&ProviderKind::OpenAi, &request)
+        {
+            return Err(ProviderError::EgressDenied);
+        }
         let body = self.request_body(&request)?;
         let secret = self
             .secrets
@@ -851,6 +877,81 @@ mod tests {
             .expect("context should validate")
     }
 
+    #[test]
+    fn stateful_tool_continuation_requires_explicit_response_storage() {
+        let reference = SecretRef::parse("openai/continuation-test")
+            .expect("test secret reference should parse");
+        let secrets: Arc<dyn AiSecretStore> =
+            Arc::new(TestSecrets(reference.clone(), "not-a-real-key".to_owned()));
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec!["Continue after the exact tool output".to_owned()],
+            input: vec![ModelInputBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+                output: json!({"data": {"recordId": "54"}, "errorCodes": []}),
+            }],
+            continuation: Some(ModelContinuation::ProviderResponse {
+                response_id: "resp-1".to_owned(),
+            }),
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        };
+
+        let provider = OpenAiProvider::new(
+            OpenAiProviderConfig::new(reference.clone()),
+            secrets.clone(),
+        )
+        .expect("default provider should build");
+        assert!(matches!(
+            provider.request_body(&request),
+            Err(ProviderError::Unsupported)
+        ));
+
+        let mut config = OpenAiProviderConfig::new(reference);
+        config.store_responses = true;
+        let provider =
+            OpenAiProvider::new(config, secrets).expect("retained-response provider should build");
+        let body = provider
+            .request_body(&request)
+            .expect("explicitly retained continuation should map");
+        assert_eq!(body["previous_response_id"], "resp-1");
+        assert_eq!(body["input"][0]["type"], "function_call_output");
+        assert_eq!(body["input"][0]["call_id"], "call-1");
+        assert_eq!(body["store"], true);
+    }
+
+    #[tokio::test]
+    async fn retained_response_transport_requires_matching_egress_retention() {
+        let reference =
+            SecretRef::parse("openai/retention-test").expect("test secret reference should parse");
+        let secrets: Arc<dyn AiSecretStore> =
+            Arc::new(TestSecrets(reference.clone(), "not-a-real-key".to_owned()));
+        let mut config = OpenAiProviderConfig::new(reference);
+        config.store_responses = true;
+        let provider =
+            OpenAiProvider::new(config, secrets).expect("retained-response provider should build");
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec!["Respond briefly.".to_owned()],
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic hello".to_owned(),
+            }],
+            continuation: None,
+            tools: vec![],
+            builtin_tools: vec![],
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+
+        assert!(matches!(
+            provider.stream(request, context("test-model", 1_000)).await,
+            Err(ProviderError::EgressDenied)
+        ));
+    }
+
     #[tokio::test]
     async fn responses_sse_is_normalized_without_retaining_secret_or_raw_body() {
         let sse = concat!(
@@ -875,6 +976,7 @@ mod tests {
             input: vec![ModelInputBlock::Text {
                 text: "synthetic hello".to_owned(),
             }],
+            continuation: None,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -930,6 +1032,7 @@ mod tests {
             input: vec![ModelInputBlock::Text {
                 text: "This is a synthetic provider smoke test.".to_owned(),
             }],
+            continuation: None,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,

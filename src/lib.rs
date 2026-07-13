@@ -21,6 +21,8 @@ compile_error!(
 );
 
 mod access;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod agent_loop;
 mod approvals;
 mod budget;
 mod configuration;
@@ -32,14 +34,30 @@ mod egress;
 mod error;
 mod execution;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_approvals;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_budget;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_egress;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_proposals;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_provider_output;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_sessions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_subscriptions;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_tools;
 mod persistence;
 mod proposals;
 mod provider;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod provider_calls;
 mod providers;
 mod restore;
 mod run_state;
@@ -50,6 +68,8 @@ mod subscriptions;
 mod tools;
 
 pub use access::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use agent_loop::*;
 pub use approvals::*;
 pub use budget::*;
 pub use configuration::*;
@@ -61,14 +81,30 @@ pub use egress::*;
 pub use error::*;
 pub use execution::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_approvals::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_budget::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_configuration::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_egress::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_proposals::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_provider_output::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_sessions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_tools::*;
 pub use persistence::*;
 pub use proposals::*;
 pub use provider::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use provider_calls::*;
 pub use providers::*;
 pub use restore::*;
 pub use run_state::*;
@@ -81,11 +117,21 @@ pub use tools::*;
 /// Common imports for host integrations.
 pub mod prelude {
     pub use crate::{
-        AiAccessPolicy, AiApprovalBinding, AiBudgetReservation, AiContentProtectionPolicy,
-        AiDataSourceRef, AiDisclosureSchema, AiEgressDecision, AiEgressManifest, AiEgressPolicy,
-        AiError, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider, AiRuntime,
+        AiAccessPolicy, AiApprovalAccessPolicy, AiApprovalBinding, AiBudgetReservation,
+        AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
+        AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
+        AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor, AiProvider, AiRuntime,
         AiRuntimeBuilder, AiScope, AiSecretStore, AiToolAuthorizationPolicy, AiToolCatalog,
         AiToolDescriptor, DataClassification, SecretRef, ToolMaturity,
+    };
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub use crate::{
+        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiBudgetServiceLimits,
+        AiProposalServiceLimits, AiProviderCallExecutor, AiProviderCallLimits,
+        AiProviderOutputLimits, AiProviderUsageAccounting, AiRunServiceLimits,
+        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiBudgetService,
+        OrmAiEgressDecisionAudit, OrmAiProposalService, OrmAiProviderOutputService,
+        OrmAiRunService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

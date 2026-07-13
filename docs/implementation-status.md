@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.5.0`) and 35 private records
+- AI schema-module identity (currently version `0.8.0`) and 36 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -38,6 +38,42 @@ production-ready behavior.
   attachment capability requires its own matching authorized transfer, and an
   opaque atomic budget proof must match run/attempt/fence/provider/model/output
   ceiling/expiry before transport.
+- Concrete SQLite/PostgreSQL ORM budget service: fresh-principal and tenant
+  binding, current run-fence validation, bounded policy resolution, atomic
+  multi-counter reservation, stable window keys, unique content-bound
+  idempotency, bounded serialization retries, exact-once usage reconciliation,
+  truthful over-estimate accounting, and conservative uncertain capacity.
+- In-memory SQLite budget tests prove concurrent calls cannot overspend one
+  counter, a later applicable policy rolls the whole reservation back, stale
+  principal/fence inputs fail closed, reconciliation is idempotent, and only
+  proven unused capacity becomes available again.
+- Concrete SQLite/PostgreSQL ORM run service with bounded oldest-first
+  queued/retry claims, immutable attempt and unique outcome facts, monotonic
+  generations, renewable leases, strict row-version fencing, retry scheduling,
+  terminal transitions, and bounded expired-lease reconciliation.
+- In-memory SQLite worker tests prove racing workers cannot double-claim,
+  heartbeats invalidate old row-version proofs, reclaimed generations fence
+  old workers, only pre-provider expiry requeues, post-start expiry requires
+  recovery, and terminal/retry outcomes append exactly once.
+- Concrete append-only ORM egress decision audit and one-turn provider
+  executor: current access is reauthorized, budget is reserved, every exact
+  allow/deny decision is persisted before transport, capacity becomes
+  uncertain at the transport boundary, normalized streams are bounded, and
+  deployment-owned immutable-version pricing settles authoritative usage
+  exactly once.
+- Fenced protected assistant-output persistence with current principal/access/
+  protection revalidation, exact result-to-lease binding, UTF-8-safe block
+  splitting, bounded previews, and atomic message/block/session-event/run-fence
+  commit. The end-to-end mock path covers claim through terminal completion.
+- Fenced read-only application-tool execution with exact catalog/policy/model
+  definition binding, bounded normalized calls, protected pre-execution
+  arguments, current ordinary GraphQL resolver authorization, static result
+  disclosure, a separately authorized and immutably audited result transfer,
+  protected result/event persistence, and lease renewal.
+- Bounded provider continuation that binds the exact prior response, every
+  opaque call ID, durable model-visible result, and immutable egress manifest.
+  The OpenAI adapter requires explicit retained-response configuration and
+  matching retention manifests for stateful continuation.
 - Secret-store contract plus explicit, read-only, allowlist-mapped environment
   bootstrap store. Runtime construction now requires a secret store.
 - Per-scope content-protection policy/envelope/protector contracts with a
@@ -60,6 +96,15 @@ production-ready behavior.
   principal/delegation, logical target/schema/document/projection/disclosure,
   resources/versions, policy/auth-state, canonical preview, expiry, and
   one-shot consumption identity.
+- Concrete protected proposal staging/review service and authenticated GraphQL
+  roots: fresh policy, fenced creation, schema/provenance validation, keyset
+  windows, CAS accept/edit/reject, protected session events, and freshly
+  authorized post-domain-mutation outcome/audit linkage.
+- Concrete canonical-preview approval service and authenticated GraphQL roots:
+  protected resource/preview envelopes, exact fenced run/tool parking,
+  optional recent-MFA decision, revocation, current original-actor
+  rehydration, atomic one-shot consumption, protected events, and renewed
+  running fences.
 - Explicit egress manifests, deployment boundary, policy decision, and
   allowed-manifest proof.
 - JSON Schema 2020-12 structured proposal registry and provenance validation.
@@ -104,16 +149,19 @@ production-ready behavior.
 - Durable per-principal inbox sequencing/subscriptions and retention purge
   execution. Session-event live wakeup/replay/reauthorization is implemented;
   reset signaling is present, while actual retention pruning remains.
-- Approval, proposal, attachment, usage, skill, and subscription roots beyond
-  the initial session/configuration surfaces.
+- Attachment, usage, skill, and subscription roots beyond the initial session,
+  configuration, proposal, and approval surfaces.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
 - Attachment/quarantine/storage pipeline.
-- Durable database worker claim/heartbeat/recovery operations.
-- Transactional approval persistence, canonical preview provider, atomic
-  one-shot consumption, and recent-MFA flow. Exact domain bindings and schema
-  columns exist, but the lifecycle service/root does not.
+- Consequential application-tool executor and deployment-provided canonical
+  preview builder. Approval request/decision/revocation/consumption persistence
+  is implemented, but consumption is deliberately not yet wired to mutations;
+  fresh resolver/resource authorization remains mandatory.
+- Per-item proposal review and application-specific proposal rendering. Whole
+  structured payload accept/edit/reject and trusted post-mutation outcome
+  linkage are implemented.
 - Provider HTTP adapters for Anthropic, xAI, Ollama, and explicitly profiled
   OpenAI-compatible endpoints.
 - OpenAI attachment/file upload resolution, background/webhooks, provider file
@@ -121,9 +169,14 @@ production-ready behavior.
   current adapter intentionally rejects local opaque attachment IDs until that
   pipeline exists.
 - Provider webhooks/background processing.
-- Concrete transactional budget counter/reservation service, usage,
-  retention/purge, and telemetry sinks. Atomic request/proof/reconciliation
-  contracts and persistence entities exist.
+- Authenticated GraphQL budget-policy management, usage reporting, pricing
+  catalog validation, privileged uncertain-call recovery, retention/purge, and
+  telemetry sinks. The ordinary transactional reservation/reconciliation path
+  is implemented.
+- Top-level crash-resumable application-tool loop worker, live delta
+  coalescing, and provider-independent stateless continuation. The protected
+  read-only call/result primitives and bounded exact stateful continuation are
+  implemented; ambiguous resume remains deliberately closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -141,27 +194,27 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Implement the ORM-backed transactional budget counter/reservation service,
-   conservative reconciliation, and concurrency tests using only in-memory
-   SQLite.
-2. Implement mock-provider orchestration through the fenced durable worker,
-   registered tool execution, result disclosure, and provider egress loop.
-3. Implement proposal and exact approval services/GraphQL lifecycles, including
-   canonical previews and atomic one-shot consumption.
-4. Add the generic delegated-authority seam and remote authenticated GraphQL
+1. Add the crash-resumable coordinator around the existing read-only tool
+   primitives, including checkpoint/reconciliation rules and live delta
+   coalescing.
+2. Implement the consequential tool executor around the existing exact
+   approval lifecycle, with a host canonical-preview builder and fresh resolver
+   authorization immediately after one-shot consumption.
+3. Add the generic delegated-authority seam and remote authenticated GraphQL
    executor fixtures without embedding a federation/router product.
-5. Add the attachment quarantine/scanning/storage pipeline and connect its
+4. Add the attachment quarantine/scanning/storage pipeline and connect its
    authorized image/file resolution to provider adapters.
-6. Add the per-principal inbox stream and retention/pruning worker, then the
+5. Add the per-principal inbox stream and retention/pruning worker, then the
    remaining provider/configuration surfaces, including Ollama and the
    deterministic fake-process foundation for an allowlisted local harness.
-7. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
+6. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification
 
-- `cargo test --features provider-openai`: 34 integration tests and four
-  active unit tests passed; one explicit live-provider test remained ignored.
+- `cargo test --features provider-openai`: 34 integration tests and 23 active
+  unit tests passed; one explicit live-provider test remained ignored. Thirty
+  generated private-ORM search doctests remained intentionally ignored.
 - `cargo clippy --all-targets --features provider-openai -- -D warnings`:
   passed.
 - Warnings-denied Rustdoc passed for `provider-openai` and

@@ -1,9 +1,17 @@
 //! Exact, expiring, one-shot approval bindings for consequential tool calls.
 
-use agql_auth::PrincipalReference;
+use std::sync::Arc;
+
+use agql_auth::{AuthPrincipal, PrincipalReference};
+use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
+use async_trait::async_trait;
+use graphql_orm::graphql::pagination::{
+    KeysetConnectionInput, PageInfo, ValidatedKeysetConnection,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::{AiApprovalId, AiError, AiScope, AiSessionId, AiToolCallId, GraphqlOperationContract};
 
@@ -90,10 +98,19 @@ impl AiApprovalBinding {
     /// Returns [`AiError::InvalidConfiguration`] when a required binding is
     /// empty, target resources are duplicated, or the preview hash is stale.
     pub fn validate(&self, preview: &AiCanonicalActionPreview) -> Result<(), AiError> {
-        if self.tool_fingerprint.trim().is_empty()
+        let preview_bytes = serde_json::to_vec(&preview.details)
+            .map_err(|_| AiError::InvalidConfiguration("approval preview is invalid".to_owned()))?;
+        if preview.action_kind.trim().is_empty()
+            || preview.action_kind.len() > 200
+            || preview.title.trim().is_empty()
+            || preview.title.len() > 1_024
+            || preview.targets.len() > 100
+            || preview_bytes.len() > 256 * 1024
+            || self.tool_fingerprint.trim().is_empty()
             || self.argument_hash.trim().is_empty()
             || self.policy_version.trim().is_empty()
             || self.authorization_state_digest.trim().is_empty()
+            || self.resources.len() > 100
             || self.preview_hash != preview.stable_hash()
         {
             return Err(AiError::InvalidConfiguration(
@@ -104,8 +121,11 @@ impl AiApprovalBinding {
         resources.sort();
         if resources.iter().any(|resource| {
             resource.resource_type.trim().is_empty()
+                || resource.resource_type.len() > 200
                 || resource.resource_id.trim().is_empty()
+                || resource.resource_id.len() > 1_024
                 || resource.expected_version.trim().is_empty()
+                || resource.expected_version.len() > 1_024
         }) || resources.windows(2).any(|window| window[0] == window[1])
         {
             return Err(AiError::InvalidConfiguration(
@@ -201,6 +221,278 @@ impl AiApprovalGrant {
 pub struct AuthorizedAiApproval {
     approval_id: AiApprovalId,
     binding_hash: String,
+}
+
+/// Opaque proof that the exact grant was atomically consumed once.
+///
+/// This proves only one-shot approval consumption. It does not prove current
+/// resolver authorization, unchanged resource versions, or successful domain
+/// mutation execution.
+#[derive(Clone, Debug)]
+pub struct ConsumedAiApproval {
+    approval_id: AiApprovalId,
+    binding_hash: String,
+    consumed_at: OffsetDateTime,
+}
+
+impl ConsumedAiApproval {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn new(authorized: AuthorizedAiApproval, consumed_at: OffsetDateTime) -> Self {
+        Self {
+            approval_id: authorized.approval_id,
+            binding_hash: authorized.binding_hash,
+            consumed_at,
+        }
+    }
+
+    /// Consumed approval identifier.
+    pub const fn approval_id(&self) -> AiApprovalId {
+        self.approval_id
+    }
+
+    /// Exact action-envelope hash that was consumed.
+    pub fn binding_hash(&self) -> &str {
+        &self.binding_hash
+    }
+
+    /// Atomic consumption timestamp.
+    pub const fn consumed_at(&self) -> OffsetDateTime {
+        self.consumed_at
+    }
+}
+
+/// Approval lifecycle action evaluated by the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiApprovalAction {
+    /// Persist a pending approval for a current consequential tool call.
+    Request,
+    /// Read pending or historical approval state and canonical preview.
+    Read,
+    /// Approve or deny a pending request.
+    Decide,
+    /// Revoke a previously approved request before consumption.
+    Revoke,
+    /// Consume the exact grant immediately before fresh resolver execution.
+    Consume,
+}
+
+/// Host-owned approval authorization policy.
+#[async_trait]
+pub trait AiApprovalAccessPolicy: Send + Sync {
+    /// Decides one exact approval action for the current principal and scope.
+    async fn can_access_approval(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        session_id: AiSessionId,
+        action: AiApprovalAction,
+    ) -> bool;
+}
+
+/// Human approval decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+pub enum AiApprovalDecision {
+    /// Approve one exact future consumption.
+    Approve,
+    /// Deny the pending action.
+    Deny,
+}
+
+/// Authorized/decrypted approval view.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiApprovalView {
+    /// Approval identifier.
+    pub id: Uuid,
+    /// Bound tool-call identifier.
+    pub tool_call_id: Uuid,
+    /// Owning session.
+    pub session_id: Uuid,
+    /// Server-generated canonical action preview.
+    pub canonical_preview: async_graphql::Json<serde_json::Value>,
+    /// Pending/approved/denied/expired/revoked/consumed state.
+    pub state: String,
+    /// Whether approval required recent MFA.
+    pub recent_mfa_required: bool,
+    /// Human approver subject after a decision.
+    pub approver_subject: Option<String>,
+    /// Creation time in Unix seconds.
+    pub created_at: i64,
+    /// Exclusive expiry in Unix seconds.
+    pub expires_at: i64,
+    /// Decision time in Unix seconds.
+    pub decided_at: Option<i64>,
+    /// One-shot consumption time in Unix seconds.
+    pub consumed_at: Option<i64>,
+    /// Current CAS version.
+    pub row_version: i64,
+}
+
+/// Approval connection edge.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiApprovalEdge {
+    /// Approval node.
+    pub node: AiApprovalView,
+    /// Opaque keyset cursor.
+    pub cursor: String,
+}
+
+/// Bounded approval connection.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiApprovalConnection {
+    /// Bounded edges.
+    pub edges: Vec<AiApprovalEdge>,
+    /// Relay page metadata.
+    pub page_info: PageInfo,
+}
+
+/// CAS-bound approval decision input.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct DecideAiApprovalInput {
+    /// Approval identifier.
+    pub id: Uuid,
+    /// Approve or deny.
+    pub decision: AiApprovalDecision,
+    /// Exact row version rendered with the canonical preview.
+    pub expected_version: i64,
+}
+
+/// CAS-bound approval revocation input.
+#[derive(Clone, Debug, InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct RevokeAiApprovalInput {
+    /// Approval identifier.
+    pub id: Uuid,
+    /// Exact row version observed by the revoker.
+    pub expected_version: i64,
+}
+
+/// Authenticated, scope-aware approval lifecycle exposed to GraphQL.
+#[async_trait]
+pub trait AiApprovalService: Send + Sync {
+    /// Lists a bounded approval window visible in one session.
+    async fn approvals(
+        &self,
+        principal: &AuthPrincipal,
+        session_id: AiSessionId,
+        page: ValidatedKeysetConnection,
+    ) -> Result<AiApprovalConnection, AiError>;
+
+    /// Loads one visible approval.
+    async fn approval(
+        &self,
+        principal: &AuthPrincipal,
+        approval_id: AiApprovalId,
+    ) -> Result<Option<AiApprovalView>, AiError>;
+
+    /// Applies one CAS-bound human approval decision.
+    async fn decide_approval(
+        &self,
+        principal: &AuthPrincipal,
+        input: DecideAiApprovalInput,
+    ) -> Result<AiApprovalView, AiError>;
+
+    /// Revokes an approved but unconsumed grant.
+    async fn revoke_approval(
+        &self,
+        principal: &AuthPrincipal,
+        input: RevokeAiApprovalInput,
+    ) -> Result<AiApprovalView, AiError>;
+}
+
+/// Composable approval query root.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AiApprovalQueryRoot;
+
+#[cfg_attr(
+    feature = "graphql-case-pascal",
+    Object(rename_fields = "PascalCase", rename_args = "PascalCase")
+)]
+#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+impl AiApprovalQueryRoot {
+    /// Returns a bounded approval window for one visible session.
+    async fn ai_approvals(
+        &self,
+        context: &Context<'_>,
+        session_id: Uuid,
+        #[graphql(default)] page: KeysetConnectionInput,
+    ) -> async_graphql::Result<AiApprovalConnection> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        let page = page.validate(50, 200).map_err(|error| (&error).extend())?;
+        approval_service(context)?
+            .approvals(&principal, AiSessionId(session_id), page)
+            .await
+            .map_err(extend)
+    }
+
+    /// Returns one visible approval and its canonical preview.
+    async fn ai_approval(
+        &self,
+        context: &Context<'_>,
+        id: Uuid,
+    ) -> async_graphql::Result<Option<AiApprovalView>> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        approval_service(context)?
+            .approval(&principal, AiApprovalId(id))
+            .await
+            .map_err(extend)
+    }
+}
+
+/// Composable approval mutation root.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AiApprovalMutationRoot;
+
+#[cfg_attr(
+    feature = "graphql-case-pascal",
+    Object(rename_fields = "PascalCase", rename_args = "PascalCase")
+)]
+#[cfg_attr(not(feature = "graphql-case-pascal"), Object)]
+impl AiApprovalMutationRoot {
+    /// Approves or denies one exact pending action.
+    async fn decide_ai_approval(
+        &self,
+        context: &Context<'_>,
+        input: DecideAiApprovalInput,
+    ) -> async_graphql::Result<AiApprovalView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        approval_service(context)?
+            .decide_approval(&principal, input)
+            .await
+            .map_err(extend)
+    }
+
+    /// Revokes an approved, unconsumed grant.
+    async fn revoke_ai_approval(
+        &self,
+        context: &Context<'_>,
+        input: RevokeAiApprovalInput,
+    ) -> async_graphql::Result<AiApprovalView> {
+        let principal = agql_auth::principal_from_ctx(context)?;
+        approval_service(context)?
+            .revoke_approval(&principal, input)
+            .await
+            .map_err(extend)
+    }
+}
+
+fn approval_service(context: &Context<'_>) -> async_graphql::Result<Arc<dyn AiApprovalService>> {
+    context
+        .data::<Arc<dyn AiApprovalService>>()
+        .cloned()
+        .map_err(|_| {
+            AiError::InvalidConfiguration("AI approval service is not installed".to_owned())
+                .extend()
+        })
+}
+
+fn extend(error: AiError) -> async_graphql::Error {
+    error.extend()
 }
 
 impl AuthorizedAiApproval {

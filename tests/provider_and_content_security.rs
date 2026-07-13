@@ -11,6 +11,7 @@ fn request(model: &str) -> ModelRequest {
         input: vec![ModelInputBlock::Text {
             text: "synthetic input".to_owned(),
         }],
+        continuation: None,
         tools: vec![],
         builtin_tools: vec![],
         output_schema: None,

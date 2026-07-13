@@ -7,6 +7,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::ModelToolDefinition;
 use crate::{AiDisclosureSchema, AiError, AiScope, DataClassification};
 use crate::{GraphqlOperationContract, ToolGraphqlRequest};
 
@@ -414,6 +416,30 @@ impl AiToolCatalog {
             ));
         }
         Ok((descriptor, disclosure))
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_read_only_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        policy: &AiToolPolicySet,
+    ) -> Result<(), AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let descriptor = self.descriptor(&id).ok_or(AiError::Forbidden)?;
+        if !policy.allows(descriptor)
+            || descriptor.operation_kind != AiToolOperationKind::Query
+            || descriptor.operation_domain != AiToolOperationDomain::Application
+            || descriptor.maturity != ToolMaturity::ReadOnly
+            || descriptor.risk != AiToolRisk::ReadOnly
+            || descriptor.approval != AiApprovalRule::None
+            || !descriptor.idempotent
+            || definition.fingerprint != descriptor.fingerprint
+            || definition.description != descriptor.description
+            || definition.parameters != descriptor.argument_schema
+        {
+            return Err(AiError::Forbidden);
+        }
+        Ok(())
     }
 }
 

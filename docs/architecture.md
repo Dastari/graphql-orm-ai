@@ -47,3 +47,67 @@ Schema migration, backup, restore, and runtime readiness use the dependency-
 owned `AiSchemaModule`. A restored database is not runnable until leases,
 approvals, provider continuations, uncertain side effects, and content
 protection have been reconciled.
+
+Provider capacity is reserved through an ORM state-machine transaction across
+every applicable scope/tenant/principal policy. The concrete service validates
+the fresh principal and current run fence in that transaction, uses a unique
+principal/idempotency binding, and reconciles every counter exactly once.
+Unknown external outcomes retain their full reservation; the ordinary worker
+path cannot release uncertain capacity.
+
+## Durable worker and provider turn
+
+`OrmAiRunService` is the concrete SQLite/PostgreSQL queue boundary. A claim
+atomically appends an immutable attempt fact and changes the run to `Leased`
+with a new attempt ID, owner, expiry, row version, and monotonically increasing
+generation. Every subsequent write re-reads and validates that complete fence.
+Attempt completion, retry, and recovery are separate append-only outcome facts.
+
+The implemented provider turn is deliberately security ordered:
+
+1. require an open runtime and exact running lease;
+2. rehydrate current authority and recheck session/scope write access;
+3. reserve every applicable budget atomically against the persisted active
+   session owner/tenant/scope and run fence;
+4. authorize every transfer and append each exact allow/deny egress decision;
+5. mark budget uncertain immediately before transport;
+6. bound and normalize the provider stream;
+7. settle the exact immutable pricing version and commit authoritative usage;
+   and
+8. reauthorize/protect and atomically append the assistant message blocks,
+   completed-message event, and renewed run fence.
+
+Terminal completion is a separate fenced write after output persistence. This
+ordering prevents a completed run without durable history and prevents a late
+worker from writing output after recovery/reclaim.
+
+The executor supports bounded provider turns, provider built-ins with separate
+manifests, and a deliberately narrow application-tool branch. That branch
+accepts only exact enabled, idempotent read-only GraphQL queries, persists
+protected arguments before the ordinary authenticated resolver path, applies
+static disclosure, separately authorizes/audits result egress, persists the
+protected outcome, advances the fence, and permits only exact bounded
+continuation.
+
+A crash-resumable top-level coordinator and all consequential paths remain
+closed. Mutations, proposals, approval-required/non-idempotent tools, ambiguous
+resume, and stateless reasoning continuation require their complete preview,
+approval, fresh-authorization, persistence, and reconciliation contracts before
+they can be exposed.
+
+## Proposal and approval staging
+
+The ORM proposal service accepts only catalog-validated structured output and
+persists it through the current run fence. Authenticated GraphQL review can
+accept, schema-validly edit, or reject only AI-owned staging rows. A final
+application mutation remains consumer-owned; afterward, a freshly authorized
+trusted recorder may link its resource and ordinary application audit
+references.
+
+The ORM approval service persists protected server-generated previews and full
+action bindings, parks the exact run/tool call, records CAS-bound human
+decisions, and atomically consumes an approved grant once after rehydrating the
+original actor. Consumption returns a renewed run fence but no GraphQL
+authority. The later consequential executor must invoke the exact registered
+resolver through the ordinary bridge and let all current application policy
+run again.

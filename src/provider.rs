@@ -14,6 +14,10 @@ use crate::{
     AuthorizedBudgetReservation, AuthorizedEgress,
 };
 
+/// Manifest retention value required before a provider adapter may retain a
+/// response for stateful continuation.
+pub const AI_EGRESS_RETENTION_PROVIDER_RESPONSE: &str = "provider_response";
+
 /// Supported provider family.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +103,31 @@ pub enum ModelInputBlock {
         /// JSON value.
         value: serde_json::Value,
     },
+    /// Exact result of a provider-requested application tool call.
+    ToolResult {
+        /// Provider call identifier emitted by the immediately preceding turn.
+        call_id: String,
+        /// Stable local tool identifier used for audit binding only.
+        tool_id: String,
+        /// Disclosure-validated, separately egress-authorized tool output.
+        output: serde_json::Value,
+    },
+}
+
+/// Explicit provider-side conversation continuation.
+///
+/// A continuation is not an authorization proof. The next request still needs
+/// fresh principal access, budget, and exact egress proofs. Provider adapters
+/// may reject retained-response continuation unless deployment configuration
+/// deliberately permits provider response storage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ModelContinuation {
+    /// Continue from one exact provider response retained by the provider.
+    ProviderResponse {
+        /// Opaque provider response identifier.
+        response_id: String,
+    },
 }
 
 /// Provider-neutral request.
@@ -110,6 +139,8 @@ pub struct ModelRequest {
     pub instructions: Vec<String>,
     /// Bounded canonical context/input.
     pub input: Vec<ModelInputBlock>,
+    /// Optional explicit continuation of the immediately preceding response.
+    pub continuation: Option<ModelContinuation>,
     /// Enabled custom tools already filtered by local policy.
     pub tools: Vec<ModelToolDefinition>,
     /// Enabled provider built-ins, each separately approved for egress.
@@ -130,6 +161,35 @@ impl ModelRequest {
         }
         if self.instructions.len() > 32 || self.input.len() > 256 || self.tools.len() > 128 {
             return Err(ProviderError::InvalidRequest);
+        }
+        if let Some(ModelContinuation::ProviderResponse { response_id }) = &self.continuation
+            && !valid_provider_reference(response_id)
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let has_tool_results = self
+            .input
+            .iter()
+            .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }));
+        if has_tool_results != self.continuation.is_some() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let mut tool_result_call_ids = BTreeSet::new();
+        for block in &self.input {
+            if let ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            } = block
+                && (!valid_provider_reference(call_id)
+                    || tool_id.is_empty()
+                    || tool_id.len() > 200
+                    || !tool_result_call_ids.insert(call_id.as_str())
+                    || serde_json::to_vec(output)
+                        .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024))
+            {
+                return Err(ProviderError::InvalidRequest);
+            }
         }
         let mut provider_names = BTreeSet::new();
         let mut tool_ids = BTreeSet::new();
@@ -156,10 +216,26 @@ impl ModelRequest {
                     mime,
                 } => attachment_id.len() + mime.len(),
                 ModelInputBlock::Json { value } => value.to_string().len(),
+                ModelInputBlock::ToolResult {
+                    call_id,
+                    tool_id,
+                    output,
+                } => call_id
+                    .len()
+                    .saturating_add(tool_id.len())
+                    .saturating_add(output.to_string().len()),
             })
             .sum();
         instruction_bytes.saturating_add(input_bytes) as u64
     }
+}
+
+fn valid_provider_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
 }
 
 /// Custom function definition sent to a provider after local authorization.
@@ -354,13 +430,40 @@ impl ProviderRequestContext {
             estimated_bytes,
         )?;
         for block in &request.input {
-            if let ModelInputBlock::Attachment { mime, .. } = block {
-                let capability = if mime.starts_with("image/") {
-                    AiEgressCapability::ImageAnalysis
-                } else {
-                    AiEgressCapability::ProviderFile
-                };
-                self.require_capability(provider_kind, request, capability, 1, estimated_bytes)?;
+            match block {
+                ModelInputBlock::Attachment { mime, .. } => {
+                    let capability = if mime.starts_with("image/") {
+                        AiEgressCapability::ImageAnalysis
+                    } else {
+                        AiEgressCapability::ProviderFile
+                    };
+                    self.require_capability(
+                        provider_kind,
+                        request,
+                        capability,
+                        1,
+                        estimated_bytes,
+                    )?;
+                }
+                ModelInputBlock::ToolResult {
+                    call_id,
+                    tool_id,
+                    output,
+                } => {
+                    let bytes = call_id
+                        .len()
+                        .saturating_add(tool_id.len())
+                        .saturating_add(output.to_string().len())
+                        as u64;
+                    self.require_capability(
+                        provider_kind,
+                        request,
+                        AiEgressCapability::ToolResult,
+                        0,
+                        bytes,
+                    )?;
+                }
+                ModelInputBlock::Text { .. } | ModelInputBlock::Json { .. } => {}
             }
         }
         for builtin in &request.builtin_tools {
@@ -379,6 +482,26 @@ impl ProviderRequestContext {
             )?;
         }
         Ok(())
+    }
+
+    #[cfg(feature = "provider-openai")]
+    pub(crate) fn permits_retained_response(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+    ) -> bool {
+        let mut matched = false;
+        for transfer in &self.transfers {
+            if transfer.manifest.provider_kind == provider_kind.as_str()
+                && transfer.manifest.model == request.model
+            {
+                matched = true;
+                if transfer.manifest.retention != AI_EGRESS_RETENTION_PROVIDER_RESPONSE {
+                    return false;
+                }
+            }
+        }
+        matched
     }
 
     fn require_capability(
