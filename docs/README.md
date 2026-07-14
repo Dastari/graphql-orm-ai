@@ -11,6 +11,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Bounded session retention](session-retention.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
+- [Native Anthropic provider](anthropic.md)
 - [Native Ollama provider](ollama.md)
 - [Installed local harness boundary](local-harness.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)

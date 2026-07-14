@@ -148,6 +148,6 @@ or turn retention on.
   coordinator's deliberately closed replay rules.
 - Tool enablement management is not yet exposed through its final
   authenticated GraphQL configuration lifecycle.
-- Anthropic/xAI tool-result mappings remain future adapter work. Ollama and the
-  installed JSON-lines v2 harness implement the bounded stateless contract;
-  OpenAI continues to use explicit provider-retained response IDs.
+- Anthropic, Ollama, and the installed JSON-lines v2 harness implement the
+  bounded stateless contract. OpenAI continues to use explicit
+  provider-retained response IDs; xAI mapping remains future adapter work.

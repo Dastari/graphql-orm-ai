@@ -19,8 +19,10 @@ Exactly one persistence backend is currently required:
 - `mssql` (schema/compile support until ORM write parity lands)
 
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
-Responses adapter. `provider-ollama` enables the native Ollama `/api/chat`
-adapter; it needs an explicit deployment endpoint policy even for loopback.
+Responses adapter. `provider-anthropic` enables the native Anthropic Messages
+adapter with a fixed official endpoint and secret-store credential reference.
+`provider-ollama` enables the native Ollama `/api/chat` adapter; it needs an
+explicit deployment endpoint policy even for loopback.
 `local-harness` enables the installed JSON-lines v2 text/structured/stateless-
 tool protocol and provider wrapper; it still requires a deployment-owned
 sandbox launcher.
@@ -79,6 +81,14 @@ own fresh manifest. Provider-retained continuation, built-ins, and hidden
 thinking remain rejected. An exact completed checkpoint may cross a lease
 generation only after the adopter revalidates every historical durable row;
 ambiguous work remains closed. See the [Ollama guide](ollama.md).
+
+For Anthropic, construct `AnthropicProviderConfig` with a `SecretRef` and pass
+an `AiSecretStore` to `AnthropicProvider::new`. The native adapter supports
+streaming text/JSON, structured output, and strict stateless application-tool
+continuation. It requires an explicit output-token ceiling and the ordinary
+exact egress and budget proofs. Attachments, provider built-ins, extended
+thinking, provider-retained continuation, and prompt-cache creation remain
+closed. See the [Anthropic guide](anthropic.md).
 
 For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
 `AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,

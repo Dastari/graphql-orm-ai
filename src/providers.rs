@@ -2,6 +2,9 @@
 
 mod mock;
 
+#[cfg(feature = "provider-anthropic")]
+mod anthropic;
+
 #[cfg(feature = "provider-openai")]
 mod openai;
 
@@ -9,6 +12,9 @@ mod openai;
 mod ollama;
 
 pub use mock::MockProvider;
+
+#[cfg(feature = "provider-anthropic")]
+pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
 
 #[cfg(feature = "provider-openai")]
 pub use openai::{OpenAiProvider, OpenAiProviderConfig};

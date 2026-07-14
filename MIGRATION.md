@@ -4,6 +4,32 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: native Anthropic adapter (crate 0.22.0 to 0.23.0)
+
+Enable `provider-anthropic` to activate the native Anthropic Messages/SSE
+adapter and its optional `reqwest` dependency. The feature now exports
+`AnthropicProviderConfig` and `AnthropicProvider`; code that treated the
+previous empty feature as a marker should update its feature expectations.
+Construct configuration with a secret-store `SecretRef`, optionally narrow
+the bounded timeout, then supply an `Arc<dyn AiSecretStore>` to
+`AnthropicProvider::new`. The endpoint and `anthropic-version` header are
+adapter-owned and cannot be selected through GraphQL or model input.
+
+Requests require an explicit `maximum_output_tokens`, exact Anthropic egress
+proof, and atomic provider-call budget proof. Supported inputs are bounded
+text/JSON, strict application tools with protected stateless continuation,
+and JSON-schema structured output. Attachments, provider built-ins,
+provider-retained continuation, extended thinking, and prompt-cache creation
+are rejected. Cache-read usage is reported as a subset of checked total input;
+nonzero cache creation fails closed because the generic authoritative pricing
+catalog does not yet represent Anthropic's separate cache-write price class.
+
+This is a pre-1.0 additive Rust API, feature, dependency, provider transport,
+egress, and accounting behavior change. It adds no GraphQL field or SDL
+change, persistent entity, index, constraint, backup/restore behavior, or data
+semantic change. `AI_SCHEMA_MODULE_VERSION` therefore remains `0.22.0`; no
+database or consumer-data migration is required.
+
 ## Unreleased: stateless checkpoint adoption (crate/schema 0.21.0 to 0.22.0)
 
 Apply AI schema module `0.22.0` while provider/coordinator workers, backups,

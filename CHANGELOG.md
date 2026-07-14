@@ -5,10 +5,22 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.22.0` and the AI
-schema module to `0.22.0`.
+This development line advances the pre-1.0 crate version to `0.23.0`. The AI
+schema module remains `0.22.0` because this provider-only change adds no
+persistent entity or semantic change.
 
 ### Added
+
+- A feature-gated native Anthropic Messages/SSE adapter fixed to the official
+  HTTPS endpoint and API version. It resolves API keys just before transport,
+  requires exact egress and atomic budget proofs, and supports bounded
+  streaming text/JSON, strict custom and parallel application tools,
+  protected stateless continuation, and JSON-schema structured output.
+  Provider-retained continuation, attachments, provider built-ins, extended
+  thinking, and prompt-cache creation remain fail-closed. Anthropic cache-read
+  tokens are included in total input and retained as the cached subset; an
+  unexpected cache write is rejected because its distinct billing class is
+  not yet represented by the authoritative pricing ledger.
 
 - Provider-independent bounded stateless application-tool continuation through
   `ModelContinuationMode`, protected `StatelessConversation` history, exact

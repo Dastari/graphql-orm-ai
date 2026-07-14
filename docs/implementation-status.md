@@ -34,6 +34,12 @@ production-ready behavior.
   citations, forward-compatible unknown events, and no hidden reasoning
   persistence. Exact released PNG/JPEG/WEBP/GIF and direct file inputs are
   encoded inline without creating provider-persistent file IDs.
+- Native feature-gated Anthropic Messages/SSE adapter with a fixed official
+  endpoint/version, just-in-time secret resolution, bounded text/JSON,
+  JSON-schema output, registered custom and parallel application tools,
+  protected stateless replay, and exact cumulative usage. Attachments,
+  built-ins, retained continuation, extended thinking, arbitrary endpoints,
+  and prompt-cache creation remain fail-closed.
 - Native feature-gated Ollama `/api/chat` adapter with deployment-authorized
   fixed root endpoint, redirects disabled, bounded NDJSON normalization,
   exact PNG/JPEG/WebP image reopening, JSON-schema output, registered custom
@@ -271,8 +277,8 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- Provider HTTP adapters for Anthropic, xAI, and explicitly profiled
-  OpenAI-compatible endpoints.
+- Provider HTTP adapters for xAI and explicitly profiled OpenAI-compatible
+  endpoints.
 - OpenAI background/webhooks, provider-persistent file upload/search/deletion,
   richer provider file-type preflight, and full built-in result normalization.
   Exact inline image/file input is implemented and remains independently gated
@@ -306,21 +312,27 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add a separately reviewed production OS/container harness launcher;
-   provider-persistent file lifecycle remains gated.
-2. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
-   created the exact disposable database handle.
+1. Add a native xAI adapter after reviewing its current official transport,
+   tool, retention, error, and usage contracts.
+2. Add Docker-owned PostgreSQL parity tests only through a harness that proves
+   it created and owns the exact disposable database handle.
+
+A production OS/container local-harness launcher remains deployment-owned. A
+generic `Command` implementation in this crate could not prove immutable-image
+digest verification, mount/network isolation, cgroups, descendant cleanup, or
+the absence of inherited authority, so the public trusted launcher seam stays
+intentional.
 
 ## Current verification
 
-- `cargo test --features provider-openai,provider-ollama,local-harness`: full SQLite,
-  OpenAI-mock, and native Ollama loopback-mock coverage passed; one explicit
-  live-provider test remained ignored. Deterministic installed-harness process
-  conformance and generated private-ORM doctests were included; the latter
-  remained intentionally ignored.
-- `cargo clippy --all-targets --features provider-openai,provider-ollama,local-harness -- -D warnings`:
+- `cargo test --features provider-openai,provider-anthropic,provider-ollama,local-harness`:
+  full SQLite, OpenAI/Anthropic mocks, and native Ollama loopback-mock coverage
+  passed; one explicit live-provider test remained ignored. Deterministic
+  installed-harness process conformance and generated private-ORM doctests
+  were included; the latter remained intentionally ignored.
+- `cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-ollama,local-harness -- -D warnings`:
   passed.
-- Warnings-denied Rustdoc passed for both provider adapters and
+- Warnings-denied Rustdoc passed for all three native provider adapters and
   `graphql-case-pascal`.
 - PascalCase SDL contract test passed with no camelCase aliases.
 - `cargo check --no-default-features --features postgres`: passed, compile-only.
@@ -330,7 +342,8 @@ production-ready behavior.
 
 ## Provider test note
 
-- Mocked OpenAI HTTP/SSE and all other automated tests pass without credentials.
+- Mocked OpenAI and Anthropic HTTP/SSE and all other automated tests pass
+  without credentials.
 - The synthetic live OpenAI smoke test is explicit opt-in and is not part of
   automated verification. Its key-file loader requires exactly one unwrapped
   credential and never logs the value or provider response body.
