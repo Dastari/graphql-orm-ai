@@ -12,6 +12,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Bounded session retention](session-retention.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
 - [Native Anthropic provider](anthropic.md)
+- [Native xAI provider](xai.md)
 - [Native Ollama provider](ollama.md)
 - [Installed local harness boundary](local-harness.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)

@@ -4,6 +4,39 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: native xAI adapter (crate 0.23.0 to 0.24.0)
+
+Enable `provider-xai` to activate the native xAI Responses/SSE adapter and its
+optional HTTP dependencies. The feature now exports `XAiProviderConfig` and
+`XAiProvider`. Construct configuration from a secret-store `SecretRef`, then
+supply an `Arc<dyn AiSecretStore>` to `XAiProvider::new`. The production URL is
+fixed to xAI's official Responses endpoint; GraphQL, provider profiles, and
+model input cannot select a URL, header, or plaintext credential.
+
+`require_zero_data_retention` defaults to true and requires the exact xAI
+response attestation before any streamed output is accepted. Hosts without
+xAI enterprise ZDR must explicitly set it false and separately ensure the
+egress policy describes and permits xAI's documented ordinary retention.
+`store_responses` remains false by default. It cannot be combined with required
+ZDR verification and still needs an exact provider-response retention proof on
+every call when enabled. Existing OpenAI provider configuration is unchanged.
+
+The initial adapter supports bounded text/JSON, JSON-schema structured output,
+and strict custom/parallel application tools. Every request requires an output
+token ceiling. Attachments, xAI server tools, stateless/encrypted-reasoning
+continuation, and arbitrary endpoints fail closed. The shared Responses
+normalizer now rejects a non-SSE response and any built-in event whose exact
+kind was not in the server-authored request. It also requires exact model,
+response ID, completed status, usage, bounded event/text/tool-call state, and
+an unambiguous terminal event. This tightens malformed, truncated, swapped, or
+unsolicited OpenAI responses as well.
+
+This is a pre-1.0 additive Rust API, feature, dependency, provider transport,
+retention, egress, and behavioral contract change. It adds no GraphQL SDL,
+persistent entity, index, constraint, backup/restore behavior, or data semantic
+change. `AI_SCHEMA_MODULE_VERSION` remains `0.22.0`; no database or consumer
+data migration is required.
+
 ## Unreleased: native Anthropic adapter (crate 0.22.0 to 0.23.0)
 
 Enable `provider-anthropic` to activate the native Anthropic Messages/SSE

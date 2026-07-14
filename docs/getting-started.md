@@ -21,6 +21,8 @@ Exactly one persistence backend is currently required:
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter. `provider-anthropic` enables the native Anthropic Messages
 adapter with a fixed official endpoint and secret-store credential reference.
+`provider-xai` enables the native xAI Responses adapter with a fixed official
+endpoint and zero-data-retention verification enabled by default.
 `provider-ollama` enables the native Ollama `/api/chat` adapter; it needs an
 explicit deployment endpoint policy even for loopback.
 `local-harness` enables the installed JSON-lines v2 text/structured/stateless-
@@ -89,6 +91,16 @@ continuation. It requires an explicit output-token ceiling and the ordinary
 exact egress and budget proofs. Attachments, provider built-ins, extended
 thinking, provider-retained continuation, and prompt-cache creation remain
 closed. See the [Anthropic guide](anthropic.md).
+
+For xAI, construct `XAiProviderConfig` with a `SecretRef` and pass an
+`AiSecretStore` to `XAiProvider::new`. Text/JSON, structured output, and strict
+parallel application tools are supported. The adapter requires an xAI
+zero-data-retention response attestation by default. Disabling that check is
+an explicit deployment choice and still requires egress policy to disclose and
+permit xAI's ordinary retention. Response-ID tool continuation also requires
+`store_responses`, an exact per-call retention proof, and ZDR verification to
+be disabled; stateless encrypted-reasoning replay remains closed. See the
+[xAI guide](xai.md).
 
 For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
 `AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,

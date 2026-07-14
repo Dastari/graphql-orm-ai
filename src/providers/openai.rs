@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
@@ -17,8 +17,20 @@ use crate::{
     ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
 };
 
+#[cfg(feature = "provider-openai")]
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+const XAI_RESPONSES_ENDPOINT: &str = "https://api.x.ai/v1/responses";
 const MAXIMUM_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
+const MAXIMUM_RESPONSES_STREAM_EVENTS: usize = 65_536;
+const MAXIMUM_RESPONSES_TOOL_CALLS: usize = 64;
+const MAXIMUM_RESPONSES_VISIBLE_BYTES: usize = 64 * 1024 * 1024;
+const MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponsesFlavor {
+    OpenAi,
+    XAi,
+}
 
 /// Native OpenAI adapter configuration. Credential plaintext is never stored
 /// in this structure.
@@ -39,6 +51,7 @@ pub struct OpenAiProviderConfig {
 
 impl OpenAiProviderConfig {
     /// Creates secure defaults for the native Responses endpoint.
+    #[cfg(feature = "provider-openai")]
     pub fn new(credential: SecretRef) -> Self {
         Self {
             credential,
@@ -56,6 +69,9 @@ pub struct OpenAiProvider {
     secrets: Arc<dyn AiSecretStore>,
     client: reqwest::Client,
     endpoint: String,
+    flavor: ResponsesFlavor,
+    provider_kind: ProviderKind,
+    require_xai_zero_data_retention: bool,
 }
 
 impl std::fmt::Debug for OpenAiProvider {
@@ -76,20 +92,45 @@ impl OpenAiProvider {
     ///
     /// Returns [`ProviderError::InvalidConfiguration`] for invalid safe header
     /// metadata or an HTTP client construction failure.
+    #[cfg(feature = "provider-openai")]
     pub fn new(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
     ) -> Result<Self, ProviderError> {
-        Self::build(config, secrets, OPENAI_RESPONSES_ENDPOINT.to_owned())
+        Self::build(
+            config,
+            secrets,
+            OPENAI_RESPONSES_ENDPOINT.to_owned(),
+            ResponsesFlavor::OpenAi,
+            false,
+        )
     }
 
     fn build(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
         endpoint: String,
+        flavor: ResponsesFlavor,
+        require_xai_zero_data_retention: bool,
     ) -> Result<Self, ProviderError> {
         validate_optional_header(config.organization.as_deref())?;
         validate_optional_header(config.project.as_deref())?;
+        if flavor == ResponsesFlavor::XAi
+            && (config.organization.is_some() || config.project.is_some())
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "xAI does not accept OpenAI organization/project headers".to_owned(),
+            ));
+        }
+        if flavor == ResponsesFlavor::XAi
+            && require_xai_zero_data_retention
+            && config.store_responses
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "xAI retained response continuation is unavailable when zero-data-retention verification is required"
+                    .to_owned(),
+            ));
+        }
         if config.timeout.is_zero() || config.timeout > Duration::from_secs(600) {
             return Err(ProviderError::InvalidConfiguration(
                 "OpenAI timeout must be between one millisecond and ten minutes".to_owned(),
@@ -109,10 +150,30 @@ impl OpenAiProvider {
             secrets,
             client,
             endpoint,
+            flavor,
+            provider_kind: match flavor {
+                ResponsesFlavor::OpenAi => ProviderKind::OpenAi,
+                ResponsesFlavor::XAi => ProviderKind::Xai,
+            },
+            require_xai_zero_data_retention,
         })
     }
 
-    #[cfg(test)]
+    pub(super) fn new_xai(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        require_zero_data_retention: bool,
+    ) -> Result<Self, ProviderError> {
+        Self::build(
+            config,
+            secrets,
+            XAI_RESPONSES_ENDPOINT.to_owned(),
+            ResponsesFlavor::XAi,
+            require_zero_data_retention,
+        )
+    }
+
+    #[cfg(all(test, feature = "provider-openai"))]
     fn for_loopback_test(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -123,11 +184,35 @@ impl OpenAiProvider {
                 "test endpoint must use IPv4 loopback".to_owned(),
             ));
         }
-        Self::build(config, secrets, endpoint)
+        Self::build(config, secrets, endpoint, ResponsesFlavor::OpenAi, false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_xai_loopback_test(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        endpoint: String,
+        require_zero_data_retention: bool,
+    ) -> Result<Self, ProviderError> {
+        if !endpoint.starts_with("http://127.0.0.1:") {
+            return Err(ProviderError::InvalidConfiguration(
+                "test endpoint must use IPv4 loopback".to_owned(),
+            ));
+        }
+        Self::build(
+            config,
+            secrets,
+            endpoint,
+            ResponsesFlavor::XAi,
+            require_zero_data_retention,
+        )
     }
 
     fn request_headers(&self) -> Result<HeaderMap, ProviderError> {
         let mut headers = HeaderMap::new();
+        if self.flavor == ResponsesFlavor::XAi {
+            return Ok(headers);
+        }
         insert_optional_header(
             &mut headers,
             HeaderName::from_static("openai-organization"),
@@ -149,7 +234,16 @@ impl OpenAiProvider {
         if request.continuation_mode != crate::ModelContinuationMode::ProviderRetained {
             return Err(ProviderError::Unsupported);
         }
-        if request.input.is_empty() {
+        if request.input.is_empty()
+            || (self.flavor == ResponsesFlavor::XAi
+                && (request.maximum_output_tokens.is_none()
+                    || !request.builtin_tools.is_empty()
+                    || request.tools.iter().any(|tool| !tool.strict)
+                    || request
+                        .input
+                        .iter()
+                        .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))))
+        {
             return Err(ProviderError::InvalidRequest);
         }
         let mut content = Vec::with_capacity(request.input.len());
@@ -219,13 +313,16 @@ impl OpenAiProvider {
 
         let mut tools = Vec::with_capacity(request.tools.len() + request.builtin_tools.len());
         for tool in &request.tools {
-            tools.push(json!({
+            let mut definition = json!({
                 "type": "function",
                 "name": tool.provider_name,
                 "description": tool.description,
-                "parameters": tool.parameters,
-                "strict": tool.strict
-            }));
+                "parameters": tool.parameters
+            });
+            if self.flavor == ResponsesFlavor::OpenAi {
+                definition["strict"] = Value::Bool(tool.strict);
+            }
+            tools.push(definition);
         }
         for builtin in &request.builtin_tools {
             tools.push(openai_builtin(builtin)?);
@@ -242,7 +339,7 @@ impl OpenAiProvider {
             "stream": true,
             "store": self.config.store_responses,
             "tools": tools,
-            "parallel_tool_calls": false
+            "parallel_tool_calls": self.flavor == ResponsesFlavor::XAi
         });
         if let Some(ModelContinuation::ProviderResponse { response_id }) = &request.continuation {
             if !self.config.store_responses {
@@ -273,29 +370,27 @@ impl OpenAiProvider {
 #[async_trait]
 impl AiProvider for OpenAiProvider {
     fn provider_kind(&self) -> ProviderKind {
-        ProviderKind::OpenAi
+        self.provider_kind.clone()
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
+        let mut capabilities = ProviderCapabilities {
             streaming: true,
-            image_input: true,
-            file_input: true,
             custom_tools: true,
-            parallel_tool_calls: false,
+            parallel_tool_calls: self.flavor == ResponsesFlavor::XAi,
             structured_output: true,
-            web_search: true,
-            file_search: true,
-            code_execution: true,
-            image_generation: true,
-            embeddings: false,
-            background: false,
             provider_retained_continuation: self.config.store_responses,
-            stateless_continuation: false,
-            local: false,
-            maximum_context_tokens: None,
-            maximum_output_tokens: None,
+            ..ProviderCapabilities::default()
+        };
+        if self.flavor == ResponsesFlavor::OpenAi {
+            capabilities.image_input = true;
+            capabilities.file_input = true;
+            capabilities.web_search = true;
+            capabilities.file_search = true;
+            capabilities.code_execution = true;
+            capabilities.image_generation = true;
         }
+        capabilities
     }
 
     async fn stream(
@@ -303,9 +398,9 @@ impl AiProvider for OpenAiProvider {
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
-        context.validate_request(&ProviderKind::OpenAi, &request)?;
+        context.validate_request(&self.provider_kind, &request)?;
         if self.config.store_responses
-            && !context.permits_retained_response(&ProviderKind::OpenAi, &request)
+            && !context.permits_retained_response(&self.provider_kind, &request)
         {
             return Err(ProviderError::EgressDenied);
         }
@@ -328,6 +423,23 @@ impl AiProvider for OpenAiProvider {
         if let Some(error) = openai_http_error(status) {
             return Err(error);
         }
+        if self.flavor == ResponsesFlavor::XAi
+            && self.require_xai_zero_data_retention
+            && response
+                .headers()
+                .get("x-zero-data-retention")
+                .is_none_or(|value| !value.as_bytes().eq_ignore_ascii_case(b"true"))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        if response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(|value| !value.to_ascii_lowercase().starts_with("text/event-stream"))
+        {
+            return Err(ProviderError::Rejected);
+        }
 
         let mut bytes = response.bytes_stream();
         let tool_ids = request
@@ -335,9 +447,20 @@ impl AiProvider for OpenAiProvider {
             .iter()
             .map(|tool| (tool.provider_name.clone(), tool.tool_id.clone()))
             .collect::<BTreeMap<_, _>>();
+        let allowed_builtin_kinds = request
+            .builtin_tools
+            .iter()
+            .map(model_builtin_kind)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
         let output = async_stream::try_stream! {
             let mut decoder = SseDecoder::default();
-            let mut normalizer = OpenAiEventNormalizer::new(tool_ids);
+            let mut normalizer = OpenAiEventNormalizer::new(
+                request.model,
+                request.maximum_output_tokens,
+                tool_ids,
+                allowed_builtin_kinds,
+            );
             while let Some(chunk) = bytes.next().await {
                 let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
                 for payload in decoder.push(&chunk)? {
@@ -349,6 +472,7 @@ impl AiProvider for OpenAiProvider {
                 }
             }
             decoder.finish()?;
+            normalizer.finish()?;
         };
         Ok(Box::pin(output))
     }
@@ -507,55 +631,93 @@ fn decode_sse_frame(frame: &[u8]) -> Result<Option<String>, ProviderError> {
 #[derive(Clone, Debug)]
 struct FunctionCallState {
     call_id: String,
+    arguments: String,
 }
 
 struct OpenAiEventNormalizer {
+    expected_model: String,
+    maximum_output_tokens: Option<u64>,
     tool_ids: BTreeMap<String, String>,
+    allowed_builtin_kinds: BTreeSet<String>,
     function_calls: BTreeMap<String, FunctionCallState>,
     builtin_calls: BTreeMap<String, (String, String)>,
+    seen_call_ids: BTreeSet<String>,
     completed_calls: BTreeSet<String>,
+    response_id: Option<String>,
+    started: bool,
+    completed: bool,
+    visible_bytes: usize,
+    wire_events: usize,
 }
 
 impl OpenAiEventNormalizer {
-    fn new(tool_ids: BTreeMap<String, String>) -> Self {
+    fn new(
+        expected_model: String,
+        maximum_output_tokens: Option<u64>,
+        tool_ids: BTreeMap<String, String>,
+        allowed_builtin_kinds: BTreeSet<String>,
+    ) -> Self {
         Self {
+            expected_model,
+            maximum_output_tokens,
             tool_ids,
+            allowed_builtin_kinds,
             function_calls: BTreeMap::new(),
             builtin_calls: BTreeMap::new(),
+            seen_call_ids: BTreeSet::new(),
             completed_calls: BTreeSet::new(),
+            response_id: None,
+            started: false,
+            completed: false,
+            visible_bytes: 0,
+            wire_events: 0,
         }
     }
 
     fn normalize(&mut self, event: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.wire_events = self
+            .wire_events
+            .checked_add(1)
+            .filter(|count| *count <= MAXIMUM_RESPONSES_STREAM_EVENTS)
+            .ok_or(ProviderError::Rejected)?;
         let event_type = event
             .get("type")
             .and_then(Value::as_str)
             .ok_or(ProviderError::Rejected)?;
+        if !valid_responses_event_type(event_type) {
+            return Err(ProviderError::Rejected);
+        }
         match event_type {
-            "response.created" => Ok(vec![ProviderEvent::ResponseStarted {
-                response_id: event
-                    .pointer("/response/id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            }]),
-            "response.output_text.delta" => Ok(vec![ProviderEvent::TextDelta {
-                text: required_string(event, "delta")?,
-            }]),
+            "response.created" => self.response_created(event),
+            "response.failed" | "error" => Err(openai_stream_error(event)),
+            _ if !self.started || self.completed => Err(ProviderError::Rejected),
+            "response.output_text.delta" => {
+                let text = required_string(event, "delta")?;
+                self.record_visible_bytes(text.len())?;
+                Ok(vec![ProviderEvent::TextDelta { text }])
+            }
             "response.reasoning_summary_text.delta" => {
-                Ok(vec![ProviderEvent::ReasoningSummaryDelta {
-                    text: required_string(event, "delta")?,
-                }])
+                let text = required_string(event, "delta")?;
+                self.record_visible_bytes(text.len())?;
+                Ok(vec![ProviderEvent::ReasoningSummaryDelta { text }])
             }
             "response.output_item.added" => self.output_item_added(event),
             "response.function_call_arguments.delta" => {
                 let item_id = required_string(event, "item_id")?;
                 let state = self
                     .function_calls
-                    .get(&item_id)
+                    .get_mut(&item_id)
                     .ok_or(ProviderError::Rejected)?;
+                let delta = required_string(event, "delta")?;
+                if state.arguments.len().saturating_add(delta.len())
+                    > MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                state.arguments.push_str(&delta);
                 Ok(vec![ProviderEvent::ToolArgumentsDelta {
                     call_id: state.call_id.clone(),
-                    delta: required_string(event, "delta")?,
+                    delta,
                 }])
             }
             "response.function_call_arguments.done" => {
@@ -584,31 +746,86 @@ impl OpenAiEventNormalizer {
             | "response.file_search_call.completed"
             | "response.code_interpreter_call.completed"
             | "response.image_generation_call.completed" => self.complete_builtin(event),
-            "response.completed" => {
-                let response = event.get("response").ok_or(ProviderError::Rejected)?;
-                let mut events = Vec::with_capacity(2);
-                if let Some(usage) = response.get("usage") {
-                    events.push(ProviderEvent::Usage {
-                        input_tokens: optional_u64(usage, "input_tokens"),
-                        output_tokens: optional_u64(usage, "output_tokens"),
-                        cached_input_tokens: usage
-                            .pointer("/input_tokens_details/cached_tokens")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                    });
-                }
-                events.push(ProviderEvent::ResponseCompleted {
-                    response_id: response
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                });
-                Ok(events)
-            }
-            "response.failed" | "error" => Err(openai_stream_error(event)),
+            "response.completed" => self.response_completed(event),
             _ => Ok(vec![ProviderEvent::Unknown {
                 event_type: event_type.to_owned(),
             }]),
+        }
+    }
+
+    fn response_created(&mut self, event: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let response = event.get("response").ok_or(ProviderError::Rejected)?;
+        let response_id = required_string(response, "id")?;
+        if self.started
+            || self.completed
+            || !valid_responses_reference(&response_id)
+            || response.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.started = true;
+        self.response_id = Some(response_id.clone());
+        Ok(vec![ProviderEvent::ResponseStarted {
+            response_id: Some(response_id),
+        }])
+    }
+
+    fn response_completed(&mut self, event: &Value) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let response = event.get("response").ok_or(ProviderError::Rejected)?;
+        let response_id = required_string(response, "id")?;
+        if response_id != self.response_id.as_deref().ok_or(ProviderError::Rejected)?
+            || response.get("model").and_then(Value::as_str) != Some(self.expected_model.as_str())
+            || response.get("status").and_then(Value::as_str) != Some("completed")
+            || self
+                .function_calls
+                .values()
+                .any(|state| !self.completed_calls.contains(&state.call_id))
+            || self
+                .builtin_calls
+                .values()
+                .any(|(call_id, _)| !self.completed_calls.contains(call_id))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let usage = response.get("usage").ok_or(ProviderError::Rejected)?;
+        let input_tokens = required_u64(usage, "input_tokens")?;
+        let output_tokens = required_u64(usage, "output_tokens")?;
+        let cached_input_tokens =
+            optional_nested_u64(usage, &["input_tokens_details", "cached_tokens"])?;
+        if cached_input_tokens > input_tokens
+            || self
+                .maximum_output_tokens
+                .is_some_and(|maximum| output_tokens > maximum)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.completed = true;
+        Ok(vec![
+            ProviderEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some(response_id),
+            },
+        ])
+    }
+
+    fn record_visible_bytes(&mut self, additional: usize) -> Result<(), ProviderError> {
+        self.visible_bytes = self
+            .visible_bytes
+            .checked_add(additional)
+            .filter(|bytes| *bytes <= MAXIMUM_RESPONSES_VISIBLE_BYTES)
+            .ok_or(ProviderError::Rejected)?;
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<(), ProviderError> {
+        if self.started && self.completed {
+            Ok(())
+        } else {
+            Err(ProviderError::Unavailable)
         }
     }
 
@@ -616,6 +833,12 @@ impl OpenAiEventNormalizer {
         let item = event.get("item").ok_or(ProviderError::Rejected)?;
         let item_type = required_string(item, "type")?;
         let item_id = required_string(item, "id")?;
+        if !valid_responses_reference(&item_id)
+            || self.function_calls.contains_key(&item_id)
+            || self.builtin_calls.contains_key(&item_id)
+        {
+            return Err(ProviderError::Rejected);
+        }
         if item_type == "function_call" {
             let provider_name = required_string(item, "name")?;
             let tool_id = self
@@ -624,21 +847,44 @@ impl OpenAiEventNormalizer {
                 .ok_or(ProviderError::Rejected)?
                 .clone();
             let call_id = required_string(item, "call_id")?;
+            if self.seen_call_ids.len() >= MAXIMUM_RESPONSES_TOOL_CALLS
+                || !valid_responses_reference(&call_id)
+                || !self.seen_call_ids.insert(call_id.clone())
+            {
+                return Err(ProviderError::Rejected);
+            }
             self.function_calls.insert(
                 item_id,
                 FunctionCallState {
                     call_id: call_id.clone(),
+                    arguments: match item.get("arguments") {
+                        None => String::new(),
+                        Some(value) => value
+                            .as_str()
+                            .filter(|value| value.len() <= MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES)
+                            .ok_or(ProviderError::Rejected)?
+                            .to_owned(),
+                    },
                 },
             );
             return Ok(vec![ProviderEvent::ToolCallStarted { call_id, tool_id }]);
         }
         if let Some(kind) = builtin_kind(&item_type) {
+            if !self.allowed_builtin_kinds.contains(kind) {
+                return Err(ProviderError::Rejected);
+            }
             let call_id = item
                 .get("call_id")
                 .or_else(|| item.get("id"))
                 .and_then(Value::as_str)
                 .ok_or(ProviderError::Rejected)?
                 .to_owned();
+            if self.seen_call_ids.len() >= MAXIMUM_RESPONSES_TOOL_CALLS
+                || !valid_responses_reference(&call_id)
+                || !self.seen_call_ids.insert(call_id.clone())
+            {
+                return Err(ProviderError::Rejected);
+            }
             self.builtin_calls
                 .insert(item_id, (call_id.clone(), kind.to_owned()));
             return Ok(vec![ProviderEvent::BuiltinToolStarted {
@@ -673,10 +919,19 @@ impl OpenAiEventNormalizer {
             .function_calls
             .get(item_id)
             .ok_or(ProviderError::Rejected)?;
+        if arguments.len() > MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES
+            || (!state.arguments.is_empty() && state.arguments != arguments)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let arguments: Value =
+            serde_json::from_str(arguments).map_err(|_| ProviderError::Rejected)?;
+        if !arguments.is_object() {
+            return Err(ProviderError::Rejected);
+        }
         if !self.completed_calls.insert(state.call_id.clone()) {
             return Ok(Vec::new());
         }
-        let arguments = serde_json::from_str(arguments).map_err(|_| ProviderError::Rejected)?;
         Ok(vec![ProviderEvent::ToolCallCompleted {
             call_id: state.call_id.clone(),
             arguments,
@@ -723,8 +978,42 @@ fn required_string(value: &Value, field: &str) -> Result<String, ProviderError> 
         .ok_or(ProviderError::Rejected)
 }
 
-fn optional_u64(value: &Value, field: &str) -> u64 {
-    value.get(field).and_then(Value::as_u64).unwrap_or(0)
+fn required_u64(value: &Value, field: &str) -> Result<u64, ProviderError> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or(ProviderError::Rejected)
+}
+
+fn optional_nested_u64(value: &Value, path: &[&str]) -> Result<u64, ProviderError> {
+    let mut current = value;
+    for segment in path {
+        let object = current.as_object().ok_or(ProviderError::Rejected)?;
+        let Some(next) = object.get(*segment) else {
+            return Ok(0);
+        };
+        if next.is_null() {
+            return Ok(0);
+        }
+        current = next;
+    }
+    current.as_u64().ok_or(ProviderError::Rejected)
+}
+
+fn valid_responses_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 1_024
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\'))
+}
+
+fn valid_responses_event_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 200
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn openai_stream_error(event: &Value) -> ProviderError {
@@ -749,7 +1038,16 @@ fn builtin_kind(item_type: &str) -> Option<&'static str> {
     }
 }
 
-#[cfg(test)]
+fn model_builtin_kind(tool: &ModelBuiltinTool) -> &'static str {
+    match tool {
+        ModelBuiltinTool::WebSearch { .. } => "web_search",
+        ModelBuiltinTool::FileSearch { .. } => "file_search",
+        ModelBuiltinTool::CodeInterpreter => "code_interpreter",
+        ModelBuiltinTool::ImageGeneration => "image_generation",
+    }
+}
+
+#[cfg(all(test, feature = "provider-openai"))]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1086,11 +1384,11 @@ mod tests {
     async fn responses_sse_is_normalized_without_retaining_secret_or_raw_body() {
         let sse = concat!(
             "event: response.created\n",
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"test-model\"}}\n\n",
             "event: response.output_text.delta\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"test-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n"
         );
         let (endpoint, server) = mock_server(sse).await;
         let reference = SecretRef::parse("openai/test").expect("reference should parse");

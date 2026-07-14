@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -20,7 +20,7 @@ postgres = ["graphql-orm/postgres"]
 mssql = ["graphql-orm/mssql"]
 provider-openai = ["dep:base64", "dep:reqwest"]
 provider-anthropic = ["dep:reqwest"]
-provider-xai = []
+provider-xai = ["dep:base64", "dep:reqwest"]
 provider-ollama = ["dep:base64", "dep:reqwest"]
 provider-openai-compatible = []
 local-harness = []

@@ -5,11 +5,21 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.23.0`. The AI
+This development line advances the pre-1.0 crate version to `0.24.0`. The AI
 schema module remains `0.22.0` because this provider-only change adds no
 persistent entity or semantic change.
 
 ### Added
+
+- A feature-gated native xAI/Grok Responses/SSE adapter fixed to the official
+  HTTPS endpoint. It resolves Bearer credentials immediately before transport,
+  supports bounded text/JSON, JSON-schema output, and strict custom/parallel
+  application tools, and requires xAI's zero-data-retention response
+  attestation by default. Ordinary retention is an explicit opt-out requiring
+  separate egress authorization. Retained response-ID continuation additionally
+  requires `store_responses`, the exact provider-retention proof, and ZDR
+  verification to be disabled. Attachments, xAI server tools, encrypted
+  reasoning replay, and arbitrary endpoints remain closed.
 
 - A feature-gated native Anthropic Messages/SSE adapter fixed to the official
   HTTPS endpoint and API version. It resolves API keys just before transport,
@@ -21,6 +31,15 @@ persistent entity or semantic change.
   tokens are included in total input and retained as the cached subset; an
   unexpected cache write is rejected because its distinct billing class is
   not yet represented by the authoritative pricing ledger.
+
+### Security
+
+- Responses adapters now require an SSE content type and normalize a built-in
+  result only when the exact built-in kind was present in the server-authored
+  request. Streams also require exact model/response/status/usage identity,
+  bounded event/text/tool-call state, and an unambiguous terminal completion.
+  This closes unsolicited built-ins, swapped models, malformed accounting, and
+  truncated success for both OpenAI and xAI.
 
 - Provider-independent bounded stateless application-tool continuation through
   `ModelContinuationMode`, protected `StatelessConversation` history, exact

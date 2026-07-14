@@ -149,5 +149,7 @@ or turn retention on.
 - Tool enablement management is not yet exposed through its final
   authenticated GraphQL configuration lifecycle.
 - Anthropic, Ollama, and the installed JSON-lines v2 harness implement the
-  bounded stateless contract. OpenAI continues to use explicit
-  provider-retained response IDs; xAI mapping remains future adapter work.
+  bounded stateless contract. OpenAI and xAI use explicit provider-retained
+  response IDs; xAI retained continuation is incompatible with its default
+  zero-data-retention verification and must be separately configured and
+  authorized.

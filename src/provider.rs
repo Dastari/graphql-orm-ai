@@ -1017,7 +1017,7 @@ impl ProviderRequestContext {
         Ok(())
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(any(feature = "provider-openai", feature = "provider-xai"))]
     pub(crate) fn permits_retained_response(
         &self,
         provider_kind: &ProviderKind,

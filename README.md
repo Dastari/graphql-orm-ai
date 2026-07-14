@@ -51,10 +51,10 @@ below are still being implemented.
   host's ordinary GraphQL context, resolver authorization, row policy,
   assurance, rate limits, and audit remaining authoritative.
 - Provider-neutral streaming events, deterministic network-free mocks, native
-  OpenAI Responses/SSE and Anthropic Messages/SSE adapters, and a native
-  Ollama `/api/chat` adapter. Anthropic supports bounded text/JSON, structured
-  output, and exact stateless application-tool loops; xAI and explicitly
-  profiled OpenAI-compatible adapters remain reserved.
+  OpenAI/xAI Responses/SSE and Anthropic Messages/SSE adapters, and a native
+  Ollama `/api/chat` adapter. Anthropic and Ollama support exact stateless
+  application-tool loops; xAI supports strict custom tools through explicitly
+  retained response IDs. Profiled OpenAI-compatible adapters remain reserved.
 - An opt-in installed local-harness boundary with deployment-frozen logical
   model registrations, fixed executable/digest/sandbox/resource contracts, a
   bounded JSON-lines v2 provider driver, optional stateless application-tool
@@ -171,7 +171,7 @@ Exactly one persistence backend should be selected:
 | `mssql` | no | Schema/compile support pending ORM write parity |
 | `provider-openai` | no | Native OpenAI Responses/SSE adapter |
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
-| `provider-xai` | no | Reserved; adapter not implemented yet |
+| `provider-xai` | no | Native xAI Responses/SSE: text/JSON, structured output, strict parallel application tools |
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Reserved; requires explicit endpoint profiles |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
@@ -282,6 +282,11 @@ structured output, and strict stateless application tools. Its exact usage,
 credential, caching, and deliberately unsupported feature contracts are in the
 [Anthropic guide](docs/anthropic.md).
 
+The native xAI Responses adapter uses the fixed official endpoint and requires
+the provider's zero-data-retention attestation by default. Its opt-out,
+retained-continuation, and deliberately narrow tool surface are documented in
+the [xAI guide](docs/xai.md).
+
 Local execution is a first-class path. The native Ollama adapter is
 implemented; its exact supported and deliberately gated behaviors are in the
 [Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers will use a
@@ -304,9 +309,9 @@ forbidden. Consumer-application integration tests belong to those consumers.
 
 ```bash
 cargo fmt --check
-cargo test --features provider-openai,provider-anthropic,provider-ollama,local-harness
-cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-ollama,local-harness -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-anthropic,provider-ollama,local-harness --no-deps
+cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness
+cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness --no-deps
 cargo test --features graphql-case-pascal --test graphql_naming
 cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql
