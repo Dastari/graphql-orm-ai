@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.31.0`) and 39 private records
+- AI schema-module identity (currently version `0.32.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -297,6 +297,13 @@ production-ready behavior.
   owner/row-version fence rotate atomically without changing the staged
   attempt/generation. Concurrent claims are tested and the claim grants no
   approval consumption or resolver authority.
+- Bounded live approval-wait reconciliation under rehydrated principal,
+  current scope policy, exact provider-turn checkpoint hash, committed budget,
+  and unique call/step/approval linkage. Valid waits remain parked;
+  denied/revoked/expired/cutoff/deleted-session/policy-cancelled waits close
+  atomically with protected/redacted/immutable facts; malformed linkage closes
+  only the run for recovery. The worker grants no consumption, resolver,
+  provider, or replay authority and restored waits remain recovery-only.
 - Protected same-attempt resumption for one provider-retained supervised
   mutation. The resume service validates the exact pre-wait provider
   checkpoint, committed budget, current rules, `resume_claimed` approval,
@@ -342,10 +349,10 @@ production-ready behavior.
   scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
   image/file input, and expired/interrupted exact-reference cleanup are
   implemented.
-- Bounded denied/revoked/never-approved/expired human-wait reconciliation and
-  multi-call, mixed, parallel, or stateless supervised coordination. The
-  sequential provider-retained top-level coordinator is implemented; the
-  read-only coordinator still cannot route mutations.
+- Multi-call, mixed, parallel, or stateless supervised coordination. The
+  sequential provider-retained top-level coordinator and bounded live
+  human-wait reconciliation are implemented; the read-only coordinator still
+  cannot route mutations.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
@@ -385,9 +392,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add bounded denied/revoked/never-approved/expired wait reconciliation, then
-   design complete ordering/history proofs before considering multi-call or
-   stateless supervised resumption.
+2. Design complete ordering/history proofs before considering multi-call or
+   stateless supervised resumption; keep both paths closed until those proofs
+   are reviewable.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image
@@ -411,6 +418,8 @@ intentional.
 - Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
+- Release-policy and `cargo-semver-checks` gates passed against the reviewed
+  `0.32.0` baseline; the current crate/schema versions are `0.34.0`/`0.32.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

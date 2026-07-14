@@ -86,6 +86,30 @@ The UI renders only the decrypted server-generated canonical preview. It must
 not use model prose as the authoritative action description. Approval and
 revocation append protected durable session events.
 
+## Live wait reconciliation
+
+Run `OrmAiApprovalWaitReconciliationService::reconcile_waits` in a bounded
+live-runtime worker before generic expired-lease recovery. For each
+`WaitingApproval` candidate it rehydrates the durable principal, resolves the
+current content-protection policy, and requires an exact current provider-turn
+checkpoint, committed one-run budget reservation, unique staged tool call,
+running step, principal fingerprint, and one-shot approval binding.
+
+Valid pending or approved rows are also evaluated by the deployment's current
+`AiApprovalWaitReconciliationPolicy`. A continue decision leaves every row
+unchanged. Denial, revocation, approval expiry, deployment wait cutoff,
+deleted-session state, or policy cancellation atomically expires authority
+when needed, terminally closes the call/step and run fence, and appends one
+protected event, redacted audit, and immutable attempt outcome. A malformed or
+unprovable linkage moves only the run to `RecoveryRequired`; potentially
+unrelated approval and call rows remain untouched for operator evidence.
+
+This worker never heartbeats or polls a human wait, infers approval, calls
+`claim_next_approved`, consumes authority, executes a resolver, or contacts a
+provider. Snapshot restore remains a separate closed-runtime path: restored
+`WaitingApproval` and `WaitingTool` runs are recovery-only and cannot enter the
+live reconciler.
+
 ## Exact one-shot consumption
 
 Immediately before a consequential resolver call, server-owned code rebuilds
@@ -124,10 +148,10 @@ not reusable.
 - Per-item proposal review is not yet exposed; whole structured payload review
   is bounded and schema validated.
 - The staging worker no longer heartbeats through a human wait; approved work
-  has a one-owner same-attempt handoff. A bounded reconciliation worker still
-  needs to classify denied, revoked, never-approved, and expired decisions;
-  exact multi-call/stateless provider continuation is not yet supported. Exact completed
-  provider-retained mutation results can be adopted across generations;
+  has a one-owner same-attempt handoff and other decisions are handled by the
+  bounded live reconciler. Exact multi-call/stateless provider continuation is
+  not yet supported. Exact completed provider-retained mutation results can be
+  adopted across generations;
   incomplete or ambiguous effects remain recovery-only.
 - Consumer-specific UI, domain mutations, proposal rendering, and integration
   tests remain in each consuming application.

@@ -18,8 +18,10 @@ IDs or bounded stateless history can also be adopted across a new fenced
 generation under current authority. A bounded top-level coordinator now drives
 sequential provider-retained supervised mutations through independent human
 approvals and ordinary authenticated resolvers. Provider-turn/partial-batch
-adoption, stateless or parallel supervised waits, decision reconciliation, and
-several operational adapters listed below are still being implemented.
+adoption, stateless or parallel supervised waits, and several operational
+adapters listed below are still being implemented. A bounded live worker now
+reconciles denied, revoked, expired, policy-cancelled, and malformed approval
+waits without polling, resuming, or executing them.
 
 ## What it provides
 
@@ -101,6 +103,12 @@ several operational adapters listed below are still being implemented.
   attempt/generation remains bound to the staged action while approval/run
   state, worker owner, expiry, row-version fence, and redacted audit rotate
   atomically; concurrent resumers cannot receive the same action.
+- A bounded `OrmAiApprovalWaitReconciliationService` for live human waits. It
+  rehydrates current authority and validates the exact checkpoint, budget,
+  call, step, and approval linkage before retaining a pending/approved wait or
+  atomically cancelling denied, revoked, expired, deleted-session, cutoff, or
+  policy-cancelled work. Malformed linkage closes only the run for recovery;
+  the worker never claims, consumes, resumes, or executes an approval.
 - Protected execution of one claimed, approved, provider-retained mutation.
   The runtime reopens the exact pre-wait provider checkpoint, current rules,
   committed budget, approval, staged tool, and route; executes through fresh
@@ -313,8 +321,7 @@ logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
 Production blockers include partial/multi-call and stateless supervised
-tool-batch adoption, bounded denied/revoked/expired wait reconciliation,
-authoritative built-in-tool
+tool-batch adoption, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,

@@ -104,6 +104,18 @@ Expired approved rows in a bounded handoff window are atomically expired and
 audited before scanning continues, so old waits cannot permanently starve a
 newer eligible handoff.
 
+For all other live human-wait outcomes, run
+`OrmAiApprovalWaitReconciliationService` before generic expired-lease
+recovery. It rehydrates the current principal, validates the exact immutable
+provider-turn checkpoint and committed budget plus unique call/step/approval
+linkage, and reapplies current deployment wait policy. A valid pending or
+approved wait remains untouched. Denied, revoked, expired, deployment-cutoff,
+deleted-session, and policy-cancelled waits atomically close as `Cancelled`;
+malformed linkage closes only the run as `RecoveryRequired`. This pass never
+claims, consumes, resumes, heartbeats, polls, calls a resolver, or invokes a
+provider. Restored waits remain under restore reconciliation and never enter
+this live path.
+
 `AiRuntime::execute_tool` rejects all approval-required descriptors, so callers
 cannot bypass this lifecycle through the ordinary tool entry point.
 
@@ -167,8 +179,7 @@ before later transport without executing the resolver again. The coordinator
 checks provider-turn capacity before consuming that evidence and refuses to
 stage an approval on the final allowed turn. Multi-call, mixed read/write, and
 stateless (including Ollama/local-harness) supervised adoption remain closed;
-incomplete or ambiguous process loss is `RecoveryRequired`. Denied, revoked,
-never-approved, and expired waits still require bounded host reconciliation.
+incomplete or ambiguous process loss is `RecoveryRequired`.
 
 `AiReadOnlyAgentCoordinator` remains read-only. Deployments must not route
 supervised descriptors through it, reconstruct provider state from an

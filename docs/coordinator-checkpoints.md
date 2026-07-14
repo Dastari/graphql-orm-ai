@@ -99,6 +99,17 @@ smuggled into the read-only adopter.
 
 ## Approved supervised handoff
 
+Before generic expired-lease recovery, the live runtime runs
+`OrmAiApprovalWaitReconciliationService` over a bounded `WaitingApproval`
+window. Keeping a pending or approved wait parked requires the same exact
+provider-turn checkpoint hash, committed budget, unique staged call/step, and
+approval/principal binding described below plus current principal/scope wait
+policy. Terminal or withdrawn authority closes the run/call/step atomically;
+unprovable linkage closes only the run as `RecoveryRequired`. This path never
+opens provider payloads for continuation, claims approval, consumes it, or
+executes work. Snapshot-restored waits stay in the restore reconciler and are
+never automatically resumed.
+
 `OrmAiSupervisedResumeService` handles the narrow same-attempt boundary after
 `claim_next_approved`. It reopens the exact `provider_turn_persisted` payload,
 committed provider budget, single staged mutation, `resume_claimed` approval,

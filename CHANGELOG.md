@@ -5,13 +5,29 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.33.0` and the
-AI schema module to `0.31.0`. No table, column, index, constraint, or entity is
-added; the module version changes because the existing protected provider-turn,
-approval-wait, supervised-result checkpoint, and run states now participate in
-the bounded top-level sequential supervised coordinator contract.
+This development line advances the pre-1.0 crate version to `0.34.0` and the
+AI schema module to `0.32.0`. No table, column, index, constraint, or entity is
+added; the module version changes because the existing approval, tool-call,
+run-step, provider-turn checkpoint, run, event, audit, and attempt-outcome
+records now participate in the live approval-wait reconciliation contract.
 
 ### Added
+
+- `OrmAiApprovalWaitReconciliationService` and bounded deployment controls for
+  live `WaitingApproval` runs. The worker rehydrates the current principal,
+  validates the exact provider-turn/checkpoint/budget/tool/step/approval fence,
+  and applies current `AiApprovalWaitReconciliationPolicy` before leaving a
+  pending or approved wait parked. Denied, revoked, expired, deployment-cutoff,
+  deleted-session, or policy-cancelled waits close atomically with a protected
+  session event, redacted audit, immutable attempt outcome, cleared run fence,
+  and terminal call/step state. Malformed linkage moves only the run to
+  `RecoveryRequired` and does not alter potentially unrelated approval or tool
+  authority.
+- `AiApprovalWaitPolicyContext`, `AiApprovalWaitPolicyDecision`,
+  `AiApprovalWaitReconciliationLimits`, and
+  `AiApprovalWaitReconciliationReport`. Policy evidence can only retain or
+  cancel a parked wait; it grants no approval consumption, resolver, provider,
+  or replay authority.
 
 - `AiSupervisedAgentCoordinator` and its exact planner/service seams. A
   provider-retained turn may finish normally or request exactly one registered
@@ -151,6 +167,22 @@ the bounded top-level sequential supervised coordinator contract.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- Approval-wait reconciliation is a bounded live-runtime pass that must run
+  before generic expired-lease recovery. It never polls or heartbeats a human
+  wait, infers approval, claims approved work, consumes approval, executes a
+  resolver, or invokes a provider. Snapshot-restored `WaitingApproval` and
+  `WaitingTool` runs remain recovery-only and are never automatically resumed
+  by this service.
+- Generic expired-lease recovery no longer selects `WaitingApproval`; leaving
+  that state parked is now owned solely by the current-principal/current-policy
+  reconciler and its hard deployment cutoff. Other expired waiting states
+  remain conservative recovery cases.
+- Cancellation is fenced by exact row snapshots and revalidates the immutable
+  provider-turn checkpoint hash, committed one-run budget, owner/scope/tenant,
+  principal fingerprint, and unique staged call. Concurrent decisions are CAS
+  races, while malformed linkage preserves approval/call rows for operator
+  evidence and closes the run as `RecoveryRequired`.
 
 - The supervised coordinator accepts only provider-retained, supervised-only
   plans and exactly one mutation request per turn. It re-resolves current

@@ -490,6 +490,41 @@ pub(crate) struct PreparedApprovalConsumption {
     pub expected_tenant_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) enum PreparedApprovalWaitOutcome {
+    Cancelled(Box<PreparedApprovalWaitCancellation>),
+    RecoveryRequired {
+        approval_id: Option<Uuid>,
+        tool_call_id: Option<Uuid>,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedApprovalWaitCancellation {
+    pub call: AiToolCallRecord,
+    pub step: AiRunStepRecord,
+    pub approval: AiApprovalRecord,
+    pub checkpoint: AiRunCheckpointRecord,
+    pub next_approval_state: Option<String>,
+    pub call_state: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedApprovalWaitReconciliation {
+    pub expected_run: AiRunRecord,
+    pub expected_owner_principal_kind: String,
+    pub expected_owner_subject: String,
+    pub expected_scope_kind: String,
+    pub expected_scope_id: String,
+    pub expected_tenant_id: Option<String>,
+    pub outcome: PreparedApprovalWaitOutcome,
+    pub outcome_code: String,
+    pub policy_version: Option<String>,
+    pub event_id: Uuid,
+    pub protected_event: serde_json::Value,
+    pub worker_id: String,
+}
+
 pub(crate) struct PreparedToolCallStart {
     pub id: Uuid,
     pub provider_call_key: String,
@@ -612,6 +647,43 @@ impl OrmAiRunService {
         for retry in 0..=self.limits.maximum_transaction_retries {
             match self.claim_approved_once(worker_id.to_owned(), now).await {
                 Ok(result) => return Ok(result),
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    pub(crate) async fn reconcile_approval_wait(
+        &self,
+        reconciliation: PreparedApprovalWaitReconciliation,
+    ) -> Result<(), AiError> {
+        validate_worker_id(&reconciliation.worker_id)?;
+        if !valid_safe_code(&reconciliation.outcome_code)
+            || reconciliation
+                .policy_version
+                .as_deref()
+                .is_some_and(|value| {
+                    value.trim().is_empty()
+                        || value.len() > 1_024
+                        || value.chars().any(char::is_control)
+                })
+        {
+            return Err(AiError::InvalidInput(
+                "invalid approval-wait reconciliation".to_owned(),
+            ));
+        }
+        let now = canonical_second(self.clock.now());
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self
+                .reconcile_approval_wait_once(reconciliation.clone(), now)
+                .await
+            {
+                Ok(()) => return Ok(()),
                 Err(TransactionError::Retryable(_))
                     if retry < self.limits.maximum_transaction_retries =>
                 {
@@ -798,10 +870,12 @@ impl OrmAiRunService {
     /// protected-output checkpoint is safely finalized. An exact completed
     /// read-only tool-batch checkpoint can be requeued for protected adoption;
     /// it remains unusable until current-principal revalidation and is consumed
-    /// before the next provider call. Every other running or waiting state
-    /// becomes `RecoveryRequired`; it is never silently replayed. Malformed
-    /// checkpoint/active-lease data fails the whole pass so startup remains
-    /// closed.
+    /// before the next provider call. Live `WaitingApproval` runs are excluded
+    /// because the bounded approval-wait reconciler owns their current policy,
+    /// decision, and cutoff handling without heartbeating the human wait. Every
+    /// other running or waiting state becomes `RecoveryRequired`; it is never
+    /// silently replayed. Malformed checkpoint/active-lease data fails the
+    /// whole pass so startup remains closed.
     ///
     /// # Errors
     ///
@@ -817,7 +891,6 @@ impl OrmAiRunService {
                     for state in [
                         AiRunState::Leased,
                         AiRunState::Running,
-                        AiRunState::WaitingApproval,
                         AiRunState::WaitingTool,
                         AiRunState::WaitingReauth,
                     ] {
@@ -3003,6 +3076,390 @@ impl OrmAiRunService {
             .await
     }
 
+    async fn reconcile_approval_wait_once(
+        &self,
+        reconciliation: PreparedApprovalWaitReconciliation,
+        now: OffsetDateTime,
+    ) -> Result<(), TransactionError> {
+        let database = self.database.clone();
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiRunRecord>(&reconciliation.expected_run.id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if current != reconciliation.expected_run
+                        || persisted_state(&current)? != AiRunState::WaitingApproval
+                        || current.attempt_id.is_none()
+                        || current.lease_generation <= 0
+                        || current
+                            .lease_owner
+                            .as_deref()
+                            .is_none_or(|owner| validate_worker_id(owner).is_err())
+                        || current.lease_expires_at.is_none()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let lease = lease_from_record(&current)?;
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&current.session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if session.owner_principal_kind != reconciliation.expected_owner_principal_kind
+                        || session.owner_subject != reconciliation.expected_owner_subject
+                        || session.scope_kind != reconciliation.expected_scope_kind
+                        || session.scope_id != reconciliation.expected_scope_id
+                        || session.tenant_id != reconciliation.expected_tenant_id
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    let (
+                        final_state,
+                        approval_id,
+                        tool_call_id,
+                        provider_response_id,
+                        audit_outcome,
+                    ) = match reconciliation.outcome {
+                        PreparedApprovalWaitOutcome::Cancelled(cancellation) => {
+                            let PreparedApprovalWaitCancellation {
+                                call,
+                                step,
+                                approval,
+                                checkpoint,
+                                next_approval_state,
+                                call_state,
+                            } = *cancellation;
+                            let current_call = tx
+                                .find_by_id::<AiToolCallRecord>(&call.id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let current_step = tx
+                                .find_by_id::<AiRunStepRecord>(&step.id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let current_approval = tx
+                                .find_by_id::<AiApprovalRecord>(&approval.id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let current_checkpoint = tx
+                                .query::<AiRunCheckpointRecord>()
+                                .filter(AiRunCheckpointRecordWhereInput {
+                                    id: Some(UuidFilter {
+                                        eq: Some(checkpoint.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(1)
+                                .fetch_one()
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            if current_call != call
+                                || current_step != step
+                                || current_approval != approval
+                                || current_checkpoint != checkpoint
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let provider_response_id = checkpoint
+                                .provider_response_id
+                                .as_deref()
+                                .filter(|value| valid_provider_reference(value))
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let budget_reservation_id = checkpoint
+                                .budget_reservation_id
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let protected_state = checkpoint
+                                .protected_state
+                                .as_ref()
+                                .filter(|state| {
+                                    serde_json::to_vec(state)
+                                        .is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
+                                })
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let reservation = tx
+                                .find_by_id::<AiBudgetReservationRecord>(&budget_reservation_id)
+                                .await
+                                .map_err(OrmPublicError::from)?
+                                .ok_or_else(OrmPublicError::not_found)?;
+                            let principal_reference: PrincipalReference =
+                                serde_json::from_value(current.principal_reference.clone())
+                                    .map_err(|_| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                            let principal_fingerprint = hex::encode(Sha256::digest(
+                                serde_json::to_vec(&principal_reference).map_err(|_| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?,
+                            ));
+                            let expected_hash = coordinator_checkpoint_hash(
+                                lease.run_id,
+                                lease.attempt_id,
+                                lease.lease_generation,
+                                checkpoint.id,
+                                &checkpoint.checkpoint_kind,
+                                &reservation.provider_kind,
+                                &reservation.provider_model,
+                                Some(provider_response_id),
+                                budget_reservation_id,
+                                protected_state,
+                            )
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let calls = tx
+                                .query::<AiToolCallRecord>()
+                                .filter(AiToolCallRecordWhereInput {
+                                    run_id: Some(UuidFilter {
+                                        eq: Some(current.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .limit(4_097)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let relevant = calls
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.lease_generation == current.lease_generation
+                                        && candidate.provider_response_id.as_deref()
+                                            == Some(provider_response_id)
+                                        && candidate.budget_reservation_id
+                                            == Some(budget_reservation_id)
+                                })
+                                .collect::<Vec<_>>();
+                            let approval_state_is_terminal =
+                                matches!(approval.state.as_str(), "denied" | "revoked" | "expired")
+                                    && next_approval_state.is_none();
+                            let approval_state_expires =
+                                matches!(approval.state.as_str(), "pending" | "approved")
+                                    && next_approval_state.as_deref() == Some("expired");
+                            if current.latest_checkpoint_id != Some(checkpoint.id)
+                                || checkpoint.run_id != current.id
+                                || checkpoint.attempt_id != lease.attempt_id
+                                || checkpoint.lease_generation != lease.lease_generation
+                                || checkpoint.checkpoint_kind != "provider_turn_persisted"
+                                || checkpoint.assistant_message_id.is_some()
+                                || checkpoint.checkpoint_hash != expected_hash
+                                || reservation.session_id != session.id
+                                || reservation.scope_kind != reconciliation.expected_scope_kind
+                                || reservation.scope_id != reconciliation.expected_scope_id
+                                || reservation.tenant_id != reconciliation.expected_tenant_id
+                                || reservation.principal_kind
+                                    != reconciliation.expected_owner_principal_kind
+                                || reservation.principal_subject
+                                    != reconciliation.expected_owner_subject
+                                || reservation.run_id != current.id
+                                || reservation.attempt_id != lease.attempt_id
+                                || reservation.lease_generation != lease.lease_generation
+                                || reservation.state != "committed"
+                                || reservation.actual_runs != Some(1)
+                                || reservation.reconciled_at.is_none()
+                                || calls.len() >= 4_097
+                                || relevant.len() != 1
+                                || relevant[0].id != call.id
+                                || call.run_id != current.id
+                                || call.lease_generation != current.lease_generation
+                                || call.provider_kind.as_deref()
+                                    != Some(reservation.provider_kind.as_str())
+                                || call.provider_model.as_deref()
+                                    != Some(reservation.provider_model.as_str())
+                                || call.provider_response_id.as_deref()
+                                    != Some(provider_response_id)
+                                || call.budget_reservation_id != Some(budget_reservation_id)
+                                || call.tool_call_index != 0
+                                || call.state != "waiting_approval"
+                                || call.completed_at.is_some()
+                                || call.protected_result.is_some()
+                                || call.approval_id != Some(approval.id)
+                                || call.risk == "read_only"
+                                || step.id != call.id
+                                || step.run_id != current.id
+                                || step.lease_generation != current.lease_generation
+                                || step.step_kind != "application_tool"
+                                || step.state != "running"
+                                || step.finished_at.is_some()
+                                || approval.tool_call_id != call.id
+                                || approval.session_id != session.id
+                                || approval.principal_subject != principal_reference.subject
+                                || approval.principal_reference_fingerprint != principal_fingerprint
+                                || approval.argument_hash != call.argument_hash
+                                || approval.tool_fingerprint != call.tool_fingerprint
+                                || approval.maximum_uses != 1
+                                || approval.consumed_uses != 0
+                                || approval.consumed_at.is_some()
+                                || !(approval_state_is_terminal || approval_state_expires)
+                                || !matches!(
+                                    call_state.as_str(),
+                                    "approval_denied" | "approval_revoked" | "approval_expired"
+                                )
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            if let Some(next_state) = next_approval_state {
+                                let approval_update = tx
+                                    .compare_and_swap::<AiApprovalRecord>(
+                                        &approval.id,
+                                        approval.row_version,
+                                        AiApprovalRecordWhereInput::default(),
+                                        UpdateAiApprovalRecordInput {
+                                            state: Some(next_state),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if !matches!(approval_update, ConditionalUpdateOutcome::Updated(_))
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            }
+                            let call_update = tx
+                                .compare_and_swap::<AiToolCallRecord>(
+                                    &call.id,
+                                    call.row_version,
+                                    AiToolCallRecordWhereInput::default(),
+                                    UpdateAiToolCallRecordInput {
+                                        state: Some(call_state.clone()),
+                                        completed_at: Some(Some(now.unix_timestamp())),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(call_update, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let step_update = tx
+                                .compare_and_swap::<AiRunStepRecord>(
+                                    &step.id,
+                                    step.row_version,
+                                    AiRunStepRecordWhereInput::default(),
+                                    UpdateAiRunStepRecordInput {
+                                        state: Some(call_state),
+                                        finished_at: Some(Some(now.unix_timestamp())),
+                                        error_code: Some(Some(reconciliation.outcome_code.clone())),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(step_update, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            (
+                                AiRunState::Cancelled,
+                                Some(approval.id),
+                                Some(call.id),
+                                Some(provider_response_id.to_owned()),
+                                "cancelled",
+                            )
+                        }
+                        PreparedApprovalWaitOutcome::RecoveryRequired {
+                            approval_id,
+                            tool_call_id,
+                        } => (
+                            AiRunState::RecoveryRequired,
+                            approval_id,
+                            tool_call_id,
+                            None,
+                            "recovery_required",
+                        ),
+                    };
+
+                    let event_sequence = session
+                        .stream_head
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let session_update = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                stream_head: Some(event_sequence),
+                                last_activity_at: Some(now.unix_timestamp()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let run_update = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(AiRunState::WaitingApproval.as_str()),
+                            UpdateAiRunRecordInput {
+                                state: Some(final_state.as_str().to_owned()),
+                                lease_owner: Some(None),
+                                lease_expires_at: Some(None),
+                                lease_heartbeat_at: Some(None),
+                                next_attempt_at: Some(None),
+                                error_code: Some(Some(reconciliation.outcome_code.clone())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(run_update, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: reconciliation.event_id,
+                        session_id: session.id,
+                        sequence: event_sequence,
+                        event_type: "approval_wait_reconciled".to_owned(),
+                        run_id: Some(current.id),
+                        causation_id: tool_call_id.or(approval_id).map(|id| id.to_string()),
+                        correlation_id: approval_id.unwrap_or(current.id).to_string(),
+                        protected_payload: reconciliation.protected_event,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "ai_worker".to_owned(),
+                        actor_subject: reconciliation.worker_id,
+                        action: "ai.run.approval_wait_reconcile".to_owned(),
+                        resource_kind: "ai_run".to_owned(),
+                        resource_reference: current.id.to_string(),
+                        outcome: audit_outcome.to_owned(),
+                        reason_code: reconciliation.outcome_code.clone(),
+                        correlation_id: approval_id.unwrap_or(current.id).to_string(),
+                        causation_id: tool_call_id.map(|id| id.to_string()),
+                        policy_version: reconciliation.policy_version,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    append_attempt_outcome(
+                        tx,
+                        &lease,
+                        final_state,
+                        reconciliation.outcome_code,
+                        provider_response_id,
+                        now,
+                    )
+                    .await?;
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: session.id,
+                        sequence: event_sequence,
+                    });
+                    Ok(())
+                })
+            })
+            .await
+    }
+
     async fn update_active_lease(
         &self,
         lease: &AiRunLease,
@@ -3211,7 +3668,7 @@ async fn append_attempt_outcome(
     Ok(())
 }
 
-fn validate_worker_id(worker_id: &str) -> Result<(), AiError> {
+pub(crate) fn validate_worker_id(worker_id: &str) -> Result<(), AiError> {
     if worker_id.trim().is_empty()
         || worker_id.len() > MAXIMUM_WORKER_ID_BYTES
         || worker_id.chars().any(char::is_control)

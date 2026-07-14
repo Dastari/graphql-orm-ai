@@ -245,6 +245,15 @@ rule, and clock boundaries plus `OrmAiConsequentialToolCallService`,
 worker on `WaitingApproval`; never heartbeat or poll the human wait. Each later
 mutation receives a new independent preview and approval.
 
+In the live worker cycle, run
+`OrmAiApprovalWaitReconciliationService::reconcile_waits` before
+`OrmAiRunService::recover_expired_leases`. Supply a deployment policy that
+reevaluates the current principal and exact scope. The pass leaves valid
+pending/approved waits parked, cancels denied/revoked/expired/cutoff or
+policy-cancelled waits, and sends malformed linkage to `RecoveryRequired`.
+It never claims or executes approved work. Keep it closed during snapshot
+restore; restored human waits remain recovery-only.
+
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run
 to `RecoveryRequired`.
@@ -264,8 +273,8 @@ provider-retained mutation through `OrmAiSupervisedResumeService`; its exact
 completed result can be re-adopted under a new generation before one-shot
 checkpoint consumption. `AiSupervisedAgentCoordinator` now performs that
 consumption and the remaining bounded sequential provider loop. Multi-call,
-mixed, parallel, and stateless supervised continuation remain unfinished, as
-does denied/revoked/expired wait reconciliation. Arbitrary GraphQL and
+mixed, parallel, and stateless supervised continuation remain unfinished.
+Arbitrary GraphQL and
 ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md) and
 [supervised tool-loop guide](supervised-tool-loop.md).
@@ -275,8 +284,8 @@ See the [worker and provider-turn guide](worker-provider-turn.md) and
 upload/search/deletion, attachment quotas/derivatives, authoritative
 provider-built-in unit pricing, complete deleting-session and external-artifact
 retention,
-provider-turn and partial-batch restart adoption, stateless/parallel
-supervised continuation, and human-decision reconciliation remain
+provider-turn and partial-batch restart adoption and stateless/parallel
+supervised continuation remain
 under implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL
 lifecycles and consequential executor are implemented; approval consumption is

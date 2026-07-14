@@ -4,6 +4,48 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: live approval-wait reconciliation (crate 0.33.0 to 0.34.0; schema 0.31.0 to 0.32.0)
+
+Apply AI schema module `0.32.0` while run claimers, approval workers, generic
+expired-lease recovery, and restore callbacks are closed. Do not run 0.34.0
+code against a module still registered as 0.31.0. The generated migration adds
+no table, column, index, constraint, or entity and still owns 39 private
+records. It advances the module because existing approval, tool-call, run-step,
+provider-turn checkpoint, run, event, audit, and attempt-outcome records now
+have a live approval-wait reconciliation meaning. No data copy, protected
+payload rewrite, consumer table, or application SQL is required.
+
+Hosts should construct `OrmAiApprovalWaitReconciliationService` with the same
+generated ORM database, run service, current-principal resolver, content
+protection boundaries, clock, and a current
+`AiApprovalWaitReconciliationPolicy`. Configure positive principal/wait
+durations and a bounded `1..=256` candidate scan through
+`AiApprovalWaitReconciliationLimits`. The policy's decision may only leave an
+exact pending/approved wait parked or cancel it; it is not approval, resolver,
+provider, egress, or replay authority.
+
+Run `reconcile_waits` before `OrmAiRunService::recover_expired_leases` in each
+live worker cycle. The reconciler does not heartbeat or poll a human wait.
+Generic expired-lease recovery no longer selects `WaitingApproval`; the
+dedicated worker owns its decision, policy, expiry, and deployment-cutoff
+transition. `WaitingTool` and other externally ambiguous expired states remain
+conservative recovery cases.
+Denied, revoked, expired, deployment-cutoff, deleted-session, and current-policy
+cancellations atomically close the run/call/step fence and append protected,
+redacted, and immutable outcome facts. Valid pending/approved waits remain
+unchanged. Exact CAS races are reported and can be reconsidered by the next
+bounded cycle. Malformed or unprovable checkpoint/budget/call/step/approval
+linkage moves the run to `RecoveryRequired` without changing the linked
+approval or call.
+
+Approved work still uses only `claim_next_approved`, fresh preview/policy/rule
+validation, one-shot consumption, and the ordinary authenticated GraphQL
+resolver path. The reconciler never claims or resumes it. During snapshot
+restore, keep all workers closed: restored `WaitingApproval` and `WaitingTool`
+states continue to become `RecoveryRequired` through restore reconciliation
+and are deliberately not eligible for this live worker. This is a behavioral
+and public Rust API change with no GraphQL SDL or data migration.
+
 ## Unreleased: bounded sequential supervised coordinator (crate 0.32.0 to 0.33.0; schema 0.30.0 to 0.31.0)
 
 Apply AI schema module `0.31.0` while workers, provider calls, approval waits,

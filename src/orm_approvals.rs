@@ -10,7 +10,7 @@ use agql_auth::{
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::UuidFilter;
+use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
 };
@@ -20,13 +20,17 @@ use graphql_orm::graphql::pagination::{
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::orm_runs::{PreparedApprovalConsumption, PreparedApprovalRequest};
+use crate::orm_runs::{
+    PreparedApprovalConsumption, PreparedApprovalRequest, PreparedApprovalWaitCancellation,
+    PreparedApprovalWaitOutcome, PreparedApprovalWaitReconciliation, coordinator_checkpoint_hash,
+    validate_worker_id,
+};
 use crate::persistence::*;
 use crate::{
     AiApprovalAccessPolicy, AiApprovalAction, AiApprovalBinding, AiApprovalConnection,
     AiApprovalDecision, AiApprovalEdge, AiApprovalGrant, AiApprovalId, AiApprovalService,
     AiApprovalState, AiApprovalView, AiCanonicalActionPreview, AiContentProtectionPolicy,
-    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiRunLease, AiScope,
+    AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiRunId, AiRunLease, AiScope,
     AiSessionId, AiSessionWakeup, AiToolCatalog, AiToolId, AiToolOperationDomain,
     AiToolOperationKind, AiToolRisk, ConsumedAiApproval, ContentProtectionContext,
     DecideAiApprovalInput, OrmAiRunService, ProtectedContentEnvelope, RevokeAiApprovalInput,
@@ -70,6 +74,200 @@ impl Default for AiApprovalServiceLimits {
             maximum_approval_lifetime: Duration::hours(24),
         }
     }
+}
+
+/// Current deployment decision for one still-live approval wait.
+///
+/// This value proves only that the deployment's current wait policy was
+/// evaluated. It is not approval authority and cannot authorize resolver or
+/// provider execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiApprovalWaitPolicyDecision {
+    continue_waiting: bool,
+    policy_version: String,
+}
+
+impl AiApprovalWaitPolicyDecision {
+    /// Allows the exact pending or approved wait to remain parked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for an empty, overlong, or
+    /// control-character-bearing policy version.
+    pub fn continue_waiting(policy_version: impl Into<String>) -> Result<Self, AiError> {
+        Self::new(true, policy_version.into())
+    }
+
+    /// Cancels the parked wait under current deployment policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for an empty, overlong, or
+    /// control-character-bearing policy version.
+    pub fn cancel(policy_version: impl Into<String>) -> Result<Self, AiError> {
+        Self::new(false, policy_version.into())
+    }
+
+    /// Returns whether the wait may remain parked.
+    pub const fn may_continue(&self) -> bool {
+        self.continue_waiting
+    }
+
+    /// Returns the current deployment policy version.
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    fn new(continue_waiting: bool, policy_version: String) -> Result<Self, AiError> {
+        if policy_version.trim().is_empty()
+            || policy_version.len() > 1_024
+            || policy_version.chars().any(char::is_control)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid approval-wait policy version".to_owned(),
+            ));
+        }
+        Ok(Self {
+            continue_waiting,
+            policy_version,
+        })
+    }
+}
+
+/// Safe current context presented to approval-wait policy.
+///
+/// The context carries identifiers and durable state only. It contains no
+/// approval preview, protected arguments, result content, or credential.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiApprovalWaitPolicyContext {
+    scope: AiScope,
+    session_id: AiSessionId,
+    run_id: AiRunId,
+    approval_id: AiApprovalId,
+    approval_state: AiApprovalState,
+}
+
+impl AiApprovalWaitPolicyContext {
+    /// Returns the exact scope of the parked run.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
+    /// Returns the owning session identifier.
+    pub const fn session_id(&self) -> AiSessionId {
+        self.session_id
+    }
+
+    /// Returns the parked run identifier.
+    pub const fn run_id(&self) -> AiRunId {
+        self.run_id
+    }
+
+    /// Returns the exact approval identifier.
+    pub const fn approval_id(&self) -> AiApprovalId {
+        self.approval_id
+    }
+
+    /// Returns the durable approval state observed by the worker.
+    pub const fn approval_state(&self) -> AiApprovalState {
+        self.approval_state
+    }
+}
+
+/// Deployment-owned current policy for live approval waits.
+///
+/// Implementations must evaluate current scope and principal authority. A
+/// positive result only keeps a wait parked; it never resumes, consumes, or
+/// executes the approved action.
+#[async_trait]
+pub trait AiApprovalWaitReconciliationPolicy: Send + Sync {
+    /// Evaluates whether one exact pending or approved wait may remain parked.
+    async fn evaluate_wait(
+        &self,
+        principal: &AuthPrincipal,
+        context: &AiApprovalWaitPolicyContext,
+    ) -> Result<AiApprovalWaitPolicyDecision, AiError>;
+}
+
+/// Deployment bounds for one approval-wait reconciliation pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiApprovalWaitReconciliationLimits {
+    maximum_principal_age: Duration,
+    maximum_pending_duration: Duration,
+    maximum_candidate_scan: usize,
+}
+
+impl AiApprovalWaitReconciliationLimits {
+    /// Creates validated reconciliation bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless both durations are
+    /// positive and the scan bound is in `1..=256`.
+    pub fn new(
+        maximum_principal_age: Duration,
+        maximum_pending_duration: Duration,
+        maximum_candidate_scan: usize,
+    ) -> Result<Self, AiError> {
+        if !maximum_principal_age.is_positive()
+            || !maximum_pending_duration.is_positive()
+            || !(1..=256).contains(&maximum_candidate_scan)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid approval-wait reconciliation limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_principal_age,
+            maximum_pending_duration,
+            maximum_candidate_scan,
+        })
+    }
+
+    /// Returns the maximum accepted age of a rehydrated principal.
+    pub const fn maximum_principal_age(&self) -> Duration {
+        self.maximum_principal_age
+    }
+
+    /// Returns the hard deployment cutoff for a parked wait.
+    pub const fn maximum_pending_duration(&self) -> Duration {
+        self.maximum_pending_duration
+    }
+
+    /// Returns the maximum runs inspected by one pass.
+    pub const fn maximum_candidate_scan(&self) -> usize {
+        self.maximum_candidate_scan
+    }
+}
+
+impl Default for AiApprovalWaitReconciliationLimits {
+    fn default() -> Self {
+        Self {
+            maximum_principal_age: Duration::seconds(60),
+            maximum_pending_duration: Duration::hours(24),
+            maximum_candidate_scan: 64,
+        }
+    }
+}
+
+/// Bounded outcome counts from one approval-wait reconciliation pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AiApprovalWaitReconciliationReport {
+    /// Runs cancelled after explicit denial.
+    pub cancelled_denied: usize,
+    /// Runs cancelled after explicit revocation.
+    pub cancelled_revoked: usize,
+    /// Runs cancelled after approval or deployment expiry.
+    pub cancelled_expired: usize,
+    /// Runs cancelled by current deployment policy.
+    pub cancelled_policy: usize,
+    /// Malformed waits closed for operator recovery.
+    pub recovery_required: usize,
+    /// Current valid waits left parked.
+    pub still_waiting: usize,
+    /// Candidates concurrently changed before the transactional decision.
+    pub raced: usize,
 }
 
 /// Result of parking a fenced run on one exact approval.
@@ -876,6 +1074,627 @@ impl AiApprovalService for OrmAiApprovalService {
     }
 }
 
+/// ORM-backed bounded reconciler for live runs parked on approval.
+///
+/// The worker rehydrates the current principal and current deployment wait
+/// policy before retaining a pending or approved wait. It can only leave the
+/// wait parked, cancel it, or close malformed linkage as `RecoveryRequired`.
+/// It never claims, consumes, resumes, or executes an approval.
+#[derive(Clone)]
+pub struct OrmAiApprovalWaitReconciliationService {
+    database: Database<DefaultWriteBackend>,
+    run_service: OrmAiRunService,
+    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
+    protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
+    content_protector: Arc<dyn AiContentProtector>,
+    clock: Arc<dyn Clock>,
+    limits: AiApprovalWaitReconciliationLimits,
+}
+
+impl OrmAiApprovalWaitReconciliationService {
+    /// Creates a fail-closed live approval-wait reconciler.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        database: Database<DefaultWriteBackend>,
+        run_service: OrmAiRunService,
+        principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+        wait_policy: Arc<dyn AiApprovalWaitReconciliationPolicy>,
+        protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
+        content_protector: Arc<dyn AiContentProtector>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            database,
+            run_service,
+            principal_resolver,
+            wait_policy,
+            protection_policy,
+            content_protector,
+            clock,
+            limits: AiApprovalWaitReconciliationLimits::default(),
+        }
+    }
+
+    /// Overrides deployment-owned hard limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: AiApprovalWaitReconciliationLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Returns the ORM database handle for host schema wiring.
+    pub fn database(&self) -> &Database<DefaultWriteBackend> {
+        &self.database
+    }
+
+    /// Reconciles one bounded window of live `WaitingApproval` runs.
+    ///
+    /// Run this pass before generic expired-lease recovery. Restored waits are
+    /// deliberately excluded because restore reconciliation already closes
+    /// them as `RecoveryRequired`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid worker ID, stale or mismatched current
+    /// principal, unavailable content protection, malformed ownership state,
+    /// policy failure, or persistence ambiguity. Individual CAS races are
+    /// counted and do not fail the bounded pass.
+    pub async fn reconcile_waits(
+        &self,
+        worker_id: &str,
+    ) -> Result<AiApprovalWaitReconciliationReport, AiError> {
+        validate_worker_id(worker_id)?;
+        let now = canonical_second(self.clock.now());
+        let candidates = self.load_candidates().await?;
+        let mut report = AiApprovalWaitReconciliationReport::default();
+        for run in candidates {
+            let snapshot = self.load_snapshot(run).await?;
+            let session = snapshot
+                .session
+                .as_ref()
+                .ok_or(AiError::PersistenceFailed)?;
+            let reference: PrincipalReference =
+                serde_json::from_value(snapshot.run.principal_reference.clone())
+                    .map_err(|_| AiError::PersistenceFailed)?;
+            let resolved = self.resolve_current(&reference).await?;
+            let (owner_kind, owner_subject) = principal_identity(resolved.principal());
+            if session.id != snapshot.run.session_id
+                || session.owner_principal_kind != owner_kind
+                || session.owner_subject != owner_subject
+            {
+                return Err(AiError::PersistenceFailed);
+            }
+            let scope = record_scope(session);
+            let protection = self
+                .current_protection_policy(resolved.principal(), &scope)
+                .await?;
+            let linkage_valid = approval_wait_linkage_is_valid(&snapshot, &reference);
+            let approval_state = snapshot
+                .approval
+                .as_ref()
+                .and_then(|approval| parse_state(&approval.state).ok());
+
+            let (outcome, outcome_code, policy_version, report_kind) =
+                if !linkage_valid || approval_state.is_none() {
+                    (
+                        PreparedApprovalWaitOutcome::RecoveryRequired {
+                            approval_id: snapshot.approval.as_ref().map(|approval| approval.id),
+                            tool_call_id: snapshot.call.as_ref().map(|call| call.id),
+                        },
+                        "approval_wait_linkage_invalid",
+                        None,
+                        ApprovalWaitReportKind::RecoveryRequired,
+                    )
+                } else {
+                    let approval = snapshot
+                        .approval
+                        .as_ref()
+                        .expect("valid approval linkage has an approval");
+                    let state = approval_state.unwrap_or(AiApprovalState::Consumed);
+                    let (reason, call_state, next_approval_state, policy_version, report_kind) =
+                        match state {
+                            AiApprovalState::Denied => (
+                                "approval_denied",
+                                "approval_denied",
+                                None,
+                                None,
+                                ApprovalWaitReportKind::Denied,
+                            ),
+                            AiApprovalState::Revoked => (
+                                "approval_revoked",
+                                "approval_revoked",
+                                None,
+                                None,
+                                ApprovalWaitReportKind::Revoked,
+                            ),
+                            AiApprovalState::Expired => (
+                                "approval_expired",
+                                "approval_expired",
+                                None,
+                                None,
+                                ApprovalWaitReportKind::Expired,
+                            ),
+                            AiApprovalState::Pending | AiApprovalState::Approved
+                                if session.state != "active" || session.deleted_at.is_some() =>
+                            {
+                                (
+                                    "approval_wait_session_unavailable",
+                                    "approval_expired",
+                                    Some("expired".to_owned()),
+                                    None,
+                                    ApprovalWaitReportKind::Expired,
+                                )
+                            }
+                            AiApprovalState::Pending | AiApprovalState::Approved
+                                if approval.expires_at <= now.unix_timestamp() =>
+                            {
+                                (
+                                    "approval_expired",
+                                    "approval_expired",
+                                    Some("expired".to_owned()),
+                                    None,
+                                    ApprovalWaitReportKind::Expired,
+                                )
+                            }
+                            AiApprovalState::Pending | AiApprovalState::Approved
+                                if approval_wait_cutoff_reached(
+                                    approval.created_at,
+                                    now,
+                                    self.limits.maximum_pending_duration,
+                                ) =>
+                            {
+                                (
+                                    "approval_wait_cutoff",
+                                    "approval_expired",
+                                    Some("expired".to_owned()),
+                                    None,
+                                    ApprovalWaitReportKind::Expired,
+                                )
+                            }
+                            AiApprovalState::Pending | AiApprovalState::Approved => {
+                                let context = AiApprovalWaitPolicyContext {
+                                    scope: scope.clone(),
+                                    session_id: AiSessionId(session.id),
+                                    run_id: AiRunId(snapshot.run.id),
+                                    approval_id: AiApprovalId(approval.id),
+                                    approval_state: state,
+                                };
+                                let decision = self
+                                    .wait_policy
+                                    .evaluate_wait(resolved.principal(), &context)
+                                    .await?;
+                                if decision.may_continue() {
+                                    report.still_waiting += 1;
+                                    continue;
+                                }
+                                (
+                                    "approval_wait_policy_cancelled",
+                                    "approval_expired",
+                                    Some("expired".to_owned()),
+                                    Some(decision.policy_version().to_owned()),
+                                    ApprovalWaitReportKind::Policy,
+                                )
+                            }
+                            AiApprovalState::ResumeClaimed | AiApprovalState::Consumed => (
+                                "approval_wait_linkage_invalid",
+                                "approval_expired",
+                                None,
+                                None,
+                                ApprovalWaitReportKind::RecoveryRequired,
+                            ),
+                        };
+                    if report_kind == ApprovalWaitReportKind::RecoveryRequired {
+                        (
+                            PreparedApprovalWaitOutcome::RecoveryRequired {
+                                approval_id: Some(approval.id),
+                                tool_call_id: snapshot.call.as_ref().map(|call| call.id),
+                            },
+                            reason,
+                            policy_version,
+                            report_kind,
+                        )
+                    } else {
+                        (
+                            PreparedApprovalWaitOutcome::Cancelled(Box::new(
+                                PreparedApprovalWaitCancellation {
+                                    call: snapshot
+                                        .call
+                                        .clone()
+                                        .expect("valid approval linkage has a tool call"),
+                                    step: snapshot
+                                        .step
+                                        .clone()
+                                        .expect("valid approval linkage has a run step"),
+                                    approval: approval.clone(),
+                                    checkpoint: snapshot
+                                        .checkpoint
+                                        .clone()
+                                        .expect("valid approval linkage has a checkpoint"),
+                                    next_approval_state,
+                                    call_state: call_state.to_owned(),
+                                },
+                            )),
+                            reason,
+                            policy_version,
+                            report_kind,
+                        )
+                    }
+                };
+
+            let event_id = Uuid::new_v4();
+            let protected_event = self
+                .protect_event(
+                    &protection,
+                    event_id,
+                    &scope,
+                    serde_json::json!({
+                        "runId": snapshot.run.id,
+                        "approvalId": snapshot.approval.as_ref().map(|approval| approval.id),
+                        "toolCallId": snapshot.call.as_ref().map(|call| call.id),
+                        "outcomeCode": outcome_code
+                    }),
+                )
+                .await?;
+            let prepared = PreparedApprovalWaitReconciliation {
+                expected_run: snapshot.run,
+                expected_owner_principal_kind: owner_kind,
+                expected_owner_subject: owner_subject.to_owned(),
+                expected_scope_kind: scope.kind,
+                expected_scope_id: scope.id,
+                expected_tenant_id: scope.tenant_id,
+                outcome,
+                outcome_code: outcome_code.to_owned(),
+                policy_version,
+                event_id,
+                protected_event,
+                worker_id: worker_id.to_owned(),
+            };
+            match self.run_service.reconcile_approval_wait(prepared).await {
+                Ok(()) => report.record(report_kind),
+                Err(AiError::Conflict) => report.raced += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(report)
+    }
+
+    async fn load_candidates(&self) -> Result<Vec<AiRunRecord>, AiError> {
+        let maximum_candidate_scan = self.limits.maximum_candidate_scan;
+        self.database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let mut runs = tx
+                        .query::<AiRunRecord>()
+                        .filter(AiRunRecordWhereInput {
+                            state: Some(StringFilter {
+                                eq: Some("waiting_approval".to_owned()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(maximum_candidate_scan as i64)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    runs.sort_by_key(|run| (run.created_at, run.id));
+                    runs.truncate(maximum_candidate_scan);
+                    Ok(runs)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    async fn load_snapshot(&self, run: AiRunRecord) -> Result<ApprovalWaitSnapshot, AiError> {
+        self.database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&run.session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let calls = tx
+                        .query::<AiToolCallRecord>()
+                        .filter(AiToolCallRecordWhereInput {
+                            run_id: Some(UuidFilter {
+                                eq: Some(run.id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(4_097)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let waiting_calls = calls
+                        .iter()
+                        .filter(|call| {
+                            call.lease_generation == run.lease_generation
+                                && call.state == "waiting_approval"
+                        })
+                        .collect::<Vec<_>>();
+                    let call = (waiting_calls.len() == 1).then(|| waiting_calls[0].clone());
+                    let step = match call.as_ref() {
+                        Some(call) => tx
+                            .find_by_id::<AiRunStepRecord>(&call.id)
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        None => None,
+                    };
+                    let approval = match call.as_ref().and_then(|call| call.approval_id) {
+                        Some(approval_id) => tx
+                            .find_by_id::<AiApprovalRecord>(&approval_id)
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        None => None,
+                    };
+                    let checkpoint = match run.latest_checkpoint_id {
+                        Some(checkpoint_id) => tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(checkpoint_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        None => None,
+                    };
+                    let reservation = match checkpoint
+                        .as_ref()
+                        .and_then(|checkpoint| checkpoint.budget_reservation_id)
+                    {
+                        Some(reservation_id) => tx
+                            .find_by_id::<AiBudgetReservationRecord>(&reservation_id)
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                        None => None,
+                    };
+                    Ok(ApprovalWaitSnapshot {
+                        run,
+                        session,
+                        calls,
+                        call,
+                        step,
+                        approval,
+                        checkpoint,
+                        reservation,
+                    })
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    async fn resolve_current(
+        &self,
+        reference: &PrincipalReference,
+    ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
+        let resolved = self
+            .principal_resolver
+            .resolve(reference)
+            .await
+            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let checked_at = self.clock.now();
+        if resolved.resolved_at() > checked_at
+            || checked_at - resolved.resolved_at() > self.limits.maximum_principal_age
+            || resolved.reference() != reference
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        Ok(resolved)
+    }
+
+    async fn current_protection_policy(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+    ) -> Result<AiContentProtectionPolicy, AiError> {
+        let policy = self.protection_policy.resolve(principal, scope).await?;
+        if !policy.ready || policy.scope != *scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        Ok(policy)
+    }
+
+    async fn protect_event(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        event_id: Uuid,
+        scope: &AiScope,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, AiError> {
+        let envelope = self
+            .content_protector
+            .protect(
+                policy,
+                &content_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    scope,
+                ),
+                value,
+            )
+            .await
+            .map_err(map_protection)?;
+        serde_json::to_value(envelope).map_err(|_| AiError::PersistenceFailed)
+    }
+}
+
+struct ApprovalWaitSnapshot {
+    run: AiRunRecord,
+    session: Option<AiSessionRecord>,
+    calls: Vec<AiToolCallRecord>,
+    call: Option<AiToolCallRecord>,
+    step: Option<AiRunStepRecord>,
+    approval: Option<AiApprovalRecord>,
+    checkpoint: Option<AiRunCheckpointRecord>,
+    reservation: Option<AiBudgetReservationRecord>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApprovalWaitReportKind {
+    Denied,
+    Revoked,
+    Expired,
+    Policy,
+    RecoveryRequired,
+}
+
+impl AiApprovalWaitReconciliationReport {
+    fn record(&mut self, kind: ApprovalWaitReportKind) {
+        match kind {
+            ApprovalWaitReportKind::Denied => self.cancelled_denied += 1,
+            ApprovalWaitReportKind::Revoked => self.cancelled_revoked += 1,
+            ApprovalWaitReportKind::Expired => self.cancelled_expired += 1,
+            ApprovalWaitReportKind::Policy => self.cancelled_policy += 1,
+            ApprovalWaitReportKind::RecoveryRequired => self.recovery_required += 1,
+        }
+    }
+}
+
+fn approval_wait_linkage_is_valid(
+    snapshot: &ApprovalWaitSnapshot,
+    principal_reference: &PrincipalReference,
+) -> bool {
+    let (
+        Some(session),
+        Some(call),
+        Some(step),
+        Some(approval),
+        Some(checkpoint),
+        Some(reservation),
+    ) = (
+        snapshot.session.as_ref(),
+        snapshot.call.as_ref(),
+        snapshot.step.as_ref(),
+        snapshot.approval.as_ref(),
+        snapshot.checkpoint.as_ref(),
+        snapshot.reservation.as_ref(),
+    )
+    else {
+        return false;
+    };
+    let Some(attempt_id) = snapshot.run.attempt_id else {
+        return false;
+    };
+    let Some(provider_response_id) = checkpoint
+        .provider_response_id
+        .as_deref()
+        .filter(|value| valid_safe_reference(value))
+    else {
+        return false;
+    };
+    let Some(budget_reservation_id) = checkpoint.budget_reservation_id else {
+        return false;
+    };
+    let Some(protected_state) = checkpoint.protected_state.as_ref().filter(|state| {
+        serde_json::to_vec(state).is_ok_and(|encoded| encoded.len() <= 64 * 1024 * 1024)
+    }) else {
+        return false;
+    };
+    let expected_hash = coordinator_checkpoint_hash(
+        AiRunId(snapshot.run.id),
+        attempt_id,
+        snapshot.run.lease_generation,
+        checkpoint.id,
+        &checkpoint.checkpoint_kind,
+        &reservation.provider_kind,
+        &reservation.provider_model,
+        Some(provider_response_id),
+        budget_reservation_id,
+        protected_state,
+    );
+    let relevant_calls = snapshot
+        .calls
+        .iter()
+        .filter(|candidate| {
+            candidate.lease_generation == snapshot.run.lease_generation
+                && candidate.provider_response_id.as_deref() == Some(provider_response_id)
+                && candidate.budget_reservation_id == Some(budget_reservation_id)
+        })
+        .collect::<Vec<_>>();
+    snapshot.calls.len() < 4_097
+        && snapshot.run.state == "waiting_approval"
+        && snapshot.run.lease_generation > 0
+        && snapshot
+            .run
+            .lease_owner
+            .as_deref()
+            .is_some_and(|worker| validate_worker_id(worker).is_ok())
+        && snapshot.run.lease_expires_at.is_some()
+        && snapshot.run.latest_checkpoint_id == Some(checkpoint.id)
+        && checkpoint.run_id == snapshot.run.id
+        && checkpoint.attempt_id == attempt_id
+        && checkpoint.lease_generation == snapshot.run.lease_generation
+        && checkpoint.checkpoint_kind == "provider_turn_persisted"
+        && checkpoint.assistant_message_id.is_none()
+        && expected_hash.is_ok_and(|expected_hash| checkpoint.checkpoint_hash == expected_hash)
+        && reservation.id == budget_reservation_id
+        && reservation.scope_kind == session.scope_kind
+        && reservation.scope_id == session.scope_id
+        && reservation.tenant_id == session.tenant_id
+        && reservation.principal_kind == session.owner_principal_kind
+        && reservation.principal_subject == session.owner_subject
+        && reservation.session_id == session.id
+        && reservation.run_id == snapshot.run.id
+        && reservation.attempt_id == attempt_id
+        && reservation.lease_generation == snapshot.run.lease_generation
+        && reservation.state == "committed"
+        && reservation.actual_runs == Some(1)
+        && reservation.reconciled_at.is_some()
+        && relevant_calls.len() == 1
+        && relevant_calls[0].id == call.id
+        && call.run_id == snapshot.run.id
+        && call.lease_generation == snapshot.run.lease_generation
+        && call.provider_kind.as_deref() == Some(reservation.provider_kind.as_str())
+        && call.provider_model.as_deref() == Some(reservation.provider_model.as_str())
+        && call.provider_response_id.as_deref() == Some(provider_response_id)
+        && call.budget_reservation_id == Some(budget_reservation_id)
+        && call.tool_call_index == 0
+        && call.state == "waiting_approval"
+        && call.completed_at.is_none()
+        && call.protected_result.is_none()
+        && call.approval_id == Some(approval.id)
+        && call.risk != "read_only"
+        && step.id == call.id
+        && step.run_id == snapshot.run.id
+        && step.lease_generation == snapshot.run.lease_generation
+        && step.step_kind == "application_tool"
+        && step.state == "running"
+        && step.finished_at.is_none()
+        && approval.tool_call_id == call.id
+        && approval.session_id == session.id
+        && approval.principal_subject == principal_reference.subject
+        && approval.principal_reference_fingerprint
+            == AiApprovalBinding::principal_fingerprint(principal_reference)
+        && approval.argument_hash == call.argument_hash
+        && approval.tool_fingerprint == call.tool_fingerprint
+        && approval.maximum_uses == 1
+        && approval.consumed_uses == 0
+        && approval.consumed_at.is_none()
+}
+
+fn approval_wait_cutoff_reached(
+    created_at: i64,
+    now: OffsetDateTime,
+    maximum_pending_duration: Duration,
+) -> bool {
+    created_at
+        .checked_add(maximum_pending_duration.whole_seconds())
+        .is_none_or(|cutoff| cutoff <= now.unix_timestamp())
+}
+
+fn valid_safe_reference(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 1_024 && !value.chars().any(char::is_control)
+}
+
 fn record_matches_binding(
     record: &AiApprovalRecord,
     binding: &AiApprovalBinding,
@@ -1046,7 +1865,7 @@ mod tests {
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
     use graphql_orm::prelude::{Database, SqliteBackend};
 
-    use crate::orm_runs::PreparedToolCallStart;
+    use crate::orm_runs::{PreparedCoordinatorCheckpoint, PreparedToolCallStart};
     use crate::{
         AiApprovalResourceBinding, AiDisclosureRule, AiDisclosureSchema, AiDisclosureShape,
         AiRunId, AiRunServiceLimits, AiToolCallId, AiToolDescriptor, GraphqlExecutionTargetId,
@@ -1056,7 +1875,7 @@ mod tests {
     #[derive(Clone)]
     struct Resolver {
         principal: AuthPrincipal,
-        now: OffsetDateTime,
+        clock: Arc<FixedClock>,
     }
 
     #[async_trait]
@@ -1065,7 +1884,7 @@ mod tests {
             &self,
             reference: &PrincipalReference,
         ) -> agql_auth::AuthResult<ResolvedPrincipal> {
-            ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.now)
+            ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.clock.now())
         }
     }
 
@@ -1106,10 +1925,30 @@ mod tests {
         }
     }
 
+    struct WaitPolicy {
+        may_continue: bool,
+    }
+
+    #[async_trait]
+    impl AiApprovalWaitReconciliationPolicy for WaitPolicy {
+        async fn evaluate_wait(
+            &self,
+            _principal: &AuthPrincipal,
+            _context: &AiApprovalWaitPolicyContext,
+        ) -> Result<AiApprovalWaitPolicyDecision, AiError> {
+            if self.may_continue {
+                AiApprovalWaitPolicyDecision::continue_waiting("wait-policy-v1")
+            } else {
+                AiApprovalWaitPolicyDecision::cancel("wait-policy-v1")
+            }
+        }
+    }
+
     struct Fixture {
         database: Database<SqliteBackend>,
         run_service: OrmAiRunService,
         approval_service: OrmAiApprovalService,
+        reconciliation_service: OrmAiApprovalWaitReconciliationService,
         clock: Arc<FixedClock>,
         principal: AuthPrincipal,
         scope: AiScope,
@@ -1119,6 +1958,10 @@ mod tests {
     }
 
     async fn fixture() -> Fixture {
+        fixture_with_wait_policy(true).await
+    }
+
+    async fn fixture_with_wait_policy(may_continue: bool) -> Fixture {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -1219,7 +2062,7 @@ mod tests {
             run_service.clone(),
             Arc::new(Resolver {
                 principal: principal.clone(),
-                now,
+                clock: clock.clone(),
             }),
             Arc::new(AllowApprovals),
             Arc::new(tool_catalog),
@@ -1234,10 +2077,31 @@ mod tests {
             Arc::new(crate::DatabaseManagedContentProtector),
             clock.clone(),
         );
+        let reconciliation_service = OrmAiApprovalWaitReconciliationService::new(
+            database.clone(),
+            run_service.clone(),
+            Arc::new(Resolver {
+                principal: principal.clone(),
+                clock: clock.clone(),
+            }),
+            Arc::new(WaitPolicy { may_continue }),
+            Arc::new(Protection(scope.clone())),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            clock.clone(),
+        )
+        .with_limits(
+            AiApprovalWaitReconciliationLimits::new(
+                Duration::minutes(5),
+                Duration::days(3_650),
+                16,
+            )
+            .expect("test approval-wait limits should validate"),
+        );
         Fixture {
             database,
             run_service,
             approval_service,
+            reconciliation_service,
             clock,
             principal,
             scope,
@@ -1304,6 +2168,79 @@ mod tests {
             .start(&lease)
             .await
             .expect("run should start");
+        let budget_reservation = AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: fixture.scope.kind.clone(),
+                scope_id: fixture.scope.id.clone(),
+                tenant_id: fixture.scope.tenant_id.clone(),
+                principal_kind: "user".to_owned(),
+                principal_subject: fixture.principal.subject().to_owned(),
+                session_id: lease.session_id().0,
+                run_id: lease.run_id().0,
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: "local_harness".to_owned(),
+                provider_model: "approval-test".to_owned(),
+                pricing_policy_version: "approval-pricing-v1".to_owned(),
+                reserved_input_tokens: 1,
+                reserved_output_tokens: 1,
+                reserved_tool_units: 1,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 1,
+                reserved_runs: 1,
+                actual_input_tokens: Some(1),
+                actual_cached_input_tokens: Some(0),
+                actual_output_tokens: Some(1),
+                actual_tool_units: Some(1),
+                actual_image_units: Some(0),
+                actual_cost_microunits: Some(1),
+                actual_runs: Some(1),
+                idempotency_key: format!("approval-provider-turn-{}", lease.run_id().0),
+                state: "committed".to_owned(),
+                expires_at: (fixture.clock.now() + Duration::hours(1)).unix_timestamp(),
+                reconciled_at: Some(fixture.clock.now().unix_timestamp()),
+            },
+        )
+        .await
+        .expect("committed approval-test budget should insert");
+        let checkpoint_id = Uuid::new_v4();
+        let protected_state = serde_json::json!({
+            "protection": "database_managed",
+            "value": {"providerTurn": 1}
+        });
+        let checkpoint_hash = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            checkpoint_id,
+            "provider_turn_persisted",
+            "local_harness",
+            "approval-test",
+            Some("approval-response-1"),
+            budget_reservation.id,
+            &protected_state,
+        )
+        .expect("approval provider checkpoint should hash");
+        let lease = fixture
+            .run_service
+            .append_coordinator_checkpoint(
+                &lease,
+                PreparedCoordinatorCheckpoint {
+                    id: checkpoint_id,
+                    checkpoint_kind: "provider_turn_persisted".to_owned(),
+                    provider_kind: "local_harness".to_owned(),
+                    provider_model: "approval-test".to_owned(),
+                    provider_response_id: Some("approval-response-1".to_owned()),
+                    budget_reservation_id: budget_reservation.id,
+                    protected_state,
+                    checkpoint_hash,
+                    completed_tools: Vec::new(),
+                },
+            )
+            .await
+            .expect("approval provider checkpoint should commit");
         let tool_call_id = AiToolCallId::new();
         fixture
             .run_service
@@ -1313,10 +2250,10 @@ mod tests {
                     id: tool_call_id.0,
                     provider_call_key: format!("approval-provider-call-{}", tool_call_id.0),
                     provider_call_id: format!("provider-call-{}", tool_call_id.0),
-                    provider_kind: "mock".to_owned(),
+                    provider_kind: "local_harness".to_owned(),
                     provider_model: "approval-test".to_owned(),
                     provider_response_id: Some("approval-response-1".to_owned()),
-                    budget_reservation_id: Uuid::new_v4(),
+                    budget_reservation_id: budget_reservation.id,
                     provider_turn_index: 0,
                     tool_call_index: 0,
                     tool_id: "application.change".to_owned(),
@@ -1374,6 +2311,373 @@ mod tests {
             preview_hash: preview.stable_hash(),
         };
         (binding, preview)
+    }
+
+    async fn request_wait(
+        fixture: &Fixture,
+        expires_at: OffsetDateTime,
+    ) -> (AiRequestedApproval, AiToolCallId) {
+        let (lease, tool_call_id) = seed_running_tool(fixture).await;
+        let (binding, preview) = approval_binding(fixture, &lease, tool_call_id);
+        let requested = fixture
+            .approval_service
+            .request_approval(&lease, binding, preview, expires_at, false)
+            .await
+            .expect("approval request should park the run");
+        (requested, tool_call_id)
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_leaves_current_waits_parked_and_cancels_denials_once() {
+        let fixture = fixture().await;
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+        let waiting = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-wait-observer")
+            .await
+            .expect("current pending wait should reconcile");
+        assert_eq!(waiting.still_waiting, 1, "{waiting:?}");
+        assert_eq!(waiting.cancelled_denied, 0);
+        fixture.clock.advance_seconds(3_601);
+        let waiting_after_lease_expiry = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-wait-observer-after-expiry")
+            .await
+            .expect("valid wait should remain parked without a heartbeat");
+        assert_eq!(waiting_after_lease_expiry.still_waiting, 1);
+        fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("generic recovery should exclude live approval waits");
+        let parked = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("parked run lookup should succeed")
+            .expect("parked run should remain durable");
+        assert_eq!(parked.state, "waiting_approval");
+
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .expect("pending approval read should succeed")
+            .expect("pending approval should remain visible");
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Deny,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("approval denial should persist");
+
+        let first = fixture.reconciliation_service.clone();
+        let second = fixture.reconciliation_service.clone();
+        let (first_report, second_report) = tokio::join!(
+            first.reconcile_waits("approval-wait-worker-a"),
+            second.reconcile_waits("approval-wait-worker-b")
+        );
+        let first_report = first_report.expect("first concurrent reconciler should stay safe");
+        let second_report = second_report.expect("second concurrent reconciler should stay safe");
+        assert_eq!(
+            first_report.cancelled_denied + second_report.cancelled_denied,
+            1
+        );
+
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("cancelled run lookup should succeed")
+            .expect("cancelled run should remain durable");
+        assert_eq!(run.state, "cancelled");
+        assert!(run.lease_owner.is_none());
+        assert!(run.lease_expires_at.is_none());
+        assert_eq!(run.error_code.as_deref(), Some("approval_denied"));
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id.0)
+            .await
+            .expect("cancelled tool-call lookup should succeed")
+            .expect("cancelled tool call should remain durable");
+        assert_eq!(call.state, "approval_denied");
+        assert!(call.completed_at.is_some());
+        let step = AiRunStepRecord::find_by_id(&fixture.database, &tool_call_id.0)
+            .await
+            .expect("cancelled run-step lookup should succeed")
+            .expect("cancelled run step should remain durable");
+        assert_eq!(step.state, "approval_denied");
+        assert_eq!(step.error_code.as_deref(), Some("approval_denied"));
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("denied approval lookup should succeed")
+            .expect("denied approval should remain durable");
+        assert_eq!(approval.state, "denied");
+
+        let (events, audits, outcomes) = fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let events = tx
+                        .query::<AiSessionEventRecord>()
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let audits = tx
+                        .query::<AiAuditEventRecord>()
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let outcomes = tx
+                        .query::<AiRunAttemptOutcomeRecord>()
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((events, audits, outcomes))
+                })
+            })
+            .await
+            .expect("reconciliation facts should be readable");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "approval_wait_reconciled")
+                .count(),
+            1
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| {
+                    audit.action == "ai.run.approval_wait_reconcile"
+                        && audit.reason_code == "approval_denied"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.run_id == requested.lease().run_id().0
+                        && outcome.outcome_code == "approval_denied"
+                })
+                .count(),
+            1
+        );
+        assert!(
+            fixture
+                .run_service
+                .claim_next_approved("approval-wait-resume-probe")
+                .await
+                .expect("resume probe should remain safe")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_expires_stale_pending_authority() {
+        let fixture = fixture().await;
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::seconds(1)).await;
+        fixture.clock.advance_seconds(2);
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-expiry-worker")
+            .await
+            .expect("expired pending wait should reconcile");
+        assert_eq!(report.cancelled_expired, 1);
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("expired approval lookup should succeed")
+            .expect("expired approval should remain durable");
+        assert_eq!(approval.state, "expired");
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id.0)
+            .await
+            .expect("expired call lookup should succeed")
+            .expect("expired call should remain durable");
+        assert_eq!(call.state, "approval_expired");
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("expired run lookup should succeed")
+            .expect("expired run should remain durable");
+        assert_eq!(run.state, "cancelled");
+        assert_eq!(run.error_code.as_deref(), Some("approval_expired"));
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_cancels_revoked_authority() {
+        let fixture = fixture().await;
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let pending = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .expect("pending approval read should succeed")
+            .expect("pending approval should remain visible");
+        let approved = fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: pending.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: pending.row_version,
+                },
+            )
+            .await
+            .expect("approval should persist");
+        fixture
+            .approval_service
+            .revoke_approval(
+                &fixture.principal,
+                RevokeAiApprovalInput {
+                    id: approved.id,
+                    expected_version: approved.row_version,
+                },
+            )
+            .await
+            .expect("revocation should persist");
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-revocation-worker")
+            .await
+            .expect("revoked wait should reconcile");
+        assert_eq!(report.cancelled_revoked, 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("revoked run lookup should succeed")
+            .expect("revoked run should remain durable");
+        assert_eq!(run.state, "cancelled");
+        assert_eq!(run.error_code.as_deref(), Some("approval_revoked"));
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id.0)
+            .await
+            .expect("revoked call lookup should succeed")
+            .expect("revoked call should remain durable");
+        assert_eq!(call.state, "approval_revoked");
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_enforces_the_deployment_cutoff() {
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        fixture.clock.advance_seconds(2);
+        let reconciler = fixture.reconciliation_service.clone().with_limits(
+            AiApprovalWaitReconciliationLimits::new(Duration::minutes(5), Duration::seconds(1), 16)
+                .expect("cutoff test limits should validate"),
+        );
+        let report = reconciler
+            .reconcile_waits("approval-cutoff-worker")
+            .await
+            .expect("deployment-cutoff wait should reconcile");
+        assert_eq!(report.cancelled_expired, 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("cutoff run lookup should succeed")
+            .expect("cutoff run should remain durable");
+        assert_eq!(run.state, "cancelled");
+        assert_eq!(run.error_code.as_deref(), Some("approval_wait_cutoff"));
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("cutoff approval lookup should succeed")
+            .expect("cutoff approval should remain durable");
+        assert_eq!(approval.state, "expired");
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_applies_current_scope_policy_without_resuming() {
+        let fixture = fixture_with_wait_policy(false).await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-policy-worker")
+            .await
+            .expect("policy-cancelled wait should reconcile");
+        assert_eq!(report.cancelled_policy, 1, "{report:?}");
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("policy-expired approval lookup should succeed")
+            .expect("policy-expired approval should remain durable");
+        assert_eq!(approval.state, "expired");
+        let run = AiRunRecord::find_by_id(&fixture.database, &requested.lease().run_id().0)
+            .await
+            .expect("policy-cancelled run lookup should succeed")
+            .expect("policy-cancelled run should remain durable");
+        assert_eq!(run.state, "cancelled");
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("approval_wait_policy_cancelled")
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_wait_reconciliation_closes_malformed_linkage_without_touching_authority() {
+        let fixture = fixture().await;
+        let (requested, tool_call_id) =
+            request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let run_id = requested.lease().run_id().0;
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &run.id,
+                            run.row_version,
+                            AiRunRecordWhereInput::default(),
+                            UpdateAiRunRecordInput {
+                                latest_checkpoint_id: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("test should remove the checkpoint linkage atomically");
+
+        let report = fixture
+            .reconciliation_service
+            .reconcile_waits("approval-recovery-worker")
+            .await
+            .expect("malformed approval wait should close for recovery");
+        assert_eq!(report.recovery_required, 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &run_id)
+            .await
+            .expect("recovery run lookup should succeed")
+            .expect("recovery run should remain durable");
+        assert_eq!(run.state, "recovery_required");
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("approval_wait_linkage_invalid")
+        );
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("untouched approval lookup should succeed")
+            .expect("untouched approval should remain durable");
+        assert_eq!(approval.state, "pending");
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id.0)
+            .await
+            .expect("untouched call lookup should succeed")
+            .expect("untouched call should remain durable");
+        assert_eq!(call.state, "waiting_approval");
+        assert!(call.completed_at.is_none());
     }
 
     #[tokio::test]
