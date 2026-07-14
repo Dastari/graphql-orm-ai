@@ -4,6 +4,55 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: verified deleting-session attachment cleanup (crate 0.37.0 to 0.38.0; schema 0.35.0 to 0.36.0)
+
+Apply AI schema module `0.36.0` while session writers, attachment upload and
+cleanup workers, retention workers, provider attachment reopeners, and restore
+callbacks are closed. Do not run 0.38.0 code against a module still registered
+as 0.35.0. The generated migration adds no table, column, index, constraint,
+or entity and rewrites no row data. It advances the module because existing
+attachment `quarantine_state`/`processing_state` values now include a private
+`deleting`/`retention_cleanup_required` transition whose meaning is bound to
+the exact current session-deletion cutoff. No consumer table, protected-payload
+rewrite, blob-key rewrite, or application SQL is required.
+
+Hosts must schedule both maintenance services. After
+`deleted_at + deleted_content_purge_seconds`,
+`OrmAiSessionRetentionService` proves the current exact scope policy and a
+whole-session attachment lookahead bound. Artifact-free rows that still own or
+may own storage enter the retention cleanup state by CAS; no reference is
+cleared at this step. `OrmAiAttachmentService::cleanup_once` then reloads the
+session and policy in its claim transaction, re-proves the cutoff, claims one
+generation, deletes only the stored opaque final/quarantine references, and
+verifies absence. Storage errors or ambiguous absence checks preserve the
+references in bounded backoff. A later retention pass may physically delete an
+ordinary attachment row only when it has no artifacts, both blob references
+and its upload capability hash are absent, its cleanup is complete, and its
+deleted timestamp plus a positive cleanup generation are present. Linked
+message scrubbing can proceed only after that metadata deletion.
+
+Attachment artifacts—including provider-file references, derivative blobs,
+or protected artifact content—remain blockers. This release does not infer
+provider deletion, clear an artifact, or weaken any append-only fact. Runs,
+attempt history, non-checkpoint immutable facts, tool/proposal payloads, and
+session shells remain. One report is not an erasure certificate.
+
+The existing `AiSessionRetentionLimits` constructors remain source-compatible
+and use their message bound as the default attachment bound. Call
+`with_attachment_limit` to set an independent `1..=5_000` whole-session proof
+bound; `maximum_attachments_per_session` returns it.
+`AiSessionRetentionReport` adds
+`deleting_session_attachment_cleanups_requested`,
+`deleting_session_attachments_deleted`, and `attachment_cleanups_blocked`.
+Downstream exhaustive struct literals must initialize the new public fields or
+use `..Default::default()`.
+
+This is a pre-1.0 public Rust API and persistent lifecycle-behavior change. It
+changes no GraphQL SDL, Cargo feature/default, entity shape, append-only policy,
+or protected row representation. No row-data migration is needed, but hosts
+must deploy the new module version and run cleanup plus retention repeatedly;
+running retention without cleanup intentionally leaves attachments blocked.
+
 ## Unreleased: terminal run-checkpoint purge (crate 0.36.0 to 0.37.0; schema 0.34.0 to 0.35.0)
 
 Update the exact `graphql-orm` pin from 0.7.0 to 0.9.0 at

@@ -25,6 +25,10 @@ use subtle::ConstantTimeEq;
 use time::Duration;
 use uuid::Uuid;
 
+use crate::orm_session_retention::{
+    attachment_retention_cleanup_pending, session_scope as retention_session_scope,
+    valid_policy as valid_session_retention_policy, validate_session as validate_retention_session,
+};
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiAttachmentAcceptancePolicy, AiAttachmentCandidate, AiAttachmentCleanupReport,
@@ -596,6 +600,54 @@ impl OrmAiAttachmentService {
                     };
                     if !is_cleanup_eligible(&current, now) {
                         return Ok(None);
+                    }
+                    if attachment_retention_cleanup_pending(&current) {
+                        let Some(session) = tx
+                            .find_by_id::<AiSessionRecord>(&current.session_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        else {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        };
+                        validate_retention_session(&session)?;
+                        if session.state != "deleting" {
+                            return Ok(None);
+                        }
+                        let scope = retention_session_scope(&session);
+                        let scope_key = crate::ai_scope_key(&scope);
+                        let policies = tx
+                            .query::<AiRetentionPolicyRecord>()
+                            .filter(AiRetentionPolicyRecordWhereInput {
+                                scope_key: Some(StringFilter {
+                                    eq: Some(scope_key.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if policies.len() > 1 {
+                            return Err(OrmPublicError::new(
+                                OrmErrorCode::AuthorizationMisconfigured,
+                            ));
+                        }
+                        let Some(policy) = policies.into_iter().next() else {
+                            return Ok(None);
+                        };
+                        if !valid_session_retention_policy(&policy, &scope, &scope_key) {
+                            return Ok(None);
+                        }
+                        let deleted_at = session
+                            .deleted_at
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let cutoff = deleted_at
+                            .checked_add(policy.deleted_content_purge_seconds)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if cutoff > now {
+                            return Ok(None);
+                        }
                     }
                     let generation = current
                         .cleanup_generation
@@ -1703,11 +1755,12 @@ fn attachment_view(record: &AiAttachmentRecord) -> AiAttachmentView {
 }
 
 fn is_cleanup_eligible(record: &AiAttachmentRecord, now: i64) -> bool {
-    if record.message_id.is_some() || record.deleted_at.is_some() {
+    let retention_cleanup = attachment_retention_cleanup_pending(record);
+    if (record.message_id.is_some() || record.deleted_at.is_some()) && !retention_cleanup {
         return false;
     }
     match record.processing_state.as_str() {
-        "cleanup_required" => true,
+        "cleanup_required" | "retention_cleanup_required" => true,
         "cleanup_backoff" => record
             .cleanup_next_attempt_at
             .is_some_and(|next_attempt_at| next_attempt_at <= now),

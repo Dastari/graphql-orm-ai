@@ -6,9 +6,9 @@ reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
 overrides are unsupported release artifacts.
 
 The current public source snapshot consumes the final reviewed `graphql-orm`
-0.7.0 merge commit and `agql-auth` 0.10.0 annotated-tag target. Standalone Git
-builds therefore resolve the released dependency universe without depending on
-moving sibling default branches.
+0.9.0 merge commit and `agql-auth` 0.10.0 annotated-tag target. Standalone Git
+builds therefore resolve the reviewed dependency universe without depending
+on moving sibling default branches.
 
 ## Features
 
@@ -83,11 +83,14 @@ camelCase to PascalCase.
    Start a scan cycle with no cursor and continue its bounded keyset pages until
    `next_session_cursor` is absent. This prunes eligible provisional deltas;
    after a deleting-session cutoff it also removes bounded protected session
-   events, then protected context-summary checkpoints, then eligible terminal
-   unattached message content, clears validated terminal-run checkpoint
-   pointers, and purges bounded immutable coordinator checkpoints. It does not
-   erase attachments, other append-only facts, runs, or the session shell; see
-   the [retention guide](session-retention.md).
+   events, then protected context-summary checkpoints, coordinates
+   artifact-free attachment objects through the separately scheduled
+   `OrmAiAttachmentService::cleanup_once`, deletes only confirmed attachment
+   tombstones, then scrubs eligible terminal message content, clears validated
+   terminal-run checkpoint pointers, and purges bounded immutable coordinator
+   checkpoints. It does not erase attachment artifacts/provider files, other
+   append-only facts, runs, or the session shell; see the
+   [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.

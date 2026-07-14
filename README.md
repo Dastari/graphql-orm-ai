@@ -39,11 +39,14 @@ waits without polling, resuming, or executing them.
   transactions to remove expired provisional deltas, purge all bounded
   protected session events after the deleting-session cutoff, delete bounded
   protected context-summary checkpoints before they can outlive covered
-  content, scrub eligible terminal message content, clear validated terminal
-  run-checkpoint pointers, and finally purge bounded immutable checkpoint pages
-  under the exact current GraphQL-managed scope policy. Message/run metadata
-  remains, sequence gaps force bounded client reset, and attachments,
-  nonterminal work, and other append-only security facts stay closed.
+  content, coordinate artifact-free attachment objects through independently
+  verified exact-reference cleanup, delete only confirmed attachment
+  tombstones, scrub eligible terminal message content, clear validated
+  terminal run-checkpoint pointers, and finally purge bounded immutable
+  checkpoint pages under the exact current GraphQL-managed scope policy.
+  Message/run metadata remains, sequence gaps force bounded client reset, and
+  attachment artifacts, nonterminal work, and other append-only security facts
+  stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.

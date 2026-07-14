@@ -7,8 +7,10 @@ use crate::AiError;
 /// Bounded result of one session-retention scan page.
 ///
 /// This report proves only the exact ORM rows removed or scrubbed by one
-/// completed pass. It does not prove that attachments, provider-persistent
-/// files, tool/proposal content, or an entire deleting session were purged.
+/// completed pass. Attachment counts prove only cleanup coordination or exact
+/// metadata deletion after a separate worker confirmed object absence. They
+/// do not prove that provider-persistent files, artifact rows, tool/proposal
+/// content, or an entire deleting session were purged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
@@ -30,6 +32,12 @@ pub struct AiSessionRetentionReport {
     pub message_contents_purged: u32,
     /// Protected message-block rows deleted with those previews.
     pub message_blocks_deleted: u32,
+    /// Attachment rows moved into externally verified cleanup after a session
+    /// deletion cutoff.
+    pub deleting_session_attachment_cleanups_requested: u32,
+    /// Fully cleaned attachment metadata rows physically deleted before their
+    /// linked message content was scrubbed.
+    pub deleting_session_attachments_deleted: u32,
     /// Sessions skipped because their GraphQL-managed retention policy was
     /// absent or invalid.
     pub sessions_not_ready: u32,
@@ -38,6 +46,9 @@ pub struct AiSessionRetentionReport {
     /// Eligible messages retained because their run was nonterminal or a
     /// linked attachment still owned external/protected content.
     pub messages_blocked: u32,
+    /// Deleting sessions still waiting for bounded attachment proof, external
+    /// object deletion, or unsupported artifact/provider-file cleanup.
+    pub attachment_cleanups_blocked: u32,
     /// Deleting sessions whose run history exceeded the configured proof bound
     /// or still contained a nonterminal run.
     pub run_checkpoint_purges_blocked: u32,

@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::persistence::*;
 use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRetentionService};
 
-const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
+pub(crate) const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
 const RUN_CHECKPOINT_RETENTION_POLICY: &str = "graphql_orm_ai.run_checkpoint.retention_purge";
 
 /// Deployment hard bounds for one session-retention scan page.
@@ -35,6 +35,7 @@ pub struct AiSessionRetentionLimits {
     maximum_context_checkpoints_per_session: usize,
     maximum_messages_per_session: usize,
     maximum_message_blocks_per_session: usize,
+    maximum_attachments_per_session: usize,
     maximum_runs_per_session: usize,
     maximum_run_checkpoints_per_session: usize,
 }
@@ -93,6 +94,7 @@ impl AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session,
             maximum_messages_per_session,
             maximum_message_blocks_per_session,
+            maximum_attachments_per_session: maximum_messages_per_session,
             maximum_runs_per_session: maximum_messages_per_session,
             maximum_run_checkpoints_per_session: maximum_context_checkpoints_per_session,
         })
@@ -119,6 +121,26 @@ impl AiSessionRetentionLimits {
         }
         self.maximum_runs_per_session = maximum_runs_per_session;
         self.maximum_run_checkpoints_per_session = maximum_run_checkpoints_per_session;
+        Ok(self)
+    }
+
+    /// Sets an independent bound for proving and coordinating attachment
+    /// cleanup for one deleting session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the limit is in
+    /// `1..=5_000`.
+    pub fn with_attachment_limit(
+        mut self,
+        maximum_attachments_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_attachments_per_session) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention attachment limit".to_owned(),
+            ));
+        }
+        self.maximum_attachments_per_session = maximum_attachments_per_session;
         Ok(self)
     }
 
@@ -151,6 +173,11 @@ impl AiSessionRetentionLimits {
         self.maximum_message_blocks_per_session
     }
 
+    /// Maximum attachment rows proved for one deleting session.
+    pub const fn maximum_attachments_per_session(self) -> usize {
+        self.maximum_attachments_per_session
+    }
+
     /// Maximum run rows used to prove one deleting session is terminal.
     pub const fn maximum_runs_per_session(self) -> usize {
         self.maximum_runs_per_session
@@ -170,6 +197,7 @@ impl Default for AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session: 100,
             maximum_messages_per_session: 100,
             maximum_message_blocks_per_session: 5_000,
+            maximum_attachments_per_session: 100,
             maximum_runs_per_session: 100,
             maximum_run_checkpoints_per_session: 100,
         }
@@ -220,10 +248,12 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
 /// scrubbed, retaining an explicit message metadata tombstone. Once those
 /// sources are exhausted and every bounded run is terminal, the worker clears
 /// current checkpoint pointers before a separate retention transaction
-/// physically deletes append-only coordinator checkpoints. Messages tied to
-/// nonterminal runs or any attachment remain untouched and are reported as
-/// blocked. Redacted audit, usage, egress, attempt, pricing, and skill facts
-/// remain non-purgeable.
+/// physically deletes append-only coordinator checkpoints. Linked attachments
+/// first enter the independently scheduled, exact-reference storage cleanup
+/// state; only confirmed, artifact-free tombstones are deleted before their
+/// messages can be scrubbed. Nonterminal runs, ambiguous storage deletion, and
+/// attachment artifacts remain blocked. Redacted audit, usage, egress,
+/// attempt, pricing, and skill facts remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
@@ -286,6 +316,11 @@ impl OrmAiSessionRetentionService {
             })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
+        let attachment_limit = i64::try_from(self.limits.maximum_attachments_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
+        let attachment_limit_with_lookahead = attachment_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let run_limit_with_lookahead = run_limit
@@ -425,6 +460,101 @@ impl OrmAiSessionRetentionService {
                         context_checkpoint_ids.push(checkpoint.id);
                     }
                     let deleting_session_context_checkpoints_deleted = context_checkpoint_ids.len();
+
+                    let mut attachment_cleanups_requested = 0usize;
+                    let mut attachments_deleted = 0usize;
+                    let mut attachment_cleanup_blocked = false;
+                    if deletion_cutoff_reached && context_checkpoint_ids.is_empty() {
+                        let attachments = tx
+                            .query::<AiAttachmentRecord>()
+                            .filter(AiAttachmentRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(attachment_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if attachments.len()
+                            > usize::try_from(attachment_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        {
+                            attachment_cleanup_blocked = true;
+                        } else {
+                            for attachment in attachments {
+                                validate_attachment(&attachment, session.id)?;
+                                let artifacts = tx
+                                    .query::<AiAttachmentArtifactRecord>()
+                                    .filter(AiAttachmentArtifactRecordWhereInput {
+                                        attachment_id: Some(UuidFilter {
+                                            eq: Some(attachment.id),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .limit(1)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if !artifacts.is_empty() {
+                                    attachment_cleanup_blocked = true;
+                                    continue;
+                                }
+                                if attachment_ready_for_metadata_delete(&attachment) {
+                                    if !tx
+                                        .delete_by_id::<AiAttachmentRecord>(&attachment.id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                    {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    }
+                                    attachments_deleted += 1;
+                                    continue;
+                                }
+                                if attachment_cleanup_pending(&attachment) {
+                                    attachment_cleanup_blocked = true;
+                                    continue;
+                                }
+                                let updated = tx
+                                    .compare_and_swap::<AiAttachmentRecord>(
+                                        &attachment.id,
+                                        attachment.row_version,
+                                        AiAttachmentRecordWhereInput {
+                                            session_id: Some(UuidFilter {
+                                                eq: Some(session.id),
+                                                ..Default::default()
+                                            }),
+                                            ..Default::default()
+                                        },
+                                        UpdateAiAttachmentRecordInput {
+                                            upload_token_hash: Some(None),
+                                            upload_expires_at: Some(None),
+                                            quarantine_state: Some("deleting".to_owned()),
+                                            processing_state: Some(
+                                                "retention_cleanup_required".to_owned(),
+                                            ),
+                                            processing_expires_at: Some(None),
+                                            cleanup_lease_expires_at: Some(None),
+                                            cleanup_next_attempt_at: Some(None),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                attachment_cleanups_requested += 1;
+                                attachment_cleanup_blocked = true;
+                            }
+                        }
+                    }
 
                     let mut messages_purged = 0usize;
                     let mut blocks_deleted = 0usize;
@@ -606,6 +736,9 @@ impl OrmAiSessionRetentionService {
                     if deletion_cutoff_reached
                         && event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
+                        && attachment_cleanups_requested == 0
+                        && attachments_deleted == 0
+                        && !attachment_cleanup_blocked
                         && messages_purged == 0
                         && messages_blocked == 0
                     {
@@ -652,9 +785,23 @@ impl OrmAiSessionRetentionService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
+                        let remaining_attachments = tx
+                            .query::<AiAttachmentRecord>()
+                            .filter(AiAttachmentRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
                         if remaining_events.is_empty()
                             && remaining_context.is_empty()
                             && remaining_message_content.is_empty()
+                            && remaining_attachments.is_empty()
                         {
                             let runs = tx
                                 .query::<AiRunRecord>()
@@ -749,11 +896,14 @@ impl OrmAiSessionRetentionService {
                     }
                     if event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
+                        && attachment_cleanups_requested == 0
+                        && attachments_deleted == 0
                         && messages_purged == 0
                         && run_checkpoint_references_cleared == 0
                     {
                         return Ok(SessionPruneOutcome::Noop {
                             messages_blocked,
+                            attachment_cleanup_blocked,
                             run_checkpoint_purge_ready,
                             run_checkpoint_purge_blocked,
                         });
@@ -780,6 +930,9 @@ impl OrmAiSessionRetentionService {
                         live_delta_events_deleted,
                         deleting_session_events_deleted,
                         deleting_session_context_checkpoints_deleted,
+                        attachment_cleanups_requested,
+                        attachments_deleted,
+                        attachment_cleanup_blocked,
                         messages_purged,
                         blocks_deleted,
                         messages_blocked,
@@ -912,9 +1065,23 @@ impl OrmAiSessionRetentionService {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    let remaining_attachments = maintenance
+                        .query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
                     if !remaining_events.is_empty()
                         || !remaining_context.is_empty()
                         || !remaining_message_content.is_empty()
+                        || !remaining_attachments.is_empty()
                     {
                         return Ok(0);
                     }
@@ -1067,10 +1234,17 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 }
                 SessionPruneOutcome::Noop {
                     messages_blocked,
+                    attachment_cleanup_blocked,
                     run_checkpoint_purge_ready,
                     run_checkpoint_purge_blocked,
                 } => {
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                    if attachment_cleanup_blocked {
+                        report.attachment_cleanups_blocked = report
+                            .attachment_cleanups_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                     checkpoint_purge_ready = run_checkpoint_purge_ready;
                     if run_checkpoint_purge_blocked {
                         report.run_checkpoint_purges_blocked = report
@@ -1083,6 +1257,9 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     live_delta_events_deleted,
                     deleting_session_events_deleted,
                     deleting_session_context_checkpoints_deleted,
+                    attachment_cleanups_requested,
+                    attachments_deleted,
+                    attachment_cleanup_blocked,
                     messages_purged,
                     blocks_deleted,
                     messages_blocked,
@@ -1102,11 +1279,25 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                         report.deleting_session_context_checkpoints_deleted,
                         deleting_session_context_checkpoints_deleted,
                     )?;
+                    report.deleting_session_attachment_cleanups_requested = add_count(
+                        report.deleting_session_attachment_cleanups_requested,
+                        attachment_cleanups_requested,
+                    )?;
+                    report.deleting_session_attachments_deleted = add_count(
+                        report.deleting_session_attachments_deleted,
+                        attachments_deleted,
+                    )?;
                     report.message_contents_purged =
                         add_count(report.message_contents_purged, messages_purged)?;
                     report.message_blocks_deleted =
                         add_count(report.message_blocks_deleted, blocks_deleted)?;
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                    if attachment_cleanup_blocked {
+                        report.attachment_cleanups_blocked = report
+                            .attachment_cleanups_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                     report.deleting_session_run_checkpoint_references_cleared = add_count(
                         report.deleting_session_run_checkpoint_references_cleared,
                         run_checkpoint_references_cleared,
@@ -1148,6 +1339,7 @@ enum SessionPruneOutcome {
     Conflict,
     Noop {
         messages_blocked: usize,
+        attachment_cleanup_blocked: bool,
         run_checkpoint_purge_ready: bool,
         run_checkpoint_purge_blocked: bool,
     },
@@ -1155,6 +1347,9 @@ enum SessionPruneOutcome {
         live_delta_events_deleted: usize,
         deleting_session_events_deleted: usize,
         deleting_session_context_checkpoints_deleted: usize,
+        attachment_cleanups_requested: usize,
+        attachments_deleted: usize,
+        attachment_cleanup_blocked: bool,
         messages_purged: usize,
         blocks_deleted: usize,
         messages_blocked: usize,
@@ -1175,7 +1370,7 @@ fn validate_cursor(cursor: Option<&str>) -> Result<(), AiError> {
     Ok(())
 }
 
-fn validate_session(session: &AiSessionRecord) -> Result<(), OrmPublicError> {
+pub(crate) fn validate_session(session: &AiSessionRecord) -> Result<(), OrmPublicError> {
     let scope = session_scope(session);
     if session.id.is_nil()
         || session.owner_principal_kind.trim().is_empty()
@@ -1218,7 +1413,70 @@ fn validate_message(
     Ok(())
 }
 
-fn valid_policy(policy: &AiRetentionPolicyRecord, scope: &AiScope, scope_key: &str) -> bool {
+fn validate_attachment(
+    attachment: &AiAttachmentRecord,
+    session_id: Uuid,
+) -> Result<(), OrmPublicError> {
+    if attachment.id.is_nil()
+        || attachment.session_id != session_id
+        || attachment.message_id.is_some_and(|id| id.is_nil())
+        || attachment.owner_principal_kind.trim().is_empty()
+        || attachment.owner_subject.trim().is_empty()
+        || attachment.safe_filename.trim().is_empty()
+        || attachment.safe_filename.len() > 1_024
+        || attachment.quarantine_state.trim().is_empty()
+        || attachment.scan_state.trim().is_empty()
+        || attachment.processing_state.trim().is_empty()
+        || attachment
+            .cleanup_generation
+            .is_some_and(|value| value <= 0)
+        || attachment
+            .cleanup_retry_count
+            .is_some_and(|value| value < 0)
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn attachment_ready_for_metadata_delete(attachment: &AiAttachmentRecord) -> bool {
+    attachment.deleted_at.is_some()
+        && attachment.cleanup_generation.is_some_and(|value| value > 0)
+        && attachment.blob_reference.is_none()
+        && attachment.quarantine_blob_reference.is_none()
+        && attachment.upload_token_hash.is_none()
+        && attachment.processing_state == "complete"
+        && attachment.processing_expires_at.is_none()
+        && attachment.cleanup_lease_expires_at.is_none()
+        && attachment.cleanup_next_attempt_at.is_none()
+        && matches!(
+            attachment.quarantine_state.as_str(),
+            "deleted" | "expired" | "failed"
+        )
+}
+
+pub(crate) fn attachment_retention_cleanup_pending(attachment: &AiAttachmentRecord) -> bool {
+    attachment.quarantine_state == "deleting"
+        && matches!(
+            attachment.processing_state.as_str(),
+            "retention_cleanup_required" | "cleanup_in_progress" | "cleanup_backoff"
+        )
+}
+
+fn attachment_cleanup_pending(attachment: &AiAttachmentRecord) -> bool {
+    attachment_retention_cleanup_pending(attachment)
+        || attachment.quarantine_state == "deleting"
+        || matches!(
+            attachment.processing_state.as_str(),
+            "cleanup_required" | "cleanup_in_progress" | "cleanup_backoff" | "deleting"
+        )
+}
+
+pub(crate) fn valid_policy(
+    policy: &AiRetentionPolicyRecord,
+    scope: &AiScope,
+    scope_key: &str,
+) -> bool {
     let durations = [
         policy.message_retention_seconds,
         Some(policy.delta_retention_seconds),
@@ -1240,7 +1498,7 @@ fn valid_policy(policy: &AiRetentionPolicyRecord, scope: &AiScope, scope_key: &s
             .is_some_and(|value| (1..=100_000).contains(&value))
 }
 
-fn session_scope(session: &AiSessionRecord) -> AiScope {
+pub(crate) fn session_scope(session: &AiSessionRecord) -> AiScope {
     AiScope {
         kind: session.scope_kind.clone(),
         id: session.scope_id.clone(),
@@ -2026,6 +2284,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_session_attachment_cleanup_precedes_message_scrubbing() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, session_id, "completed", true).await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let requested = service
+            .prune_session_content(None)
+            .await
+            .expect("retention should request verified attachment cleanup");
+        assert_eq!(requested.deleting_session_attachment_cleanups_requested, 1);
+        assert_eq!(requested.deleting_session_attachments_deleted, 0);
+        assert_eq!(requested.attachment_cleanups_blocked, 1);
+        assert_eq!(requested.message_contents_purged, 0);
+        assert_eq!(requested.messages_blocked, 1);
+
+        let attachment = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attachment cleanup request should load")
+            .into_iter()
+            .next()
+            .expect("attachment should remain for external cleanup");
+        assert_eq!(attachment.quarantine_state, "deleting");
+        assert_eq!(attachment.processing_state, "retention_cleanup_required");
+        assert!(attachment.blob_reference.is_some());
+
+        let attachment_id = attachment.id;
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let outcome = tx
+                        .compare_and_swap::<AiAttachmentRecord>(
+                            &attachment_id,
+                            attachment.row_version,
+                            AiAttachmentRecordWhereInput::default(),
+                            UpdateAiAttachmentRecordInput {
+                                blob_reference: Some(None),
+                                quarantine_blob_reference: Some(None),
+                                quarantine_state: Some("deleted".to_owned()),
+                                processing_state: Some("complete".to_owned()),
+                                cleanup_generation: Some(Some(1)),
+                                cleanup_lease_expires_at: Some(None),
+                                cleanup_next_attempt_at: Some(None),
+                                deleted_at: Some(Some(now().unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("confirmed external cleanup should finalize");
+
+        let purged = service
+            .prune_session_content(None)
+            .await
+            .expect("later retention should delete metadata then scrub content");
+        assert_eq!(purged.deleting_session_attachment_cleanups_requested, 0);
+        assert_eq!(purged.deleting_session_attachments_deleted, 1);
+        assert_eq!(purged.attachment_cleanups_blocked, 0);
+        assert_eq!(purged.message_contents_purged, 1);
+        assert_eq!(purged.message_blocks_deleted, 1);
+        assert!(
+            AiAttachmentRecord::find_by_id(&database, &attachment_id)
+                .await
+                .expect("attachment lookup should succeed")
+                .is_none()
+        );
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message tombstone should remain");
+        assert!(message.protected_preview.is_none());
+        assert!(message.content_purged_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn attachment_artifacts_keep_external_cleanup_closed() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, session_id, "completed", true).await;
+        let attachment = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attachment should load")
+            .into_iter()
+            .next()
+            .expect("attachment should exist");
+        AiAttachmentArtifactRecord::insert(
+            &database,
+            CreateAiAttachmentArtifactRecordInput {
+                id: Uuid::new_v4(),
+                attachment_id: attachment.id,
+                artifact_kind: "provider_file".to_owned(),
+                blob_reference: None,
+                protected_content: None,
+                detected_mime: Some("text/plain".to_owned()),
+                byte_count: 0,
+                sha256: None,
+                provider_reference: Some("provider-file-safe-reference".to_owned()),
+                provider_expires_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("provider artifact should seed");
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("unsupported provider artifact should remain closed");
+        assert_eq!(report.deleting_session_attachment_cleanups_requested, 0);
+        assert_eq!(report.deleting_session_attachments_deleted, 0);
+        assert_eq!(report.attachment_cleanups_blocked, 1);
+        assert_eq!(report.message_contents_purged, 0);
+        let retained = AiAttachmentRecord::find_by_id(&database, &attachment.id)
+            .await
+            .expect("attachment lookup should succeed")
+            .expect("unsafe attachment should remain");
+        assert_eq!(retained.processing_state, "ready");
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("blocked message should remain");
+        assert!(message.protected_preview.is_some());
+    }
+
+    #[tokio::test]
     async fn nonterminal_run_blocks_checkpoint_detachment_and_purge() {
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
@@ -2152,6 +2590,15 @@ mod tests {
         assert!(matches!(
             service.prune_session_content(Some("\n".to_owned())).await,
             Err(AiError::InvalidInput(_))
+        ));
+        let attachment_limits = AiSessionRetentionLimits::new(1, 10, 10, 10)
+            .expect("base retention limits should validate")
+            .with_attachment_limit(2)
+            .expect("independent attachment limit should validate");
+        assert_eq!(attachment_limits.maximum_attachments_per_session(), 2);
+        assert!(matches!(
+            attachment_limits.with_attachment_limit(0),
+            Err(AiError::InvalidConfiguration(_))
         ));
     }
 }

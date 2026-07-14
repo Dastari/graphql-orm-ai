@@ -5,14 +5,29 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.37.0` and the
-AI schema module to `0.35.0`. No table, column, index, constraint, or entity is
-added; the module version changes because run checkpoints now opt into managed
-append-only retention purge and the deleting-session worker gives existing
-session, run, checkpoint, retention-policy, and audit records a new ordered
-deletion meaning.
+This development line advances the pre-1.0 crate version to `0.38.0` and the
+AI schema module to `0.36.0`. No table, column, index, constraint, or entity is
+added; the module version changes because existing session, attachment,
+message, retention-policy, and audit rows gain an ordered, externally verified
+attachment-cleanup meaning after session deletion.
 
 ### Added
+
+- Deleting-session retention now moves bounded, artifact-free attachment rows
+  into a dedicated cleanup state only after reloading the exact current scope
+  policy and proving `deleted_at + deleted_content_purge_seconds`. The existing
+  attachment cleanup worker re-proves that authority in its claim transaction,
+  deletes only exact opaque blob references, verifies absence, and retains
+  ambiguous operations for bounded retry. A later retention pass physically
+  deletes only fully cleaned ordinary metadata before linked message content
+  can be scrubbed.
+- `AiSessionRetentionLimits::with_attachment_limit` and
+  `maximum_attachments_per_session` configure the independent whole-session
+  attachment proof bound. `AiSessionRetentionReport` now distinguishes cleanup
+  requests, physically deleted metadata, and sessions still blocked on bounds,
+  storage ambiguity, in-flight cleanup, or artifact/provider-file lifecycle.
+  Any attachment artifact keeps both its parent attachment and linked message
+  closed until the separate artifact/provider-file retention contract exists.
 
 - Deleting-session retention now physically purges bounded pages of immutable
   coordinator checkpoints after protected events, context summaries, and

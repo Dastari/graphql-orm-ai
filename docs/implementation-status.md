@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.35.0`) and 39 private records
+- AI schema-module identity (currently version `0.36.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -283,9 +283,14 @@ production-ready behavior.
   retention is disabled. After all ordinary protected sources are exhausted,
   it clears validated terminal run pointers before a separate generated-ORM
   retention transaction purges bounded immutable coordinator-checkpoint pages
-  and atomically appends a redacted audit. Metadata tombstones remain
-  windowable, event gaps request a client reset, unsafe dependencies remain
-  blocked, and all other append-only security facts stay non-purgeable.
+  and atomically appends a redacted audit. After the context page is empty,
+  artifact-free attachments enter a separately claimed exact-reference blob
+  cleanup state; that worker re-proves the current cutoff, retains ambiguous
+  deletes for retry, and only a later retention pass removes confirmed ordinary
+  metadata before message scrubbing. Message tombstones remain windowable,
+  event gaps request a client reset, attachment artifacts and unsafe
+  dependencies remain blocked, and all other append-only security facts stay
+  non-purgeable.
 - Project-neutral hierarchical rule management and runtime resolution through
   generated ORM operations. Host-derived application/tenant-project/user
   lineages intersect immutable deployment ceilings and every explicit exact
@@ -348,18 +353,20 @@ production-ready behavior.
 - Complete deleting-session, raw-provider/tool payload, audit, attachment/blob,
   and provider-persistent-file retention workflows. Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
-  context-summary/message-content pruning are implemented; session shells,
-  unsafe message dependencies, runs and attempt history, ordinary-retention
-  context invalidation, non-checkpoint append-only facts, and external content
+  context-summary/basic-attachment/message-content pruning are implemented;
+  attachment artifacts/provider files, session shells, unsafe message
+  dependencies, runs and attempt history, ordinary-retention context
+  invalidation, non-checkpoint append-only facts, and other external content
   remain, so reports do not claim complete erasure. Bounded terminal
   coordinator-checkpoint purge is implemented.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
-- Attachment quotas, derivative artifacts, retention purge, and
+- Attachment quotas, derivative-artifact retention purge, and
   provider-persistent file upload/search/deletion. Core ticketed quarantine/
   scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
-  image/file input, and expired/interrupted exact-reference cleanup are
+  image/file input, expired/interrupted exact-reference cleanup, and verified
+  deleting-session cleanup for artifact-free attachment objects/metadata are
   implemented.
 - Multi-call, mixed, parallel, or stateless supervised coordination. The
   sequential provider-retained top-level coordinator and bounded live
@@ -402,10 +409,11 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Continue dependency-ordered deleting-session, raw-payload, attachment, and
-   audit retention. The reviewed generated-ORM primitive is now used only for
-   terminal coordinator checkpoints; keep every other append-only entity
-   closed until its independent scope, age, and dependency proofs exist.
+1. Continue dependency-ordered deleting-session raw-provider/tool/proposal and
+   attachment-artifact/provider-file retention. The reviewed generated-ORM
+   primitive remains scoped only to terminal coordinator checkpoints; keep
+   every other append-only entity closed until its independent scope, age, and
+   dependency proofs exist.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -433,7 +441,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  `0.32.0` baseline; the current crate/schema versions are `0.37.0`/`0.35.0`.
+  public PR base; the current crate/schema versions are `0.38.0`/`0.36.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

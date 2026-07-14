@@ -428,7 +428,9 @@ pub struct AiAttachmentCleanupReport {
 /// This service is intentionally not exposed through GraphQL. Scheduling it
 /// grants authority only to delete objects already selected by durable AI
 /// lifecycle state; it grants no ability to read attachment bytes or inspect
-/// user content.
+/// user content. A linked attachment selected by deleting-session retention is
+/// accepted only after this worker re-proves the exact current scope policy
+/// and deletion cutoff in its cleanup claim transaction.
 #[async_trait]
 pub trait AiAttachmentCleanupService: Send + Sync {
     /// Runs one bounded, lease-fenced cleanup pass.

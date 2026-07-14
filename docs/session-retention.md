@@ -1,7 +1,7 @@
 # Bounded Session Retention
 
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
-for five narrowly defined classes of protected chat data:
+for six narrowly defined classes of protected chat data:
 
 - expired provisional `provider_live_delta` session events;
 - expired preview/block content from finalized messages whose producing run is
@@ -10,6 +10,9 @@ for five narrowly defined classes of protected chat data:
 - after that cutoff, protected context-summary checkpoints, followed only on a
   later pass by the same safely detachable terminal message content, even when
   ordinary message retention is disabled; and
+- after context summaries are exhausted, artifact-free attachments coordinated
+  through separately verified exact-reference blob cleanup, followed by their
+  ordinary metadata rows; and
 - after all those protected sources are exhausted, immutable coordinator
   checkpoints belonging to a bounded, entirely terminal run set.
 
@@ -24,8 +27,11 @@ Construct the service with the AI ORM database, a trusted `agql-auth::Clock`,
 and validated `AiSessionRetentionLimits`. Use
 `new_with_context_checkpoints` when context summaries need a limit distinct
 from the message-row limit, and chain `with_run_checkpoint_limits` when run
-proofs and immutable checkpoint pages need independent bounds. Start a complete
-scan cycle by calling `prune_session_content(None)`. If the report contains
+proofs and immutable checkpoint pages need independent bounds. Chain
+`with_attachment_limit` when a whole-session attachment proof needs its own
+bound. Schedule `OrmAiAttachmentService::cleanup_once` independently; session
+retention never performs storage I/O. Start a complete scan cycle by calling
+`prune_session_content(None)`. If the report contains
 `next_session_cursor`, pass that opaque value unchanged to the next call.
 Continue until the cursor is absent, then begin a later scheduled cycle from
 `None`.
@@ -34,8 +40,9 @@ Every call and every session transaction is bounded independently. A report
 states only what that completed page changed; it is not a global erasure
 certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
-`messages_blocked`, or `run_checkpoint_purges_blocked`, and never treat a
-partial scan cycle as complete.
+`messages_blocked`, `attachment_cleanups_blocked`, or
+`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
+never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -66,6 +73,27 @@ context deletion may share one transaction and one redacted audit, but a
 summary can never remain after this worker has scrubbed content it could
 cover.
 
+Only after the context page is empty does retention load the session's entire
+attachment set under a configured lookahead bound. Any over-bound set blocks
+the session. An attachment artifact also blocks its parent immediately because
+artifact blobs, protected derivatives, and provider-file references need an
+independent deletion lifecycle. For an artifact-free row, retention either:
+
+- deletes ordinary metadata already proven fully cleaned and tombstoned by a
+  positive cleanup generation;
+- leaves an existing cleanup claim/backoff untouched; or
+- CAS-moves the row to private `deleting` / `retention_cleanup_required` state
+  without clearing either object reference.
+
+The attachment cleanup worker recognizes that private state but claims it only
+after reloading the deleting session, exact scope policy, and current cutoff in
+the same transaction. It deletes only the row's opaque final and quarantine
+references and confirms their absence. Failure or ambiguous absence retains
+the references under bounded backoff. Successful cleanup clears the references
+and records a deleted tombstone; only a later retention transaction deletes
+that metadata. This crash ordering can leave an object-free tombstone, never a
+metadata deletion that merely assumes external success.
+
 Message content is scrubbed only when all of these are true:
 
 - either `message_retention_seconds` is configured and the finalized timestamp
@@ -81,12 +109,12 @@ The transaction clears the protected preview, deletes exact block rows, writes
 fact. Any failure rolls back the whole session change.
 
 Run-checkpoint purge starts only in a later pass that proves no protected
-session event, context checkpoint, or unpurged message content remains. The run
-query uses a lookahead bound and every returned run must belong to the session,
-have valid fencing metadata, and be terminal. Each non-null current checkpoint
-pointer must identify an exact, structurally valid checkpoint for that run.
-The ordinary state-machine transaction clears those pointers with CAS before
-any physical deletion can start.
+session event, context checkpoint, attachment row, or unpurged message content
+remains. The run query uses a lookahead bound and every returned run must belong
+to the session, have valid fencing metadata, and be terminal. Each non-null
+current checkpoint pointer must identify an exact, structurally valid
+checkpoint for that run. The ordinary state-machine transaction clears those
+pointers with CAS before any physical deletion can start.
 
 The worker then opens a generated `graphql-orm` retention transaction. It
 reloads and validates the deleting session, current scope policy, cutoff,
@@ -118,15 +146,16 @@ retention never requires loading the complete transcript into the DOM.
 
 ## Deliberate limits
 
-This worker does not delete session or message metadata, attachments or blob
-objects, runs, run attempts/outcomes, tool calls/results, proposals, approvals,
-provider raw payloads, provider-persistent files, usage, egress decisions,
-audit facts, pricing/skill history, or restore evidence. It therefore advances
-but does not complete the `deleting` session lifecycle. Unsafe message or run
-dependencies remain in place and are counted as blocked. The remaining
-resources require separate workers with their own dependency ordering,
-external delete confirmation, fencing, restore reconciliation, and audit
-contracts.
+This workflow does not delete session or message metadata, attachment artifacts
+or provider-persistent files, runs, run attempts/outcomes, tool calls/results,
+proposals, approvals, provider raw payloads, usage, egress decisions, audit
+facts, pricing/skill history, or restore evidence. It therefore advances but
+does not complete the `deleting` session lifecycle. Basic attachment objects
+and metadata are eligible only through the two-worker proof above; artifacts
+remain deliberately closed. Unsafe message or run dependencies remain in
+place and are counted as blocked. The remaining resources require separate
+workers with their own dependency ordering, external delete confirmation,
+fencing, restore reconciliation, and audit contracts.
 
 Ordinary message-retention expiry does not yet delete context checkpoints. The
 context-compaction producer remains unimplemented and must stay disabled until

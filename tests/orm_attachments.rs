@@ -5,8 +5,9 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use agql_auth::{
-    AccessTokenMetadata, AuthPrincipal, AuthUser, Clock, FixedClock, ResolvedPrincipal,
-    SessionContext, SystemClock,
+    AccessTokenMetadata, AssuranceMatchMode, AuthPrincipal, AuthUser, Clock, FixedClock,
+    MfaAcceptance, RecentMfaPolicy, ResolvedPrincipal, SessionAssurance, SessionContext,
+    SystemClock,
 };
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
@@ -18,7 +19,7 @@ use graphql_orm_storage::{
     StorageBackend, StorageByteStream, StorageError, collect_storage_stream, sha256_hex,
 };
 use secrecy::{ExposeSecret, SecretString};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 struct AllowAll;
@@ -41,6 +42,53 @@ impl AiAccessPolicy for AllowAll {
         _action: AiSessionAction,
     ) -> AiAccessDecision {
         AiAccessDecision::allow("test", "access-v1")
+    }
+}
+
+struct AllowConfiguration;
+
+#[async_trait]
+impl AiConfigurationAccessPolicy for AllowConfiguration {
+    async fn can_configure(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        _action: AiConfigurationAction,
+    ) -> bool {
+        true
+    }
+}
+
+struct DenyEndpoints;
+
+impl AiProviderEndpointPolicy for DenyEndpoints {
+    fn authorize_endpoint(
+        &self,
+        _provider_kind: AiProviderKindInput,
+        _normalized_url: &str,
+    ) -> bool {
+        false
+    }
+}
+
+struct UnusedSecretStore;
+
+#[async_trait]
+impl AiSecretStore for UnusedSecretStore {
+    async fn resolve(&self, _reference: &SecretRef) -> Result<SecretString, SecretError> {
+        Err(SecretError::Unavailable)
+    }
+
+    async fn put(
+        &self,
+        _reference: Option<&SecretRef>,
+        _value: SecretString,
+    ) -> Result<SecretRef, SecretError> {
+        Err(SecretError::Unavailable)
+    }
+
+    async fn delete(&self, _reference: &SecretRef) -> Result<(), SecretError> {
+        Err(SecretError::Unavailable)
     }
 }
 
@@ -274,7 +322,33 @@ fn principal(subject: &str) -> AuthPrincipal {
     })
 }
 
+fn recent_admin(now: OffsetDateTime) -> AuthPrincipal {
+    let assurance = SessionAssurance::new(
+        now,
+        ["otp", "pwd"],
+        Some("urn:test:loa:2".to_owned()),
+        Some("test".to_owned()),
+        MfaAcceptance::Satisfied,
+    )
+    .expect("test assurance should validate");
+    AuthPrincipal::User(AuthUser {
+        user_id: "attachment-admin".to_owned(),
+        session_id: Uuid::new_v4(),
+        roles: vec!["admin".to_owned()],
+        scopes: vec![],
+        session: SessionContext::default().with_assurance(assurance),
+        token_claims: AccessTokenMetadata {
+            auth_time: Some(now.unix_timestamp()),
+            amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+            acr: Some("urn:test:loa:2".to_owned()),
+            tenant_id: Some("tenant-1".to_owned()),
+            ..AccessTokenMetadata::default()
+        },
+    })
+}
+
 struct Fixture {
+    database: Database<SqliteBackend>,
     session_service: OrmAiSessionService,
     attachment_service: OrmAiAttachmentService,
     blobs: Arc<MemoryBlobStore>,
@@ -303,6 +377,44 @@ async fn fixture_with_clock(clock: Arc<dyn Clock>) -> Fixture {
         .apply_migration(&plan, ApplyOptions::default())
         .await
         .expect("AI schema migration should apply to in-memory SQLite");
+    let configuration = OrmAiConfigurationService::new(
+        database.clone(),
+        Arc::new(AllowConfiguration),
+        Arc::new(DenyEndpoints),
+        RecentMfaPolicy {
+            maximum_age: Duration::minutes(5),
+            clock_skew: Duration::seconds(30),
+            allowed_amr: vec!["otp".to_owned()],
+            allowed_acr: vec!["urn:test:loa:2".to_owned()],
+            match_mode: AssuranceMatchMode::All,
+        },
+        clock.clone(),
+        Arc::new(UnusedSecretStore),
+    );
+    let configuration_now = OffsetDateTime::from_unix_timestamp(clock.now().unix_timestamp())
+        .expect("configuration time should be representable");
+    configuration
+        .set_retention_policy(
+            &recent_admin(configuration_now),
+            SetAiRetentionPolicyInput {
+                scope: AiScopeInput {
+                    kind: "collection".to_owned(),
+                    id: "54".to_owned(),
+                    tenant_id: Some("tenant-1".to_owned()),
+                },
+                message_retention_seconds: None,
+                delta_retention_seconds: 60,
+                raw_payload_retention_seconds: 60,
+                audit_retention_seconds: 60,
+                deleted_content_purge_seconds: 60,
+                provider_file_delete_required: true,
+                inbox_event_retention_seconds: 60,
+                inbox_minimum_events: 1,
+                expected_version: None,
+            },
+        )
+        .await
+        .expect("attachment retention policy should configure");
     let blobs = Arc::new(MemoryBlobStore::default());
     let session_service = OrmAiSessionService::new(
         database.clone(),
@@ -311,7 +423,7 @@ async fn fixture_with_clock(clock: Arc<dyn Clock>) -> Fixture {
         Arc::new(DatabaseManagedContentProtector),
     );
     let attachment_service = OrmAiAttachmentService::new(
-        database,
+        database.clone(),
         Arc::new(AllowAll),
         Arc::new(ProtectionPolicy),
         Arc::new(DatabaseManagedContentProtector),
@@ -321,6 +433,7 @@ async fn fixture_with_clock(clock: Arc<dyn Clock>) -> Fixture {
         clock,
     );
     Fixture {
+        database,
         session_service,
         attachment_service,
         blobs,
@@ -715,4 +828,106 @@ async fn cleanup_retains_ambiguous_storage_deletes_and_retries_safely() {
         .expect("later cleanup retry should converge");
     assert_eq!(recovered.cleaned, 1);
     assert_eq!(fixture.blobs.count(), 0);
+}
+
+#[tokio::test]
+async fn deleting_session_retention_waits_for_confirmed_attachment_cleanup() {
+    let clock = FixedClock::new(
+        OffsetDateTime::from_unix_timestamp(2_000_000_000)
+            .expect("fixed timestamp should be valid"),
+    );
+    let fixture = fixture_with_clock(Arc::new(clock.clone())).await;
+    let owner = principal("owner");
+    let session = create_session(&fixture, &owner).await;
+    let bytes = b"\x89PNG\r\n\x1a\nretention-image".to_vec();
+    let ticket = fixture
+        .attachment_service
+        .create_upload(
+            &owner,
+            CreateAiAttachmentUploadInput {
+                session_id: session.id,
+                filename: "retention.png".to_owned(),
+                declared_mime: Some("image/png".to_owned()),
+                expected_byte_count: bytes.len() as i64,
+            },
+        )
+        .await
+        .expect("retention attachment ticket should create");
+    let ready = fixture
+        .attachment_service
+        .upload(
+            &owner,
+            ticket.attachment().id,
+            SecretString::from(ticket.secret().expose_secret().to_owned()),
+            StorageByteStream::from_bytes(bytes),
+        )
+        .await
+        .expect("retention attachment should upload");
+    let released = fixture
+        .attachment_service
+        .finalize_upload(&owner, ready.id)
+        .await
+        .expect("retention attachment should release");
+    fixture
+        .session_service
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Retain metadata until object deletion is proven".to_owned(),
+                attachment_ids: vec![released.id],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("released attachment should link to a message");
+    fixture
+        .session_service
+        .delete_session(&owner, AiSessionId(session.id))
+        .await
+        .expect("session should enter deletion");
+    let retention = OrmAiSessionRetentionService::new(
+        fixture.database.clone(),
+        Arc::new(clock.clone()),
+        AiSessionRetentionLimits::default(),
+    );
+
+    let requested = retention
+        .prune_session_content(None)
+        .await
+        .expect("retention should request external attachment cleanup");
+    assert_eq!(requested.deleting_session_attachment_cleanups_requested, 1);
+    assert_eq!(requested.deleting_session_attachments_deleted, 0);
+    assert_eq!(fixture.blobs.count(), 1);
+
+    fixture.blobs.set_fail_deletes(true);
+    let ambiguous = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("ambiguous deletion should remain retryable");
+    assert_eq!(ambiguous.failed, 1);
+    assert_eq!(fixture.blobs.count(), 1);
+    let retained = retention
+        .prune_session_content(None)
+        .await
+        .expect("retention should preserve ambiguous attachment metadata");
+    assert_eq!(retained.deleting_session_attachments_deleted, 0);
+    assert_eq!(retained.attachment_cleanups_blocked, 1);
+
+    fixture.blobs.set_fail_deletes(false);
+    clock.advance_seconds(121);
+    let cleaned = fixture
+        .attachment_service
+        .cleanup_once()
+        .await
+        .expect("later exact-reference cleanup should converge");
+    assert_eq!(cleaned.cleaned, 1);
+    assert_eq!(fixture.blobs.count(), 0);
+    let deleted = retention
+        .prune_session_content(None)
+        .await
+        .expect("retention should delete only fully cleaned metadata");
+    assert_eq!(deleted.deleting_session_attachments_deleted, 1);
+    assert_eq!(deleted.deleting_session_attachment_cleanups_requested, 0);
 }
