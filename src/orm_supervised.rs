@@ -16,6 +16,7 @@ use crate::{
 /// result means the consequential resolver or post-mutation continuation
 /// handoff could not be proven safe and must never be replayed automatically.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AiSupervisedResumeOutcome {
     /// The exact resolver result and next provider continuation were protected
     /// under the current fence.
@@ -24,6 +25,10 @@ pub enum AiSupervisedResumeOutcome {
     RecoveryRequired {
         /// Durable consequential tool call left for privileged review.
         tool_call_id: AiToolCallId,
+        /// Accepted provider-turn count through the staged mutation.
+        provider_turns: u32,
+        /// Requested application-tool count through the staged mutation.
+        total_tool_calls: u32,
     },
 }
 
@@ -41,7 +46,25 @@ impl AiSupervisedResumeOutcome {
     pub const fn tool_call_id(&self) -> AiToolCallId {
         match self {
             Self::Checkpointed(checkpoint) => checkpoint.tool_call_id(),
-            Self::RecoveryRequired { tool_call_id } => *tool_call_id,
+            Self::RecoveryRequired { tool_call_id, .. } => *tool_call_id,
+        }
+    }
+
+    /// Accepted provider-turn count through this outcome.
+    pub const fn provider_turns(&self) -> u32 {
+        match self {
+            Self::Checkpointed(checkpoint) => checkpoint.provider_turns(),
+            Self::RecoveryRequired { provider_turns, .. } => *provider_turns,
+        }
+    }
+
+    /// Requested/completed application-tool count through this outcome.
+    pub const fn total_tool_calls(&self) -> u32 {
+        match self {
+            Self::Checkpointed(checkpoint) => checkpoint.total_tool_calls(),
+            Self::RecoveryRequired {
+                total_tool_calls, ..
+            } => *total_tool_calls,
         }
     }
 }
@@ -97,6 +120,8 @@ impl OrmAiSupervisedResumeService {
             .await?;
         let provider_response_id = adopted.provider_response_id().map(str::to_owned);
         let tool_call_id = adopted.tool_call_id();
+        let provider_turns = adopted.provider_turns();
+        let total_tool_calls = adopted.total_tool_calls();
         let outcome = self
             .consequential_tools
             .execute_approved(
@@ -107,7 +132,11 @@ impl OrmAiSupervisedResumeService {
             )
             .await?;
         let AiConsequentialToolCallOutcome::Persisted(persisted) = outcome else {
-            return Ok(AiSupervisedResumeOutcome::RecoveryRequired { tool_call_id });
+            return Ok(AiSupervisedResumeOutcome::RecoveryRequired {
+                tool_call_id,
+                provider_turns,
+                total_tool_calls,
+            });
         };
         match self
             .checkpoints
@@ -125,7 +154,11 @@ impl OrmAiSupervisedResumeService {
                     provider_response_id,
                 )?;
                 match self.run_service.finish(persisted.lease(), completion).await {
-                    Ok(()) => Ok(AiSupervisedResumeOutcome::RecoveryRequired { tool_call_id }),
+                    Ok(()) => Ok(AiSupervisedResumeOutcome::RecoveryRequired {
+                        tool_call_id,
+                        provider_turns,
+                        total_tool_calls,
+                    }),
                     Err(_) => Err(error),
                 }
             }

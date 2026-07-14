@@ -124,6 +124,23 @@ through the new fence before transport. Neither operation executes or retries
 the mutation. Uncheckpointed, partial, multi-call, stateless, or mismatched
 evidence remains `RecoveryRequired`.
 
+`AiSupervisedAgentCoordinator` uses the same adoption/consumption pair for
+ordinary same-attempt and cross-generation continuation. It obtains and
+validates the fresh host continuation plan before consuming the checkpoint,
+then resolves current rules both before and after consumption. It also proves
+that a provider turn remains within the deployment loop limit before clearing
+the link. A denial therefore preserves the unconsumed checkpoint until the run
+is durably classified; provider transport can begin only after the exact link
+has been consumed once.
+
+Before the human wait, the coordinator always appends
+`provider_turn_persisted` before asking the consequential service to stage the
+canonical preview and approval. The resulting `WaitingApproval` lease keeps
+that exact checkpoint linked. The staging worker returns and does not heartbeat
+through human time. Only `claim_next_approved` can transfer an approved wait to
+one current worker; approval consumption and ordinary resolver authorization
+still occur before the supervised result checkpoint exists.
+
 Provider-turn checkpoints, incomplete batches, uncheckpointed consequential
 mutations, missing/denied egress, malformed or unprovable stateless history,
 retry exhaustion, and any changed current access/policy remain

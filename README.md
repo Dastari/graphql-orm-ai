@@ -15,9 +15,11 @@ private remote GraphQL adapter foundations compile and are tested. Protected
 proposal review and exact one-shot approval lifecycles also compile and are
 tested. Exact completed read-only tool batches with provider-retained response
 IDs or bounded stateless history can also be adopted across a new fenced
-generation under current authority. Provider-turn/partial-batch adoption, a
-top-level approval-wait coordinator, and several operational adapters listed
-below are still being implemented.
+generation under current authority. A bounded top-level coordinator now drives
+sequential provider-retained supervised mutations through independent human
+approvals and ordinary authenticated resolvers. Provider-turn/partial-batch
+adoption, stateless or parallel supervised waits, decision reconciliation, and
+several operational adapters listed below are still being implemented.
 
 ## What it provides
 
@@ -98,16 +100,22 @@ below are still being implemented.
 - A one-owner approved-wait handoff for restart-safe workers. The original
   attempt/generation remains bound to the staged action while approval/run
   state, worker owner, expiry, row-version fence, and redacted audit rotate
-  atomically; concurrent resumers cannot receive the same action. Protected
-  full-turn supervised continuation remains a separate unfinished gate.
+  atomically; concurrent resumers cannot receive the same action.
 - Protected execution of one claimed, approved, provider-retained mutation.
   The runtime reopens the exact pre-wait provider checkpoint, current rules,
   committed budget, approval, staged tool, and route; executes through fresh
   ordinary resolver authorization; and writes a distinct approval-bound
   continuation checkpoint without another provider call. An expired worker or
   validated restored snapshot can re-adopt that exact result under a new fence
-  and consume it once before provider transport. Multi-call, stateless, and
-  full-loop supervised continuation remain closed.
+  and consume it once before provider transport. Multi-call and stateless
+  supervised continuation remain closed.
+- A top-level `AiSupervisedAgentCoordinator` for sequential supervised work.
+  It accepts only host-planned provider-retained turns exposing exact
+  supervised one-shot mutations, checkpoints before approval, stops during
+  the human wait, executes approved claims through fresh ordinary resolver
+  authorization, consumes protected results once before provider transport,
+  and may repeat with a new approval. Parallel/mixed/stateless/autonomous paths
+  remain closed.
 - A supervised application-mutation service that accepts only explicitly
   enabled exact `SupervisedWrite` descriptors, builds current server-owned
   previews, consumes approval once, recomputes host policy before ordinary
@@ -305,7 +313,7 @@ logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
 Production blockers include partial/multi-call and stateless supervised
-tool-batch adoption, a top-level supervised approval-wait coordinator,
+tool-batch adoption, bounded denied/revoked/expired wait reconciliation,
 authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,

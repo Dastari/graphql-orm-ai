@@ -199,6 +199,13 @@ impl AiRunLease {
         lease.latest_checkpoint_id = None;
         lease
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_state(&self, state: AiRunState) -> Self {
+        let mut lease = self.clone();
+        lease.state = state;
+        lease
+    }
 }
 
 /// Server-authored immutable outcome for a claimed run attempt.
@@ -313,6 +320,15 @@ impl AiApprovedRunClaim {
     /// Consumes the claim into its exact IDs and waiting lease.
     pub fn into_parts(self) -> (AiApprovalId, AiToolCallId, AiRunLease) {
         (self.approval_id, self.tool_call_id, self.lease)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_claim(lease: AiRunLease) -> Self {
+        Self {
+            approval_id: AiApprovalId::new(),
+            tool_call_id: AiToolCallId::new(),
+            lease,
+        }
     }
 }
 

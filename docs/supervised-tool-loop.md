@@ -120,7 +120,7 @@ state. In that case the protected local result is retained but no model input
 is produced. Always replace a running lease with the renewed lease returned by
 the persisted outcome. A recovery-required outcome has no continuing lease.
 
-## Remaining orchestration gate
+## Sequential top-level coordination
 
 `OrmAiSupervisedResumeService` now owns the first protected resumption step for
 one provider-retained mutation. It reopens the exact pre-wait provider
@@ -129,13 +129,47 @@ approval/resolver path above, and protects the result plus continuation as
 `supervised_tool_batch_persisted` without a second provider call. Read-only
 checkpoint adoption rejects this distinct approval-bearing kind.
 
-The crate does not yet expose the top-level coordinator that consumes that
-supervised checkpoint and continues the full provider loop. An exact complete
-provider-retained result can be requeued after lease loss, reopened under
-current principal/rule/protection authority, and consumed once before later
-transport without executing the resolver again. Multi-call and stateless
-(including Ollama/local-harness) supervised adoption remain closed; incomplete
-or ambiguous process loss is `RecoveryRequired`.
+`AiSupervisedAgentCoordinator` closes the bounded provider loop for sequential
+provider-retained mutations. Hosts supply `AiSupervisedAgentTurnPlanner`, which
+must return an `AiSupervisedAgentTurnPlan` containing only exact registered
+`SupervisedWrite`/`OneShot` definitions, current hierarchical-rule evidence, a
+current result-egress route, and fresh provider/egress/atomic-budget planning.
+The wrapper rejects read-only, proposal, mixed, stateless, or otherwise
+inexact plans.
+
+For a normal queue claim, `execute_claimed` starts the fence, plans the first
+turn, re-resolves current rules, calls the provider with periodic lease
+heartbeats, accepts authoritative usage, and persists the provider checkpoint.
+A tool-free turn persists protected output and completes. A tool turn must
+contain exactly one mutation and a retained provider response ID. The
+coordinator rechecks the mutation fingerprint/rule, verifies another provider
+turn remains available, stages the server-owned preview, and returns
+`WaitingApproval`. It does not heartbeat or poll during human review.
+
+A worker passes the exact one-owner `AiApprovedRunClaim` to
+`execute_approved_claim`. The resume service executes the mutation and protects
+its result before the coordinator performs any provider I/O. The coordinator
+then re-adopts that checkpoint under current authority, obtains a continuation
+plan, validates rules, consumes the exact checkpoint once, validates rules
+again, and only then crosses the provider boundary. A later provider turn may
+request one new mutation, but it receives a separate preview and approval.
+
+Provider uncertainty, checkpoint ambiguity, approval-staging ambiguity,
+resolver/post-side-effect ambiguity, output ambiguity, changed rules after
+provider execution, or a lost continuation fence closes as
+`RecoveryRequired`. Safe pre-egress plan/rule/limit denial closes as `Failed`.
+An ambiguous approved mutation outcome is returned without calling the
+provider and is never replayed.
+
+An exact complete provider-retained result can be requeued after lease loss,
+reopened under current principal/rule/protection authority, and consumed once
+before later transport without executing the resolver again. The coordinator
+checks provider-turn capacity before consuming that evidence and refuses to
+stage an approval on the final allowed turn. Multi-call, mixed read/write, and
+stateless (including Ollama/local-harness) supervised adoption remain closed;
+incomplete or ambiguous process loss is `RecoveryRequired`. Denied, revoked,
+never-approved, and expired waits still require bounded host reconciliation.
+
 `AiReadOnlyAgentCoordinator` remains read-only. Deployments must not route
 supervised descriptors through it, reconstruct provider state from an
 approval/tool row, or infer mutation replay authority after a resumed-worker

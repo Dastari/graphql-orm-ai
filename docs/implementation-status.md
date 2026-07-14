@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.30.0`) and 39 private records
+- AI schema-module identity (currently version `0.31.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -310,6 +310,14 @@ production-ready behavior.
   adoption reopens every protected envelope under current authority/rules and
   consumes the checkpoint once before later provider transport without
   replaying the resolver.
+- Top-level bounded sequential supervised coordination. Host plans expose only
+  provider-retained `SupervisedWrite`/`OneShot` definitions; accepted provider
+  turns are checkpointed before approval staging; the worker stops through the
+  human wait; approved claims execute through the ordinary resolver; and the
+  protected result is adopted, rule-checked, consumed once, and continued.
+  Parallel/mixed/stateless/autonomous paths remain closed, ambiguity never
+  replays a mutation, and loop capacity is proven before approval or checkpoint
+  consumption.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -334,12 +342,10 @@ production-ready behavior.
   scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
   image/file input, and expired/interrupted exact-reference cleanup are
   implemented.
-- Top-level supervised coordinator for decision classification, protected
-  continuation consumption, and the remaining provider loop. One claimed
-  provider-retained mutation now has exact pre-wait adoption and post-mutation
-  checkpointing plus cross-generation result adoption, but multi-call and
-  stateless supervised adoption remain closed; the read-only coordinator
-  cannot route mutations.
+- Bounded denied/revoked/never-approved/expired human-wait reconciliation and
+  multi-call, mixed, parallel, or stateless supervised coordination. The
+  sequential provider-retained top-level coordinator is implemented; the
+  read-only coordinator still cannot route mutations.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
@@ -379,9 +385,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Build the top-level approval-wait coordinator that consumes the adopted
-   supervised checkpoint and resumes the full provider loop under fresh
-   rule/fence/current-principal guarantees.
+2. Add bounded denied/revoked/never-approved/expired wait reconciliation, then
+   design complete ordering/history proofs before considering multi-call or
+   stateless supervised resumption.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

@@ -115,16 +115,18 @@ not reusable.
 - The generic consequential tool executor and host canonical-preview builder
   contract are implemented. One claimed provider-retained mutation can now
   reopen its exact pre-wait checkpoint and persist an approval-bound
-  post-mutation continuation. A top-level coordinator that consumes that
-  checkpoint and resumes the exact provider loop is not yet implemented;
-  mutation/proposal/approval-required descriptors remain excluded from the
-  read-only coordinator.
+  post-mutation continuation. `AiSupervisedAgentCoordinator` consumes that
+  checkpoint and resumes a bounded sequential provider loop under fresh rules,
+  fencing, egress, budget, and current-principal checks. Mutation/proposal/
+  approval-required descriptors remain excluded from the read-only
+  coordinator, while mixed, parallel, and stateless supervised batches remain
+  closed.
 - Per-item proposal review is not yet exposed; whole structured payload review
   is bounded and schema validated.
 - The staging worker no longer heartbeats through a human wait; approved work
-  has a one-owner same-attempt handoff. A top-level coordinator still needs to
-  classify denied, revoked, and expired decisions and protect the exact
-  multi-call/stateless provider continuation. Exact completed
+  has a one-owner same-attempt handoff. A bounded reconciliation worker still
+  needs to classify denied, revoked, never-approved, and expired decisions;
+  exact multi-call/stateless provider continuation is not yet supported. Exact completed
   provider-retained mutation results can be adopted across generations;
   incomplete or ambiguous effects remain recovery-only.
 - Consumer-specific UI, domain mutations, proposal rendering, and integration

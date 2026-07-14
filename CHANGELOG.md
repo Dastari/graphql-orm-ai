@@ -5,14 +5,27 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.32.0` and the
-AI schema module to `0.30.0`. No table, column, index, constraint, or entity is
-added; the module version changes because a complete approval-bound
-`supervised_tool_batch_persisted` record is now eligible for one-shot
-cross-generation adoption after exact protected-state, approval, result,
-egress, budget, rule, and current-authority revalidation.
+This development line advances the pre-1.0 crate version to `0.33.0` and the
+AI schema module to `0.31.0`. No table, column, index, constraint, or entity is
+added; the module version changes because the existing protected provider-turn,
+approval-wait, supervised-result checkpoint, and run states now participate in
+the bounded top-level sequential supervised coordinator contract.
 
 ### Added
+
+- `AiSupervisedAgentCoordinator` and its exact planner/service seams. A
+  provider-retained turn may finish normally or request exactly one registered
+  `SupervisedWrite`/`OneShot` mutation. The provider result is checkpointed
+  before a server-previewed approval is staged, the worker stops during the
+  human wait, and a one-owner approved claim executes through the ordinary
+  resolver before its protected result is consumed once for the next provider
+  turn. Sequential approved mutations may repeat within hard loop/rule limits.
+- `AiSupervisedAgentCoordinatorLimits`, `AiSupervisedAgentTurnPlan`,
+  `AiSupervisedAgentRunOutcome`, `AiSupervisedApprovalWait`, and the
+  `AiSupervisedAgentTurnPlanner`, `AiAgentSupervisedApprovalStager`,
+  `AiAgentSupervisedCheckpointControl`, and
+  `AiAgentSupervisedResumeExecutor` boundaries. Opaque durable proofs remain
+  distinct from provider, approval, egress, budget, or resolver authority.
 
 - `OrmAiCoordinatorCheckpointService::adopt_supervised_tool_batch`, the opaque
   `AiAdoptedSupervisedToolBatch`, and proof-consuming
@@ -138,6 +151,22 @@ egress, budget, rule, and current-authority revalidation.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- The supervised coordinator accepts only provider-retained, supervised-only
+  plans and exactly one mutation request per turn. It re-resolves current
+  hierarchical rules before transport, after provider return, before approval,
+  before checkpoint consumption, and again after consumption. Provider,
+  checkpoint, approval-staging, output, and mutation ambiguity close as
+  `RecoveryRequired`; an ambiguous approved resolver is never re-entered.
+- Loop capacity is checked before consuming an adopted checkpoint and before
+  staging a mutation that would require another provider turn. This preserves
+  retry evidence and prevents a human from approving a mutation whose result
+  cannot be returned within the configured provider-turn ceiling. The same
+  pre-consumption capacity check now protects read-only continuation loops.
+- `AiSupervisedResumeOutcome::RecoveryRequired` now retains authoritative
+  provider-turn and tool-call counts, and the enum is non-exhaustive. This lets
+  the top-level coordinator report durable ambiguity without reconstructing
+  counters or provider state.
 
 - Read-only checkpoint append/adoption now structurally requires
   `risk = read_only` and no approval ID for every current and stateless-history

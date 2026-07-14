@@ -77,6 +77,8 @@ mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_supervised;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_supervised_coordinator;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_ui_intents;
@@ -160,6 +162,8 @@ pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_supervised::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_supervised_coordinator::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_ui_intents::*;
@@ -213,10 +217,12 @@ pub mod prelude {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
         AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAdoptedSupervisedToolBatch,
-        AiAgentCheckpointAdopter, AiAgentCheckpointWriter, AiAgentRuleResolver,
-        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiApprovedRunClaim,
-        AiAttachmentCleanupLimits, AiAttachmentServiceLimits, AiBudgetServiceLimits,
-        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiAgentCheckpointAdopter, AiAgentCheckpointWriter, AiAgentProviderOutputWriter,
+        AiAgentProviderTurnExecutor, AiAgentRuleResolver, AiAgentRunControl,
+        AiAgentSupervisedApprovalStager, AiAgentSupervisedCheckpointControl,
+        AiAgentSupervisedResumeExecutor, AiApplicationToolCallLimits, AiApprovalServiceLimits,
+        AiApprovedRunClaim, AiAttachmentCleanupLimits, AiAttachmentServiceLimits,
+        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
         AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits, AiInboxPruningLimits,
         AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
         AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
@@ -224,12 +230,14 @@ pub mod prelude {
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
         AiRequestedConsequentialToolCall, AiRunServiceLimits, AiSessionRetentionLimits,
-        AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits, AiUiIntentDeliveryService,
-        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
-        OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-        OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
-        OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
+        AiSupervisedAgentCoordinator, AiSupervisedAgentCoordinatorLimits,
+        AiSupervisedAgentRunOutcome, AiSupervisedAgentTurnPlan, AiSupervisedAgentTurnPlanner,
+        AiSupervisedApprovalWait, AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits,
+        AiUiIntentDeliveryService, OrmAiApplicationToolCallService, OrmAiApprovalService,
+        OrmAiAttachmentService, OrmAiBudgetService, OrmAiConsequentialToolCallService,
+        OrmAiCoordinatorCheckpointService, OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit,
+        OrmAiInboxPruningService, OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService,
+        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
         OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
         OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };

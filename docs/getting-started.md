@@ -231,6 +231,20 @@ checkpoint has cross-generation adoption authority, and only after fresh
 protected validation of every current and historical durable proof; see the
 [checkpoint guide](coordinator-checkpoints.md).
 
+For sequential provider-retained supervised mutations, construct
+`AiSupervisedAgentCoordinator` with the same run, provider, output, checkpoint,
+rule, and clock boundaries plus `OrmAiConsequentialToolCallService`,
+`OrmAiSupervisedResumeService`, and a host
+`AiSupervisedAgentTurnPlanner`. The planner must use
+`new_with_supervised_tools` for the first turn and
+`new_supervised_continuation_with_tools` for the opaque continuation, and its
+`AiSupervisedAgentTurnPlan` must expose only exact
+`SupervisedWrite`/`OneShot` definitions. Route normal claims to
+`execute_claimed`; after a human approves, route the exact
+`claim_next_approved` handoff to `execute_approved_claim`. Stop the staging
+worker on `WaitingApproval`; never heartbeat or poll the human wait. Each later
+mutation receives a new independent preview and approval.
+
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run
 to `RecoveryRequired`.
@@ -248,8 +262,11 @@ after a human decision, a different process may use the one-owner
 provider-turn adoption plus continuation checkpointing is implemented for one
 provider-retained mutation through `OrmAiSupervisedResumeService`; its exact
 completed result can be re-adopted under a new generation before one-shot
-checkpoint consumption. Multi-call, stateless, and top-level approval-wait
-continuation remain unfinished. Arbitrary GraphQL and ambiguous replay remain closed. See the
+checkpoint consumption. `AiSupervisedAgentCoordinator` now performs that
+consumption and the remaining bounded sequential provider loop. Multi-call,
+mixed, parallel, and stateless supervised continuation remain unfinished, as
+does denied/revoked/expired wait reconciliation. Arbitrary GraphQL and
+ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md) and
 [supervised tool-loop guide](supervised-tool-loop.md).
 
@@ -258,8 +275,8 @@ See the [worker and provider-turn guide](worker-provider-turn.md) and
 upload/search/deletion, attachment quotas/derivatives, authoritative
 provider-built-in unit pricing, complete deleting-session and external-artifact
 retention,
-provider-turn and partial-batch restart adoption, and full top-level
-approval-wait continuation remain
+provider-turn and partial-batch restart adoption, stateless/parallel
+supervised continuation, and human-decision reconciliation remain
 under implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL
 lifecycles and consequential executor are implemented; approval consumption is

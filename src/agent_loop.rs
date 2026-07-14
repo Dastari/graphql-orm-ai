@@ -490,6 +490,20 @@ impl AiAgentLoopGuard {
         })
     }
 
+    pub(crate) fn can_begin_provider_turn(&self) -> bool {
+        !self.terminal
+            && self.pending_order.is_empty()
+            && self.pending_tools.is_empty()
+            && self.outputs.is_empty()
+            && self.output_transfers.is_empty()
+            && self.pending_continuation.is_none()
+            && self.has_provider_turn_capacity()
+    }
+
+    pub(crate) fn has_provider_turn_capacity(&self) -> bool {
+        self.provider_turns < self.limits.maximum_provider_turns
+    }
+
     /// Accepts the next exactly chained provider result.
     ///
     /// # Errors

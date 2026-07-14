@@ -23,21 +23,16 @@ pub enum AiExternalEffectState {
 /// This classification is not itself replay authority. The restored runtime
 /// must still reopen the exact protected checkpoint under current authority
 /// and consume it through the new run fence before provider transport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiRestoredCoordinatorCheckpoint {
     /// No complete adoptable tool-batch checkpoint is linked.
+    #[default]
     None,
     /// A validated completed read-only tool batch is linked.
     ReadOnlyToolBatch,
     /// A validated approval-bound completed supervised tool batch is linked.
     SupervisedToolBatch,
-}
-
-impl Default for AiRestoredCoordinatorCheckpoint {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Restored run facts needed for reconciliation; payloads are intentionally

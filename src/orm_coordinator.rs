@@ -639,6 +639,11 @@ impl AiReadOnlyAgentCoordinator {
             };
             let adopted_rule_fingerprint = adopted.rule_fingerprint.clone();
             let adopted_usage = adopted.rule_usage;
+            if !guard.can_begin_provider_turn() {
+                return self
+                    .finish_failed(&lease, &guard, "adopted_provider_turn_limit_reached")
+                    .await;
+            }
             let plan = match self
                 .planner
                 .continuation_plan(&lease, adopted.provider_turns, adopted.continuation)
@@ -700,6 +705,11 @@ impl AiReadOnlyAgentCoordinator {
         };
 
         loop {
+            if !guard.can_begin_provider_turn() {
+                return self
+                    .finish_failed(&lease, &guard, "provider_turn_limit_reached")
+                    .await;
+            }
             let (provider_plan, scope, correlation_id, route, planned_rules, uses_byok) =
                 turn_plan.into_parts();
             let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
@@ -1001,6 +1011,11 @@ impl AiReadOnlyAgentCoordinator {
                                 .await;
                         }
                     };
+                    if !guard.can_begin_provider_turn() {
+                        return self
+                            .finish_failed(&lease, &guard, "provider_turn_limit_reached")
+                            .await;
+                    }
                     let checkpoint_id = match lease.latest_checkpoint_id() {
                         Some(checkpoint_id) => checkpoint_id,
                         None => {
@@ -1120,7 +1135,7 @@ mod tests {
     use super::*;
     use crate::{
         AiDataSourceRef, AiDestinationTrust, AiEgressCapability, AiEgressManifest, AiSourceTrust,
-        DataClassification,
+        DataClassification, ModelContinuation,
     };
 
     struct TestRunControl {
@@ -1637,9 +1652,60 @@ mod tests {
         }
     }
 
+    fn adopted_read_only_checkpoint(
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> AiAdoptedReadOnlyToolBatch {
+        let result = AiProviderCallResult::test_result(
+            lease,
+            None,
+            "adopted-response",
+            vec![("adopted-call", "test.read", json!({}))],
+        );
+        let persisted = AiPersistedApplicationToolCall::test_completed(
+            lease.clone(),
+            "adopted-call",
+            "test.read",
+            Some(json!({"record": "safe"})),
+            Some(test_manifest(lease, AiEgressCapability::ToolResult)),
+        );
+        let continuation = AiAgentContinuation::from_persisted_results(
+            ModelContinuation::ProviderResponse {
+                response_id: "adopted-response".to_owned(),
+            },
+            &[persisted],
+            Vec::new(),
+        )
+        .expect("test continuation should bind");
+        let resolution =
+            AiAgentRuleResolution::new(test_rules(test_scope()), time::OffsetDateTime::now_utc())
+                .expect("test rules should resolve");
+        let rule_usage = AiRuleRunUsage::default()
+            .accept_provider(result.usage(), &resolution)
+            .and_then(|usage| usage.accept_tool_calls(1, &resolution))
+            .expect("adopted usage should fit test rules");
+        AiAdoptedReadOnlyToolBatch::new(
+            checkpoint_id,
+            1,
+            1,
+            test_scope(),
+            continuation,
+            resolution.rules().fingerprint().to_owned(),
+            rule_usage,
+        )
+    }
+
     fn limits(heartbeat_millis: i64) -> AiReadOnlyAgentCoordinatorLimits {
+        limits_with_provider_turns(heartbeat_millis, 4)
+    }
+
+    fn limits_with_provider_turns(
+        heartbeat_millis: i64,
+        maximum_provider_turns: u32,
+    ) -> AiReadOnlyAgentCoordinatorLimits {
         AiReadOnlyAgentCoordinatorLimits::new(
-            AiAgentLoopLimits::new(4, 8).expect("test loop limits should validate"),
+            AiAgentLoopLimits::new(maximum_provider_turns, 8)
+                .expect("test loop limits should validate"),
             Duration::milliseconds(heartbeat_millis),
         )
         .expect("test coordinator limits should validate")
@@ -1803,6 +1869,70 @@ mod tests {
         assert!(adopter.consumed.load(Ordering::SeqCst));
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[tokio::test]
+    async fn exhausted_adopted_turn_limit_preserves_the_unconsumed_checkpoint() {
+        let base_lease = AiRunLease::test_running(principal_reference());
+        let checkpoint_id = Uuid::new_v4();
+        let claimed = base_lease.test_with_checkpoint(checkpoint_id);
+        let adopter = Arc::new(TestCheckpointAdopter {
+            adopted: Mutex::new(Some(adopted_read_only_checkpoint(
+                &base_lease,
+                checkpoint_id,
+            ))),
+            consumed: AtomicBool::new(false),
+        });
+        let planner = Arc::new(AdoptionOnlyPlanner {
+            scope: test_scope(),
+            route: test_route(),
+            continuation_count: AtomicUsize::new(0),
+        });
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(CheckpointClearedProvider {
+            response: Mutex::new(Some(AiProviderCallResult::test_result(
+                &claimed,
+                Some("adopted-response".to_owned()),
+                "must-not-run",
+                Vec::new(),
+            ))),
+        });
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
+            adopter.clone(),
+            Arc::new(TestRuleResolver),
+            planner.clone(),
+            limits_with_provider_turns(50, 1),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&claimed)
+            .await
+            .expect("exhausted loop should close without consuming the checkpoint");
+
+        assert_eq!(
+            outcome,
+            Failed {
+                provider_turns: 1,
+                total_tool_calls: 1,
+            }
+        );
+        assert!(!adopter.consumed.load(Ordering::SeqCst));
+        assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 0);
+        assert!(
+            provider
+                .response
+                .lock()
+                .expect("test response lock should not be poisoned")
+                .is_some()
+        );
+        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
     }
 
     #[tokio::test]

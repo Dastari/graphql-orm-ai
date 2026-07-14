@@ -511,6 +511,19 @@ impl AiProviderCallPlan {
         !self.request.tools.is_empty()
     }
 
+    pub(crate) fn has_only_supervised_tools(&self) -> bool {
+        !self.tool_rule_bindings.is_empty()
+            && self.tool_rule_bindings.len() == self.request.tools.len()
+            && self.tool_rule_bindings.iter().all(|binding| {
+                binding.maturity == ToolMaturity::SupervisedWrite
+                    && binding.approval == AiApprovalRule::OneShot
+            })
+    }
+
+    pub(crate) fn uses_provider_retained_continuation(&self) -> bool {
+        self.request.continuation_mode == ModelContinuationMode::ProviderRetained
+    }
+
     pub(crate) fn project_rule_usage(
         &self,
         resolution: &AiAgentRuleResolution,
@@ -714,6 +727,34 @@ impl AiProviderCallPlan {
                 approval: AiApprovalRule::None,
             }],
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_supervised_plan(
+        lease: &AiRunLease,
+        scope: crate::AiScope,
+        continuation: bool,
+    ) -> Self {
+        let mut plan = Self::test_plan(lease, scope, continuation);
+        let definition = plan
+            .request
+            .tools
+            .first_mut()
+            .expect("coordinator test plan should contain one tool");
+        definition.tool_id = "test.write".to_owned();
+        definition.provider_name = "test_write".to_owned();
+        definition.description = "Test supervised write".to_owned();
+        if let Some(crate::ModelInputBlock::ToolResult { tool_id, .. }) =
+            plan.request.input.first_mut()
+        {
+            *tool_id = "test.write".to_owned();
+        }
+        plan.tool_rule_bindings = vec![AiPlanToolRuleBinding {
+            fingerprint: "test-fingerprint".to_owned(),
+            maturity: ToolMaturity::SupervisedWrite,
+            approval: AiApprovalRule::OneShot,
+        }];
+        plan
     }
 }
 

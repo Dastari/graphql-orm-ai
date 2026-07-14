@@ -4,6 +4,63 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: bounded sequential supervised coordinator (crate 0.32.0 to 0.33.0; schema 0.30.0 to 0.31.0)
+
+Apply AI schema module `0.31.0` while workers, provider calls, approval waits,
+and restore callbacks are closed. Do not run 0.33.0 code against a module still
+registered as 0.30.0. The generated migration adds no table, column, index,
+constraint, or entity and still owns 39 private records. It advances the module
+because the existing provider-turn, approval-wait, supervised-result
+checkpoint, and run states now have a top-level sequential orchestration
+meaning. No data copy, consumer table, application SQL, or protected-payload
+rewrite is required.
+
+Hosts may now construct `AiSupervisedAgentCoordinator` from their existing
+fenced run control, provider executor, protected output/checkpoint services,
+consequential approval service, supervised resume service, current-rule
+resolver, trusted clock, and a new `AiSupervisedAgentTurnPlanner`. Route normal
+queue claims to `execute_claimed`; route one-owner
+`OrmAiRunService::claim_next_approved` results to `execute_approved_claim`.
+Never call both entry points concurrently for one run fence.
+
+Every `AiSupervisedAgentTurnPlan` must contain only exact registered
+`SupervisedWrite`/`OneShot` definitions, use provider-retained continuation,
+match the resolved-rule scope/fingerprint, and carry a current server-selected
+result-egress route. Initial plans have no continuation. Continuation plans
+must use `AiProviderCallPlan::new_supervised_continuation_with_tools` with the
+opaque result supplied by the coordinator; do not reconstruct call IDs,
+provider response IDs, or model-visible result blocks.
+
+The coordinator checkpoints each accepted provider result before staging one
+canonical-preview approval and then returns `WaitingApproval` without
+heartbeating through the human wait. After approval, the existing resume
+service reopens the exact provider checkpoint, consumes the approval once,
+executes the ordinary authenticated GraphQL resolver, and protects its result.
+The coordinator re-adopts and consumes that result checkpoint immediately
+before a freshly planned provider turn. A later turn may request another
+single mutation, producing a new independent approval. Parallel/mixed tool
+batches, stateless supervised continuation, autonomous writes, model-authored
+GraphQL, and mutation replay remain rejected.
+
+`AiSupervisedResumeOutcome::RecoveryRequired` now includes `provider_turns`
+and `total_tool_calls`, exposes matching getters, and the enum is
+`#[non_exhaustive]`. Downstream matches must use `..`; downstream code must not
+construct this outcome as authority. This is a pre-1.0 source-breaking API
+change. The new top-level outcome and planner/stager/checkpoint/resume traits
+are re-exported from the crate prelude.
+
+Read-only and supervised coordinators now check remaining provider-turn
+capacity before consuming an exact continuation checkpoint. The supervised
+coordinator also refuses to stage an approval on the final allowed provider
+turn, because no permitted turn would remain to disclose the mutation result.
+This is a fail-closed behavior change and needs no data migration.
+
+Denied, revoked, never-approved, and expired human decisions still require the
+host's bounded waiting-run reconciliation worker; `execute_approved_claim`
+accepts only an exact approved claim. Do not poll or heartbeat a pending human
+wait through this coordinator. Multi-call and stateless supervised resumption
+(including Ollama/local-harness mutation waits) remain closed.
+
 ## Unreleased: cross-generation supervised checkpoint adoption (crate 0.31.0 to 0.32.0; schema 0.29.0 to 0.30.0)
 
 Apply AI schema module `0.30.0` while workers, provider calls, restore

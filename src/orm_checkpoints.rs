@@ -267,6 +267,33 @@ pub struct AiAdoptedSupervisedToolBatch {
 }
 
 impl AiAdoptedSupervisedToolBatch {
+    #[cfg(test)]
+    pub(crate) fn test_adopted(
+        checkpoint_id: Uuid,
+        provider_turns: u32,
+        total_tool_calls: u32,
+        scope: AiScope,
+        continuation: AiAgentContinuation,
+        rule_fingerprint: String,
+        rule_usage: AiRuleRunUsage,
+    ) -> Self {
+        Self {
+            checkpoint_id,
+            approval_id: crate::AiApprovalId::new(),
+            tool_call_id: crate::AiToolCallId::new(),
+            provider_turns,
+            total_tool_calls,
+            scope,
+            continuation,
+            rule_fingerprint,
+            rule_usage,
+        }
+    }
+
+    pub(crate) fn continuation(&self) -> &AiAgentContinuation {
+        &self.continuation
+    }
+
     /// Immutable checkpoint selected for one-shot adoption.
     pub const fn checkpoint_id(&self) -> Uuid {
         self.checkpoint_id
