@@ -5,13 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.34.0` and the
-AI schema module to `0.32.0`. No table, column, index, constraint, or entity is
-added; the module version changes because the existing approval, tool-call,
-run-step, provider-turn checkpoint, run, event, audit, and attempt-outcome
-records now participate in the live approval-wait reconciliation contract.
+This development line advances the pre-1.0 crate version to `0.35.0` and the
+AI schema module to `0.33.0`. No table, column, index, constraint, or entity is
+added; the module version changes because existing session, protected event,
+message/block, run, attachment, retention-policy, and audit records now
+participate in the deleting-session content-cutoff contract.
 
 ### Added
+
+- `OrmAiSessionRetentionService` now applies the current
+  `deleted_content_purge_seconds` policy to exact `deleting` sessions. After
+  the cutoff, bounded passes remove every protected session-event kind and
+  scrub eligible terminal unattached message previews/blocks even when
+  ordinary message retention is disabled. Session/message metadata,
+  attachments, external content, and append-only audit/usage/fence facts stay
+  durable; the service does not claim complete erasure.
+- `AiSessionRetentionReport::deleting_session_events_deleted` distinguishes
+  deletion-cutoff event removal from ordinary expired live-delta pruning.
+  Focused tests cover the pre-cutoff boundary, repeated bounded scheduling,
+  message-retention opt-out, atomic audit, tombstones, and idempotency.
 
 - `OrmAiApprovalWaitReconciliationService` and bounded deployment controls for
   live `WaitingApproval` runs. The worker rehydrates the current principal,
@@ -167,6 +179,12 @@ records now participate in the live approval-wait reconciliation contract.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- Deleting-session content pruning reloads and validates the exact current
+  scope policy and the `deleting`/`deleted_at` invariant in each state-machine
+  transaction. It never opens protected payloads, retains unsafe attached or
+  nonterminal message content, uses checked cutoff arithmetic, and records a
+  redacted audit in the same transaction as each bounded change.
 
 - Approval-wait reconciliation is a bounded live-runtime pass that must run
   before generic expired-lease recovery. It never polls or heartbeats a human

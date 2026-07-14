@@ -81,8 +81,10 @@ camelCase to PascalCase.
    trusted bounded host worker.
 12. Schedule `OrmAiSessionRetentionService` as a separate trusted host worker.
    Start a scan cycle with no cursor and continue its bounded keyset pages until
-   `next_session_cursor` is absent. This prunes only eligible provisional
-   deltas and terminal unattached message content; see the
+   `next_session_cursor` is absent. This prunes eligible provisional deltas;
+   after a deleting-session cutoff it also removes bounded protected session
+   events and eligible terminal unattached message content. It does not erase
+   attachments, append-only facts, or the session shell; see the
    [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;

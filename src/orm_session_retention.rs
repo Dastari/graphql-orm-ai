@@ -1,4 +1,4 @@
-//! ORM-only bounded pruning of protected session deltas and message content.
+//! ORM-only bounded pruning of protected session events and message content.
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
@@ -68,7 +68,11 @@ impl AiSessionRetentionLimits {
         self.maximum_sessions
     }
 
-    /// Maximum expired provisional events deleted for one session.
+    /// Maximum protected event rows deleted for one session.
+    ///
+    /// Outside the deleting-session cutoff this applies only to expired
+    /// provisional live deltas. After that cutoff it bounds all protected
+    /// session event rows.
     pub const fn maximum_live_delta_events_per_session(self) -> usize {
         self.maximum_live_delta_events_per_session
     }
@@ -97,10 +101,11 @@ impl Default for AiSessionRetentionLimits {
 
 /// Trusted ORM-only worker for GraphQL-managed session retention.
 ///
-/// The worker never opens or copies protected payloads. It deletes only
-/// expired provisional delta rows and finalized message blocks, replacing the
-/// corresponding preview with an explicit metadata tombstone. Messages tied
-/// to nonterminal runs or any attachment remain untouched and are reported as
+/// The worker never opens or copies protected payloads. It deletes expired
+/// provisional delta rows and, after the deleting-session cutoff, all bounded
+/// protected session event rows. It scrubs eligible finalized message blocks
+/// while retaining an explicit metadata tombstone. Messages tied to
+/// nonterminal runs or any attachment remain untouched and are reported as
 /// blocked. Append-only audit/usage/fence facts are never deleted.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
@@ -198,6 +203,17 @@ impl OrmAiSessionRetentionService {
                         return Ok(SessionPruneOutcome::NotReady);
                     }
 
+                    let deletion_cutoff_reached = if session.state == "deleting" {
+                        let deleted_at = session
+                            .deleted_at
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let cutoff = deleted_at
+                            .checked_add(policy.deleted_content_purge_seconds)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        cutoff <= now
+                    } else {
+                        false
+                    };
                     let delta_cutoff = now
                         .checked_sub(policy.delta_retention_seconds)
                         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -208,7 +224,7 @@ impl OrmAiSessionRetentionService {
                                 eq: Some(session.id),
                                 ..Default::default()
                             }),
-                            event_type: Some(StringFilter {
+                            event_type: (!deletion_cutoff_reached).then(|| StringFilter {
                                 eq: Some("provider_live_delta".to_owned()),
                                 ..Default::default()
                             }),
@@ -223,7 +239,7 @@ impl OrmAiSessionRetentionService {
                     let mut event_ids = Vec::new();
                     for row in event_rows {
                         if row.session_id != session.id
-                            || row.event_type != "provider_live_delta"
+                            || (!deletion_cutoff_reached && row.event_type != "provider_live_delta")
                             || row.sequence <= 0
                             || row.sequence > session.stream_head
                             || previous_event_sequence.is_some_and(|value| row.sequence <= value)
@@ -231,18 +247,36 @@ impl OrmAiSessionRetentionService {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                         previous_event_sequence = Some(row.sequence);
-                        if row.created_at <= delta_cutoff {
+                        if deletion_cutoff_reached || row.created_at <= delta_cutoff {
                             event_ids.push(row.id);
                         }
                     }
+                    let deleting_session_events_deleted = if deletion_cutoff_reached {
+                        event_ids.len()
+                    } else {
+                        0
+                    };
+                    let live_delta_events_deleted = if deletion_cutoff_reached {
+                        0
+                    } else {
+                        event_ids.len()
+                    };
 
                     let mut messages_purged = 0usize;
                     let mut blocks_deleted = 0usize;
                     let mut messages_blocked = 0usize;
-                    if let Some(retention_seconds) = policy.message_retention_seconds {
-                        let message_cutoff = now
-                            .checked_sub(retention_seconds)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let message_cutoff = if deletion_cutoff_reached {
+                        Some(now)
+                    } else {
+                        policy
+                            .message_retention_seconds
+                            .map(|retention_seconds| {
+                                now.checked_sub(retention_seconds)
+                                    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))
+                            })
+                            .transpose()?
+                    };
+                    if let Some(message_cutoff) = message_cutoff {
                         let messages = tx
                             .query::<AiMessageRecord>()
                             .filter(AiMessageRecordWhereInput {
@@ -269,7 +303,7 @@ impl OrmAiSessionRetentionService {
                                 messages_blocked += 1;
                                 continue;
                             };
-                            if finalized_at > message_cutoff {
+                            if !deletion_cutoff_reached && finalized_at > message_cutoff {
                                 continue;
                             }
                             let Some(run_id) = message.run_id else {
@@ -398,7 +432,11 @@ impl OrmAiSessionRetentionService {
                         resource_kind: "ai_session".to_owned(),
                         resource_reference: session.id.to_string(),
                         outcome: "allowed".to_owned(),
-                        reason_code: "scope_retention_expired".to_owned(),
+                        reason_code: if deletion_cutoff_reached {
+                            "session_deletion_retention_expired".to_owned()
+                        } else {
+                            "scope_retention_expired".to_owned()
+                        },
                         correlation_id: Uuid::new_v4().to_string(),
                         causation_id: None,
                         policy_version: Some(format!("{}:{}", policy.id, policy.row_version)),
@@ -406,7 +444,8 @@ impl OrmAiSessionRetentionService {
                     .await
                     .map_err(OrmPublicError::from)?;
                     Ok(SessionPruneOutcome::Changed {
-                        events_deleted: event_ids.len(),
+                        live_delta_events_deleted,
+                        deleting_session_events_deleted,
                         messages_purged,
                         blocks_deleted,
                         messages_blocked,
@@ -440,14 +479,19 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
                 }
                 SessionPruneOutcome::Changed {
-                    events_deleted,
+                    live_delta_events_deleted,
+                    deleting_session_events_deleted,
                     messages_purged,
                     blocks_deleted,
                     messages_blocked,
                 } => {
                     report.sessions_changed += 1;
                     report.live_delta_events_deleted =
-                        add_count(report.live_delta_events_deleted, events_deleted)?;
+                        add_count(report.live_delta_events_deleted, live_delta_events_deleted)?;
+                    report.deleting_session_events_deleted = add_count(
+                        report.deleting_session_events_deleted,
+                        deleting_session_events_deleted,
+                    )?;
                     report.message_contents_purged =
                         add_count(report.message_contents_purged, messages_purged)?;
                     report.message_blocks_deleted =
@@ -472,7 +516,8 @@ enum SessionPruneOutcome {
         messages_blocked: usize,
     },
     Changed {
-        events_deleted: usize,
+        live_delta_events_deleted: usize,
+        deleting_session_events_deleted: usize,
         messages_purged: usize,
         blocks_deleted: usize,
         messages_blocked: usize,
@@ -496,6 +541,7 @@ fn validate_session(session: &AiSessionRecord) -> Result<(), OrmPublicError> {
         || session.owner_principal_kind.trim().is_empty()
         || session.owner_subject.trim().is_empty()
         || !matches!(session.state.as_str(), "active" | "archived" | "deleting")
+        || (session.state == "deleting") != session.deleted_at.is_some()
         || session.stream_head < 0
         || session.message_head < 0
         || scope.kind.trim().is_empty()
@@ -680,6 +726,14 @@ mod tests {
     }
 
     async fn seed_policy(database: &Database<SqliteBackend>, scope: &AiScope) {
+        seed_policy_with_message_retention(database, scope, Some(60)).await;
+    }
+
+    async fn seed_policy_with_message_retention(
+        database: &Database<SqliteBackend>,
+        scope: &AiScope,
+        message_retention_seconds: Option<i64>,
+    ) {
         AiRetentionPolicyRecord::insert(
             database,
             CreateAiRetentionPolicyRecordInput {
@@ -687,7 +741,7 @@ mod tests {
                 scope_kind: scope.kind.clone(),
                 scope_id: scope.id.clone(),
                 tenant_id: scope.tenant_id.clone(),
-                message_retention_seconds: Some(60),
+                message_retention_seconds,
                 delta_retention_seconds: 60,
                 raw_payload_retention_seconds: 60,
                 audit_retention_seconds: 60,
@@ -699,6 +753,43 @@ mod tests {
         )
         .await
         .expect("retention policy should seed");
+    }
+
+    async fn mark_session_deleting(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        seconds_ago: i64,
+    ) {
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                state: Some("deleting".to_owned()),
+                                deleted_at: Some(Some(now().unix_timestamp() - seconds_ago)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("test session should enter deleting state");
     }
 
     async fn seed_session(database: &Database<SqliteBackend>, scope: &AiScope) -> Uuid {
@@ -714,7 +805,7 @@ mod tests {
                 scope_id: scope.id.clone(),
                 title: "Retention test".to_owned(),
                 state: "active".to_owned(),
-                stream_head: 2,
+                stream_head: 3,
                 message_head: 1,
                 last_activity_at: now().unix_timestamp() - 120,
                 archived_at: None,
@@ -833,7 +924,11 @@ mod tests {
     }
 
     async fn seed_events(database: &Database<SqliteBackend>, session_id: Uuid) {
-        for (sequence, event_type) in [(1, "provider_live_delta"), (2, "message_queued")] {
+        for (sequence, event_type) in [
+            (1, "provider_live_delta"),
+            (2, "message_queued"),
+            (3, "run_completed"),
+        ] {
             AiSessionEventRecord::insert(
                 database,
                 CreateAiSessionEventRecordInput {
@@ -925,8 +1020,9 @@ mod tests {
             })
             .await
             .expect("retention results should load");
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "message_queued");
+        assert_eq!(events[1].event_type, "run_completed");
         assert!(blocks.is_empty());
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action, "prune_session_content");
@@ -943,7 +1039,7 @@ mod tests {
             .expect("retention gap should be represented safely");
         assert!(gap.reset_required);
         assert!(gap.events.is_empty());
-        assert_eq!(gap.watermark, 2);
+        assert_eq!(gap.watermark, 3);
 
         let messages = session_service
             .messages(
@@ -978,6 +1074,116 @@ mod tests {
             .await
             .expect("retention replay should be idempotent");
         assert_eq!(replay.sessions_changed, 0);
+    }
+
+    #[tokio::test]
+    async fn deleting_session_cutoff_purges_all_protected_events_and_terminal_message_content() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy_with_message_retention(&database, &scope, None).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
+        seed_events(&database, session_id).await;
+        mark_session_deleting(&database, session_id, 30).await;
+        let clock = Arc::new(FixedClock::new(now()));
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::new(50, 1, 100, 5_000)
+                .expect("deleting-session retention limits should validate"),
+        );
+
+        let before_cutoff = service
+            .prune_session_content(None)
+            .await
+            .expect("pre-cutoff deleting-session pass should succeed");
+        assert_eq!(before_cutoff.deleting_session_events_deleted, 0);
+        assert_eq!(before_cutoff.message_contents_purged, 0);
+        let retained_message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("pre-cutoff message lookup should succeed")
+            .expect("pre-cutoff message should remain durable");
+        assert!(retained_message.protected_preview.is_some());
+
+        clock.advance_seconds(31);
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("expired deleting-session retention pass should succeed");
+        assert_eq!(report.sessions_changed, 1);
+        assert_eq!(report.live_delta_events_deleted, 0);
+        assert_eq!(report.deleting_session_events_deleted, 1);
+        assert_eq!(report.message_contents_purged, 1);
+        assert_eq!(report.message_blocks_deleted, 1);
+
+        let next_page = service
+            .prune_session_content(None)
+            .await
+            .expect("next bounded deleting-session retention pass should succeed");
+        assert_eq!(next_page.sessions_changed, 1);
+        assert_eq!(next_page.deleting_session_events_deleted, 1);
+        assert_eq!(next_page.message_contents_purged, 0);
+
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("deleting-session message lookup should succeed")
+            .expect("message metadata should remain");
+        assert!(message.protected_preview.is_none());
+        assert_eq!(message.block_count, 0);
+        assert_eq!(
+            message.content_purged_at,
+            Some((now() + time::Duration::seconds(31)).unix_timestamp())
+        );
+        let (events, audits) = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let events = tx
+                        .query::<AiSessionEventRecord>()
+                        .filter(AiSessionEventRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let audits = tx
+                        .query::<AiAuditEventRecord>()
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((events, audits))
+                })
+            })
+            .await
+            .expect("deleting-session retention facts should load");
+        assert!(events.is_empty());
+        assert_eq!(audits.len(), 3);
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| audit.reason_code == "scope_retention_expired")
+                .count(),
+            1
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| audit.reason_code == "session_deletion_retention_expired")
+                .count(),
+            2
+        );
+
+        let replay = service
+            .prune_session_content(None)
+            .await
+            .expect("deleting-session retention replay should be idempotent");
+        assert_eq!(replay.sessions_changed, 0);
+        assert_eq!(replay.deleting_session_events_deleted, 0);
     }
 
     #[tokio::test]

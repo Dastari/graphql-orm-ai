@@ -1,11 +1,14 @@
 # Bounded Session Retention
 
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
-for two narrowly defined classes of protected chat data:
+for three narrowly defined classes of protected chat data:
 
-- expired provisional `provider_live_delta` session events; and
+- expired provisional `provider_live_delta` session events;
 - expired preview/block content from finalized messages whose producing run is
-  terminal and which have no linked attachment.
+  terminal and which have no linked attachment; and
+- after a deleting-session cutoff, every bounded protected session event plus
+  the same safely detachable terminal message content, even when ordinary
+  message retention is disabled.
 
 It does not expose a GraphQL mutation and does not issue SQL. All reads, CAS
 updates, deletes, audit appends, keyset cursors, and transactions use generated
@@ -39,10 +42,19 @@ Expired provisional deltas are selected only by the fixed
 Deleting one may create a sequence gap; sequence heads never move backward and
 sequence values are never reused.
 
+A session in `deleting` state must carry the exact `deleted_at` timestamp
+written by the authenticated session lifecycle. Once that timestamp plus the
+current policy's `deleted_content_purge_seconds` is at or before the trusted
+clock, each bounded transaction may delete any protected session event kind.
+The same event-page limit applies, so repeated scheduled cycles may be needed.
+Before the cutoff, only ordinary expired live deltas are eligible. A malformed
+state/timestamp pair or arithmetic overflow fails closed without deleting
+content.
+
 Message content is scrubbed only when all of these are true:
 
-- `message_retention_seconds` is configured and the finalized timestamp has
-  expired;
+- either `message_retention_seconds` is configured and the finalized timestamp
+  has expired, or the deleting-session cutoff has been reached;
 - the message is complete and still has a protected preview plus an exact,
   bounded set of ordered blocks;
 - the linked run belongs to the same session and is terminal;
@@ -69,12 +81,14 @@ retention never requires loading the complete transcript into the DOM.
 
 ## Deliberate limits
 
-This worker does not delete sessions, message metadata, attachments or blob
+This worker does not delete session or message metadata, attachments or blob
 objects, runs, tool calls/results, proposals, approvals, provider raw payloads,
 provider-persistent files, usage, egress decisions, audit facts, fencing, or
-restore evidence. It also does not complete the `deleting` session lifecycle.
-Those require separate workers with their own dependency ordering, external
-delete confirmation, fencing, restore reconciliation, and audit contracts.
+restore evidence. It therefore starts but does not complete the `deleting`
+session lifecycle. Unsafe message dependencies remain in place and are counted
+as blocked. The remaining resources require separate workers with their own
+dependency ordering, external delete confirmation, fencing, restore
+reconciliation, and audit contracts.
 
 Restore collectors must distinguish validated retention gaps from corruption
 and must validate the tombstone invariant. A nonzero

@@ -4,6 +4,43 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: deleting-session content cutoff (crate 0.34.0 to 0.35.0; schema 0.32.0 to 0.33.0)
+
+Apply AI schema module `0.33.0` while session writers, retention workers,
+subscriptions, and restore callbacks are closed. Do not run 0.35.0 code
+against a module still registered as 0.32.0. The generated migration adds no
+table, column, index, constraint, or entity and still owns 39 private records.
+It advances the module because existing session, protected event,
+message/block, run, attachment, retention-policy, and audit records now have a
+deleting-session content-cutoff meaning. No data copy, protected-payload
+rewrite, consumer table, or application SQL is required.
+
+Hosts should continue scheduling `OrmAiSessionRetentionService` as bounded
+keyset scan cycles. For an exact `deleting` session with a valid `deleted_at`,
+the worker now compares that timestamp plus the current scope policy's
+`deleted_content_purge_seconds` to its trusted clock. Before the cutoff, the
+existing ordinary live-delta/message-retention rules apply. At and after the
+cutoff, each bounded session transaction may delete every protected session
+event kind and scrub eligible terminal unattached message previews and blocks
+even when `message_retention_seconds` is absent. Repeat complete scan cycles
+until operational telemetry shows no further eligible rows; one report is not
+an erasure certificate.
+
+The worker preserves session/message metadata, unsafe message content linked
+to nonterminal runs or attachments, attachments/blobs, provider-persistent
+files, raw provider/tool payloads outside these rows, checkpoints, proposals,
+approvals, usage, egress decisions, audit facts, fencing, and restore evidence.
+It appends a redacted `session_deletion_retention_expired` audit in the same
+transaction as each changed session. Those retained dependencies require
+separately ordered workers; this slice begins but does not complete the
+`deleting` lifecycle. Append-only retention remains closed until the reusable
+generated-ORM deletion primitive is reviewed upstream.
+
+`AiSessionRetentionReport` adds the public
+`deleting_session_events_deleted` field. Downstream exhaustive struct literals
+must initialize it or use `..Default::default()`. This is a pre-1.0 public Rust
+API and persistent-behavior change with no GraphQL SDL or data migration.
+
 ## Unreleased: live approval-wait reconciliation (crate 0.33.0 to 0.34.0; schema 0.31.0 to 0.32.0)
 
 Apply AI schema module `0.32.0` while run claimers, approval workers, generic

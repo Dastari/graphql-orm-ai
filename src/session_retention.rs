@@ -13,11 +13,13 @@ use crate::AiError;
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
     pub sessions_scanned: u32,
-    /// Sessions whose live-delta or message content changed.
+    /// Sessions whose protected event or message content changed.
     pub sessions_changed: u32,
     /// Protected provisional `provider_live_delta` event rows deleted.
     pub live_delta_events_deleted: u32,
-    /// Finalized message previews scrubbed after their retention deadline.
+    /// Protected event rows deleted after a session-deletion retention cutoff.
+    pub deleting_session_events_deleted: u32,
+    /// Finalized message previews scrubbed after a retention cutoff.
     pub message_contents_purged: u32,
     /// Protected message-block rows deleted with those previews.
     pub message_blocks_deleted: u32,
@@ -26,8 +28,8 @@ pub struct AiSessionRetentionReport {
     pub sessions_not_ready: u32,
     /// Sessions whose bounded transaction lost a CAS race.
     pub sessions_conflicted: u32,
-    /// Expired messages retained because their run was nonterminal or a linked
-    /// attachment still owned external/protected content.
+    /// Eligible messages retained because their run was nonterminal or a
+    /// linked attachment still owned external/protected content.
     pub messages_blocked: u32,
     /// Opaque cursor for the next bounded session scan page. Absence means the
     /// current cycle reached the end; a later cycle starts again from `None`.

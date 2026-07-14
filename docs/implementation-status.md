@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.32.0`) and 39 private records
+- AI schema-module identity (currently version `0.33.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -275,9 +275,13 @@ production-ready behavior.
   head, and fails closed for absent/legacy policy.
 - Host-only bounded session retention using generated ORM keysets and
   state-machine transactions. The exact current scope policy gates deletion of
-  expired provisional live deltas and scrubbing of terminal unattached message
-  preview/blocks; metadata tombstones remain windowable, event gaps request a
-  client reset, and every changed session appends redacted audit atomically.
+  expired provisional live deltas. Once an exact `deleting`/`deleted_at`
+  session reaches `deleted_content_purge_seconds`, bounded passes delete every
+  protected session event kind and scrub eligible terminal unattached message
+  preview/blocks even when ordinary message retention is disabled. Metadata
+  tombstones remain windowable, event gaps request a client reset, unsafe
+  dependencies remain blocked, and every changed session appends redacted
+  audit atomically.
 - Project-neutral hierarchical rule management and runtime resolution through
   generated ORM operations. Host-derived application/tenant-project/user
   lineages intersect immutable deployment ceilings and every explicit exact
@@ -339,8 +343,10 @@ production-ready behavior.
   not substitute for a consumer's schema composition/restore rehearsal.
 - Complete deleting-session, raw-provider/tool payload, audit, attachment/blob,
   and provider-persistent-file retention workflows. Principal-inbox pruning
-  and bounded per-session provisional-delta/message-content pruning are
-  implemented; their reports do not claim complete erasure.
+  plus bounded provisional-delta and post-deletion-cutoff session-event/
+  message-content pruning are implemented; session shells, unsafe message
+  dependencies, append-only facts, and external content remain, so reports do
+  not claim complete erasure.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
@@ -390,8 +396,9 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Continue the bounded deleting-session/raw-payload/audit retention workers
-   without exposing private ORM records or accepting generic database URLs.
+1. Continue dependency-ordered deleting-session, raw-payload, attachment, and
+   audit retention. Keep append-only purge closed until a reviewed reusable
+   generated-ORM primitive is available upstream.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -419,7 +426,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  `0.32.0` baseline; the current crate/schema versions are `0.34.0`/`0.32.0`.
+  `0.32.0` baseline; the current crate/schema versions are `0.35.0`/`0.33.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

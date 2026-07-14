@@ -36,10 +36,12 @@ waits without polling, resuming, or executing them.
   periodic current-principal reauthorization, explicit retention-gap reset,
   and a GraphQL-policy-driven bounded pruning worker.
 - A host-only bounded session-retention worker that uses generated ORM
-  transactions to remove expired provisional deltas and scrub eligible
-  terminal message content under the exact current GraphQL-managed scope
-  policy. Message metadata remains as an explicit tombstone, sequence gaps
-  force bounded client reset, and attachments or nonterminal work stay closed.
+  transactions to remove expired provisional deltas, purge all bounded
+  protected session events after the deleting-session cutoff, and scrub
+  eligible terminal message content under the exact current GraphQL-managed
+  scope policy. Message metadata remains as an explicit tombstone, sequence
+  gaps force bounded client reset, and attachments or nonterminal work stay
+  closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
@@ -323,7 +325,7 @@ separately composable, project-neutral contracts.
 Production blockers include partial/multi-call and stateless supervised
 tool-batch adoption, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
-recovery, complete deleting-session/raw-payload/audit retention workflows,
+recovery, completion of deleting-session/raw-payload/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings,
