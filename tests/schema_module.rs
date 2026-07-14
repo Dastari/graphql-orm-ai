@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.34.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.35.0");
     assert_eq!(catalog.entities().len(), 39);
     assert!(
         catalog
@@ -32,6 +32,20 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                     | "graphql_orm_ai_egress_events"
             ))
             .all(|entity| entity.append_only)
+    );
+    let retention_entities = catalog
+        .entities()
+        .iter()
+        .filter(|entity| entity.retention_policy.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(retention_entities.len(), 1);
+    assert_eq!(
+        retention_entities[0].table_name,
+        "graphql_orm_ai_run_checkpoints"
+    );
+    assert_eq!(
+        retention_entities[0].retention_policy,
+        Some("graphql_orm_ai.run_checkpoint.retention_purge")
     );
     assert_eq!(catalog.modules()[0].restore_hooks.len(), 4);
 
@@ -240,6 +254,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         .iter()
         .find(|table| table.table_name == "graphql_orm_ai_run_checkpoints")
         .expect("run checkpoint table should exist");
+    assert!(checkpoint.retention_purge);
     assert!(
         checkpoint
             .columns

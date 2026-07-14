@@ -1289,8 +1289,8 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.7.0"
-source = "git+https://github.com/Dastari/graphql-orm.git?rev=1e145a124e9e3f1b0ffd70165289170b627ecb73#1e145a124e9e3f1b0ffd70165289170b627ecb73"
+version = "0.9.0"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=f996cdbe2ef1867dea029ec3ff16e051dbe7566e#f996cdbe2ef1867dea029ec3ff16e051dbe7566e"
 dependencies = [
  "async-graphql",
  "futures",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1337,8 +1337,8 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.7.0"
-source = "git+https://github.com/Dastari/graphql-orm.git?rev=1e145a124e9e3f1b0ffd70165289170b627ecb73#1e145a124e9e3f1b0ffd70165289170b627ecb73"
+version = "0.9.0"
+source = "git+https://github.com/Dastari/graphql-orm.git?rev=f996cdbe2ef1867dea029ec3ff16e051dbe7566e#f996cdbe2ef1867dea029ec3ff16e051dbe7566e"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -3577,7 +3577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

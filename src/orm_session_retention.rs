@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use agql_auth::Clock;
@@ -10,7 +11,9 @@ use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
-    ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
+    ConditionalUpdateOutcome, DefaultWriteBackend, EntityAccessKind, EntityAccessSurface,
+    EntityPolicy, MutationLimit, OrderDirection, RetentionPurgeOutcome, TransactionError,
+    TransactionMode,
 };
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use uuid::Uuid;
@@ -19,6 +22,7 @@ use crate::persistence::*;
 use crate::{AiError, AiRunState, AiScope, AiSessionRetentionReport, AiSessionRetentionService};
 
 const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
+const RUN_CHECKPOINT_RETENTION_POLICY: &str = "graphql_orm_ai.run_checkpoint.retention_purge";
 
 /// Deployment hard bounds for one session-retention scan page.
 ///
@@ -31,6 +35,8 @@ pub struct AiSessionRetentionLimits {
     maximum_context_checkpoints_per_session: usize,
     maximum_messages_per_session: usize,
     maximum_message_blocks_per_session: usize,
+    maximum_runs_per_session: usize,
+    maximum_run_checkpoints_per_session: usize,
 }
 
 impl AiSessionRetentionLimits {
@@ -87,7 +93,33 @@ impl AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session,
             maximum_messages_per_session,
             maximum_message_blocks_per_session,
+            maximum_runs_per_session: maximum_messages_per_session,
+            maximum_run_checkpoints_per_session: maximum_context_checkpoints_per_session,
         })
+    }
+
+    /// Sets independent bounds for proving terminal runs and purging their
+    /// append-only coordinator checkpoints.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless both limits are in
+    /// `1..=5_000`.
+    pub fn with_run_checkpoint_limits(
+        mut self,
+        maximum_runs_per_session: usize,
+        maximum_run_checkpoints_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_runs_per_session)
+            || !(1..=5_000).contains(&maximum_run_checkpoints_per_session)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention run-checkpoint limits".to_owned(),
+            ));
+        }
+        self.maximum_runs_per_session = maximum_runs_per_session;
+        self.maximum_run_checkpoints_per_session = maximum_run_checkpoints_per_session;
+        Ok(self)
     }
 
     /// Maximum session metadata rows considered in one scan page.
@@ -118,6 +150,16 @@ impl AiSessionRetentionLimits {
     pub const fn maximum_message_blocks_per_session(self) -> usize {
         self.maximum_message_blocks_per_session
     }
+
+    /// Maximum run rows used to prove one deleting session is terminal.
+    pub const fn maximum_runs_per_session(self) -> usize {
+        self.maximum_runs_per_session
+    }
+
+    /// Maximum append-only run checkpoints deleted for one session pass.
+    pub const fn maximum_run_checkpoints_per_session(self) -> usize {
+        self.maximum_run_checkpoints_per_session
+    }
 }
 
 impl Default for AiSessionRetentionLimits {
@@ -128,7 +170,44 @@ impl Default for AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session: 100,
             maximum_messages_per_session: 100,
             maximum_message_blocks_per_session: 5_000,
+            maximum_runs_per_session: 100,
+            maximum_run_checkpoints_per_session: 100,
         }
+    }
+}
+
+#[derive(Clone)]
+struct SessionRetentionEntityPolicy {
+    delegate: Option<Arc<dyn EntityPolicy<DefaultWriteBackend>>>,
+}
+
+impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
+    fn can_access_entity<'a>(
+        &'a self,
+        context: Option<&'a async_graphql::Context<'_>>,
+        database: &'a Database<DefaultWriteBackend>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        kind: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        if surface == EntityAccessSurface::RetentionMaintenance {
+            let allowed = entity_name == "AiRunCheckpointRecord"
+                && policy_key == Some(RUN_CHECKPOINT_RETENTION_POLICY)
+                && kind == EntityAccessKind::Write;
+            return Box::pin(async move { Ok(allowed) });
+        }
+        if let Some(delegate) = &self.delegate {
+            return delegate.can_access_entity(
+                context,
+                database,
+                entity_name,
+                policy_key,
+                kind,
+                surface,
+            );
+        }
+        Box::pin(async { Ok(true) })
     }
 }
 
@@ -138,9 +217,13 @@ impl Default for AiSessionRetentionLimits {
 /// provisional delta rows and, after the deleting-session cutoff, all bounded
 /// protected session event rows. Protected context-summary checkpoints are
 /// deleted in bounded pages before eligible finalized message blocks are
-/// scrubbed, retaining an explicit message metadata tombstone. Messages tied
-/// to nonterminal runs or any attachment remain untouched and are reported as
-/// blocked. Append-only audit/usage/fence facts are never deleted.
+/// scrubbed, retaining an explicit message metadata tombstone. Once those
+/// sources are exhausted and every bounded run is terminal, the worker clears
+/// current checkpoint pointers before a separate retention transaction
+/// physically deletes append-only coordinator checkpoints. Messages tied to
+/// nonterminal runs or any attachment remain untouched and are reported as
+/// blocked. Redacted audit, usage, egress, attempt, pricing, and skill facts
+/// remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
@@ -150,10 +233,12 @@ pub struct OrmAiSessionRetentionService {
 impl OrmAiSessionRetentionService {
     /// Creates a bounded trusted retention worker.
     pub fn new(
-        database: Database<DefaultWriteBackend>,
+        mut database: Database<DefaultWriteBackend>,
         clock: Arc<dyn Clock>,
         limits: AiSessionRetentionLimits,
     ) -> Self {
+        let delegate = database.entity_policy().cloned();
+        database.set_entity_policy(SessionRetentionEntityPolicy { delegate });
         Self {
             database,
             clock,
@@ -201,8 +286,14 @@ impl OrmAiSessionRetentionService {
             })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
+        let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
+        let run_limit_with_lookahead = run_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let maximum_blocks = self.limits.maximum_message_blocks_per_session;
-        self.database
+        let result = self
+            .database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let session = tx
@@ -211,7 +302,7 @@ impl OrmAiSessionRetentionService {
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
                     if session.row_version != candidate.row_version {
-                        return Ok(SessionPruneOutcome::Conflict);
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
                     validate_session(&session)?;
                     let scope = session_scope(&session);
@@ -474,7 +565,7 @@ impl OrmAiSessionRetentionService {
                                 .await
                                 .map_err(OrmPublicError::from)?;
                             if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
-                                return Ok(SessionPruneOutcome::Conflict);
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                             }
                             for block in blocks {
                                 if !tx
@@ -508,11 +599,164 @@ impl OrmAiSessionRetentionService {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                     }
+
+                    let mut run_checkpoint_references_cleared = 0usize;
+                    let mut run_checkpoint_purge_ready = false;
+                    let mut run_checkpoint_purge_blocked = false;
+                    if deletion_cutoff_reached
+                        && event_ids.is_empty()
+                        && context_checkpoint_ids.is_empty()
+                        && messages_purged == 0
+                        && messages_blocked == 0
+                    {
+                        let remaining_events = tx
+                            .query::<AiSessionEventRecord>()
+                            .filter(AiSessionEventRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let remaining_context = tx
+                            .query::<AiContextCheckpointRecord>()
+                            .filter(AiContextCheckpointRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let remaining_message_content = tx
+                            .query::<AiMessageRecord>()
+                            .filter(AiMessageRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                content_purged_at: Some(IntFilter {
+                                    is_null: Some(true),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if remaining_events.is_empty()
+                            && remaining_context.is_empty()
+                            && remaining_message_content.is_empty()
+                        {
+                            let runs = tx
+                                .query::<AiRunRecord>()
+                                .filter(AiRunRecordWhereInput {
+                                    session_id: Some(UuidFilter {
+                                        eq: Some(session.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .limit(run_limit_with_lookahead)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let runs_are_bounded = runs.len()
+                                <= usize::try_from(run_limit).map_err(|_| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?;
+                            let runs_are_terminal = runs.iter().all(|run| {
+                                run.id != Uuid::nil()
+                                    && run.session_id == session.id
+                                    && run.lease_generation >= 0
+                                    && AiRunState::from_persisted(&run.state)
+                                        .is_some_and(AiRunState::is_terminal)
+                            });
+                            if runs_are_bounded && runs_are_terminal {
+                                for run in runs {
+                                    let Some(checkpoint_id) = run.latest_checkpoint_id else {
+                                        continue;
+                                    };
+                                    let checkpoints = tx
+                                        .project::<AiRunCheckpointRetentionProjection>()
+                                        .filter(AiRunCheckpointRecordWhereInput {
+                                            id: Some(UuidFilter {
+                                                eq: Some(checkpoint_id),
+                                                ..Default::default()
+                                            }),
+                                            ..Default::default()
+                                        })
+                                        .limit(2)
+                                        .fetch_all()
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    if checkpoints.len() != 1 {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    }
+                                    let checkpoint = &checkpoints[0];
+                                    if checkpoint.id != checkpoint_id
+                                        || checkpoint.run_id != run.id
+                                        || checkpoint.attempt_id.is_nil()
+                                        || checkpoint.lease_generation != run.lease_generation
+                                        || checkpoint.checkpoint_kind.trim().is_empty()
+                                        || checkpoint.checkpoint_kind.len() > 128
+                                        || checkpoint.checkpoint_hash.trim().is_empty()
+                                        || checkpoint.checkpoint_hash.len() > 512
+                                    {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    }
+                                    let updated = tx
+                                        .compare_and_swap::<AiRunRecord>(
+                                            &run.id,
+                                            run.row_version,
+                                            AiRunRecordWhereInput {
+                                                session_id: Some(UuidFilter {
+                                                    eq: Some(session.id),
+                                                    ..Default::default()
+                                                }),
+                                                ..Default::default()
+                                            },
+                                            UpdateAiRunRecordInput {
+                                                latest_checkpoint_id: Some(None),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
+                                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                    }
+                                    run_checkpoint_references_cleared += 1;
+                                }
+                                run_checkpoint_purge_ready = true;
+                            } else {
+                                run_checkpoint_purge_blocked = true;
+                            }
+                        }
+                    }
                     if event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
                         && messages_purged == 0
+                        && run_checkpoint_references_cleared == 0
                     {
-                        return Ok(SessionPruneOutcome::Noop { messages_blocked });
+                        return Ok(SessionPruneOutcome::Noop {
+                            messages_blocked,
+                            run_checkpoint_purge_ready,
+                            run_checkpoint_purge_blocked,
+                        });
                     }
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
                         actor_principal_kind: "system".to_owned(),
@@ -539,7 +783,254 @@ impl OrmAiSessionRetentionService {
                         messages_purged,
                         blocks_deleted,
                         messages_blocked,
+                        run_checkpoint_references_cleared,
+                        run_checkpoint_purge_ready,
+                        run_checkpoint_purge_blocked,
                     })
+                })
+            })
+            .await;
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if error.public_error().code == OrmErrorCode::Conflict => {
+                Ok(SessionPruneOutcome::Conflict)
+            }
+            Err(error) => Err(map_transaction(error)),
+        }
+    }
+
+    async fn purge_run_checkpoints(&self, session_id: Uuid, now: i64) -> Result<usize, AiError> {
+        let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
+        let run_limit_with_lookahead = run_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
+        let checkpoint_limit = i64::try_from(self.limits.maximum_run_checkpoints_per_session)
+            .map_err(|_| {
+                AiError::InvalidConfiguration("invalid run checkpoint limit".to_owned())
+            })?;
+        self.database
+            .retention_transaction(move |maintenance| {
+                Box::pin(async move {
+                    let session = maintenance
+                        .query::<AiSessionRecord>()
+                        .filter(AiSessionRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if session.len() != 1 {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    let session = &session[0];
+                    validate_session(session)?;
+                    if session.state != "deleting" {
+                        return Ok(0);
+                    }
+                    let scope = session_scope(session);
+                    let exact_scope_key = crate::ai_scope_key(&scope);
+                    let policies = maintenance
+                        .query::<AiRetentionPolicyRecord>()
+                        .filter(AiRetentionPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(exact_scope_key.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if policies.len() > 1 {
+                        return Err(OrmPublicError::new(
+                            OrmErrorCode::AuthorizationMisconfigured,
+                        ));
+                    }
+                    let Some(policy) = policies.into_iter().next() else {
+                        return Ok(0);
+                    };
+                    if !valid_policy(&policy, &scope, &exact_scope_key) {
+                        return Ok(0);
+                    }
+                    let deleted_at = session
+                        .deleted_at
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let cutoff = deleted_at
+                        .checked_add(policy.deleted_content_purge_seconds)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if cutoff > now {
+                        return Ok(0);
+                    }
+
+                    let remaining_events = maintenance
+                        .query::<AiSessionEventRecord>()
+                        .filter(AiSessionEventRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_context = maintenance
+                        .query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_message_content = maintenance
+                        .query::<AiMessageRecord>()
+                        .filter(AiMessageRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            content_purged_at: Some(IntFilter {
+                                is_null: Some(true),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !remaining_events.is_empty()
+                        || !remaining_context.is_empty()
+                        || !remaining_message_content.is_empty()
+                    {
+                        return Ok(0);
+                    }
+
+                    let runs = maintenance
+                        .query::<AiRunRecord>()
+                        .filter(AiRunRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(run_limit_with_lookahead)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if runs.len()
+                        > usize::try_from(run_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                    {
+                        return Ok(0);
+                    }
+                    let mut run_fences = HashMap::with_capacity(runs.len());
+                    for run in runs {
+                        let state = AiRunState::from_persisted(&run.state)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if run.id.is_nil()
+                            || run.session_id != session_id
+                            || run.lease_generation < 0
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        if !state.is_terminal() || run.latest_checkpoint_id.is_some() {
+                            return Ok(0);
+                        }
+                        run_fences.insert(run.id, run.lease_generation);
+                    }
+                    if run_fences.is_empty() {
+                        return Ok(0);
+                    }
+
+                    let checkpoints = maintenance
+                        .project::<AiRunCheckpointRetentionProjection>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            run_id: Some(UuidFilter {
+                                in_list: Some(run_fences.keys().copied().collect()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .order_by(AiRunCheckpointRecordOrderByInput {
+                            created_at: Some(OrderDirection::Asc),
+                            id: Some(OrderDirection::Asc),
+                        })
+                        .limit(checkpoint_limit)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let mut checkpoint_ids = Vec::with_capacity(checkpoints.len());
+                    for checkpoint in checkpoints {
+                        if checkpoint.id.is_nil()
+                            || run_fences.get(&checkpoint.run_id)
+                                != Some(&checkpoint.lease_generation)
+                            || checkpoint.attempt_id.is_nil()
+                            || checkpoint.checkpoint_kind.trim().is_empty()
+                            || checkpoint.checkpoint_kind.len() > 128
+                            || checkpoint.checkpoint_hash.trim().is_empty()
+                            || checkpoint.checkpoint_hash.len() > 512
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        checkpoint_ids.push(checkpoint.id);
+                    }
+                    if checkpoint_ids.is_empty() {
+                        return Ok(0);
+                    }
+                    let maximum = u32::try_from(checkpoint_ids.len())
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let outcome = maintenance
+                        .purge::<AiRunCheckpointRecord>(
+                            AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    in_list: Some(checkpoint_ids),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            MutationLimit::new(maximum)?,
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let RetentionPurgeOutcome::Purged { affected } = outcome else {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    };
+                    if affected != maximum {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    maintenance
+                        .insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: "system".to_owned(),
+                            actor_subject: "session-retention".to_owned(),
+                            action: "purge_session_run_checkpoints".to_owned(),
+                            resource_kind: "ai_session".to_owned(),
+                            resource_reference: session_id.to_string(),
+                            outcome: "allowed".to_owned(),
+                            reason_code: "session_deletion_retention_expired".to_owned(),
+                            correlation_id: Uuid::new_v4().to_string(),
+                            causation_id: None,
+                            policy_version: Some(format!("{}:{}", policy.id, policy.row_version)),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    usize::try_from(affected)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
                 })
             })
             .await
@@ -562,11 +1053,31 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
         };
         let now = self.clock.now().unix_timestamp();
         for session in candidates.sessions {
+            let session_id = session.id;
+            let checkpoint_purge_ready;
+            let mut session_changed = false;
             match self.prune_session(session, now).await? {
-                SessionPruneOutcome::NotReady => report.sessions_not_ready += 1,
-                SessionPruneOutcome::Conflict => report.sessions_conflicted += 1,
-                SessionPruneOutcome::Noop { messages_blocked } => {
+                SessionPruneOutcome::NotReady => {
+                    report.sessions_not_ready += 1;
+                    continue;
+                }
+                SessionPruneOutcome::Conflict => {
+                    report.sessions_conflicted += 1;
+                    continue;
+                }
+                SessionPruneOutcome::Noop {
+                    messages_blocked,
+                    run_checkpoint_purge_ready,
+                    run_checkpoint_purge_blocked,
+                } => {
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                    checkpoint_purge_ready = run_checkpoint_purge_ready;
+                    if run_checkpoint_purge_blocked {
+                        report.run_checkpoint_purges_blocked = report
+                            .run_checkpoint_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                 }
                 SessionPruneOutcome::Changed {
                     live_delta_events_deleted,
@@ -575,8 +1086,12 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     messages_purged,
                     blocks_deleted,
                     messages_blocked,
+                    run_checkpoint_references_cleared,
+                    run_checkpoint_purge_ready,
+                    run_checkpoint_purge_blocked,
                 } => {
-                    report.sessions_changed += 1;
+                    session_changed = true;
+                    checkpoint_purge_ready = run_checkpoint_purge_ready;
                     report.live_delta_events_deleted =
                         add_count(report.live_delta_events_deleted, live_delta_events_deleted)?;
                     report.deleting_session_events_deleted = add_count(
@@ -592,7 +1107,31 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.message_blocks_deleted =
                         add_count(report.message_blocks_deleted, blocks_deleted)?;
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                    report.deleting_session_run_checkpoint_references_cleared = add_count(
+                        report.deleting_session_run_checkpoint_references_cleared,
+                        run_checkpoint_references_cleared,
+                    )?;
+                    if run_checkpoint_purge_blocked {
+                        report.run_checkpoint_purges_blocked = report
+                            .run_checkpoint_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                 }
+            }
+            if checkpoint_purge_ready {
+                let deleted = self.purge_run_checkpoints(session_id, now).await?;
+                if deleted > 0 {
+                    session_changed = true;
+                    report.deleting_session_run_checkpoints_deleted =
+                        add_count(report.deleting_session_run_checkpoints_deleted, deleted)?;
+                }
+            }
+            if session_changed {
+                report.sessions_changed = report
+                    .sessions_changed
+                    .checked_add(1)
+                    .ok_or(AiError::PersistenceFailed)?;
             }
         }
         Ok(report)
@@ -609,6 +1148,8 @@ enum SessionPruneOutcome {
     Conflict,
     Noop {
         messages_blocked: usize,
+        run_checkpoint_purge_ready: bool,
+        run_checkpoint_purge_blocked: bool,
     },
     Changed {
         live_delta_events_deleted: usize,
@@ -617,6 +1158,9 @@ enum SessionPruneOutcome {
         messages_purged: usize,
         blocks_deleted: usize,
         messages_blocked: usize,
+        run_checkpoint_references_cleared: usize,
+        run_checkpoint_purge_ready: bool,
+        run_checkpoint_purge_blocked: bool,
     },
 }
 
@@ -1043,6 +1587,65 @@ mod tests {
         }
     }
 
+    async fn seed_run_checkpoints(
+        database: &Database<SqliteBackend>,
+        run_id: Uuid,
+        count: usize,
+    ) -> Vec<Uuid> {
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&run_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let attempt_id = Uuid::new_v4();
+                    let mut checkpoint_ids = Vec::with_capacity(count);
+                    for index in 0..count {
+                        let checkpoint_id = Uuid::new_v4();
+                        tx.insert::<AiRunCheckpointRecord>(CreateAiRunCheckpointRecordInput {
+                            id: checkpoint_id,
+                            run_id,
+                            attempt_id,
+                            lease_generation: run.lease_generation,
+                            checkpoint_kind: format!("retention_test_{index}"),
+                            provider_response_id: None,
+                            budget_reservation_id: None,
+                            assistant_message_id: None,
+                            protected_state: Some(serde_json::json!({
+                                "protected": index,
+                            })),
+                            checkpoint_hash: format!("retention-checkpoint-hash-{index}"),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        checkpoint_ids.push(checkpoint_id);
+                    }
+                    if let Some(latest_checkpoint_id) = checkpoint_ids.last().copied() {
+                        let outcome = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                AiRunRecordWhereInput::default(),
+                                UpdateAiRunRecordInput {
+                                    latest_checkpoint_id: Some(Some(latest_checkpoint_id)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
+                    Ok(checkpoint_ids)
+                })
+            })
+            .await
+            .expect("run checkpoints should seed")
+    }
+
     async fn seed_context_checkpoints(database: &Database<SqliteBackend>, session_id: Uuid) {
         for index in 0..2 {
             AiContextCheckpointRecord::insert(
@@ -1198,7 +1801,8 @@ mod tests {
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy_with_message_retention(&database, &scope, None).await;
         let session_id = seed_session(&database, &scope).await;
-        let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
+        let (message_id, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let checkpoint_ids = seed_run_checkpoints(&database, run_id, 2).await;
         seed_events(&database, session_id).await;
         seed_context_checkpoints(&database, session_id).await;
         mark_session_deleting(&database, session_id, 30).await;
@@ -1207,7 +1811,9 @@ mod tests {
             database.clone(),
             clock.clone(),
             AiSessionRetentionLimits::new_with_context_checkpoints(50, 1, 1, 100, 5_000)
-                .expect("deleting-session retention limits should validate"),
+                .expect("deleting-session retention limits should validate")
+                .with_run_checkpoint_limits(10, 1)
+                .expect("run-checkpoint retention limits should validate"),
         );
 
         let before_cutoff = service
@@ -1256,6 +1862,44 @@ mod tests {
         assert_eq!(content_page.deleting_session_context_checkpoints_deleted, 0);
         assert_eq!(content_page.message_contents_purged, 1);
         assert_eq!(content_page.message_blocks_deleted, 1);
+        assert_eq!(
+            content_page.deleting_session_run_checkpoint_references_cleared,
+            0
+        );
+        assert_eq!(content_page.deleting_session_run_checkpoints_deleted, 0);
+
+        let first_checkpoint_page = service
+            .prune_session_content(None)
+            .await
+            .expect("first bounded run-checkpoint retention pass should succeed");
+        assert_eq!(first_checkpoint_page.sessions_changed, 1);
+        assert_eq!(
+            first_checkpoint_page.deleting_session_run_checkpoint_references_cleared,
+            1
+        );
+        assert_eq!(
+            first_checkpoint_page.deleting_session_run_checkpoints_deleted,
+            1
+        );
+        let run = AiRunRecord::find_by_id(&database, &run_id)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run metadata should remain");
+        assert!(run.latest_checkpoint_id.is_none());
+
+        let second_checkpoint_page = service
+            .prune_session_content(None)
+            .await
+            .expect("second bounded run-checkpoint retention pass should succeed");
+        assert_eq!(second_checkpoint_page.sessions_changed, 1);
+        assert_eq!(
+            second_checkpoint_page.deleting_session_run_checkpoint_references_cleared,
+            0
+        );
+        assert_eq!(
+            second_checkpoint_page.deleting_session_run_checkpoints_deleted,
+            1
+        );
 
         let message = AiMessageRecord::find_by_id(&database, &message_id)
             .await
@@ -1267,7 +1911,7 @@ mod tests {
             message.content_purged_at,
             Some((now() + time::Duration::seconds(31)).unix_timestamp())
         );
-        let (events, context_checkpoints, audits) = database
+        let (events, context_checkpoints, run_checkpoints, audits) = database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     let events = tx
@@ -1302,14 +1946,28 @@ mod tests {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    Ok((events, context_checkpoints, audits))
+                    let run_checkpoints = tx
+                        .query::<AiRunCheckpointRecord>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                in_list: Some(checkpoint_ids),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((events, context_checkpoints, run_checkpoints, audits))
                 })
             })
             .await
             .expect("deleting-session retention facts should load");
         assert!(events.is_empty());
         assert!(context_checkpoints.is_empty());
-        assert_eq!(audits.len(), 4);
+        assert!(run_checkpoints.is_empty());
+        assert_eq!(audits.len(), 7);
         assert_eq!(
             audits
                 .iter()
@@ -1322,7 +1980,7 @@ mod tests {
                 .iter()
                 .filter(|audit| audit.reason_code == "session_deletion_retention_expired")
                 .count(),
-            3
+            6
         );
 
         let replay = service
@@ -1331,6 +1989,7 @@ mod tests {
             .expect("deleting-session retention replay should be idempotent");
         assert_eq!(replay.sessions_changed, 0);
         assert_eq!(replay.deleting_session_events_deleted, 0);
+        assert_eq!(replay.deleting_session_run_checkpoints_deleted, 0);
     }
 
     #[tokio::test]
@@ -1364,6 +2023,102 @@ mod tests {
             assert!(message.protected_preview.is_some());
             assert!(message.content_purged_at.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn nonterminal_run_blocks_checkpoint_detachment_and_purge() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy_with_message_retention(&database, &scope, None).await;
+        let session_id = seed_session(&database, &scope).await;
+        let run_id = Uuid::new_v4();
+        AiRunRecord::insert(
+            &database,
+            CreateAiRunRecordInput {
+                id: run_id,
+                session_id,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::json!({"test": true}),
+                state: "running".to_owned(),
+                attempt_id: None,
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                lease_heartbeat_at: None,
+                retry_count: 0,
+                next_attempt_at: None,
+                error_code: None,
+                latest_checkpoint_id: None,
+            },
+        )
+        .await
+        .expect("nonterminal run should seed");
+        let checkpoint_ids = seed_run_checkpoints(&database, run_id, 1).await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("blocked run-checkpoint retention pass should be safe");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.run_checkpoint_purges_blocked, 1);
+        assert_eq!(report.deleting_session_run_checkpoint_references_cleared, 0);
+        assert_eq!(report.deleting_session_run_checkpoints_deleted, 0);
+
+        let run = AiRunRecord::find_by_id(&database, &run_id)
+            .await
+            .expect("run lookup should succeed")
+            .expect("nonterminal run should remain");
+        assert_eq!(run.latest_checkpoint_id, checkpoint_ids.first().copied());
+        let checkpoints = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunCheckpointRecord>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                in_list: Some(checkpoint_ids),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("checkpoint proof should load");
+        assert_eq!(checkpoints.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_session_candidate_is_reported_only_after_transaction_rollback() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let stale_candidate = AiSessionRecord::find_by_id(&database, &session_id)
+            .await
+            .expect("candidate lookup should succeed")
+            .expect("candidate should exist");
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database,
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let outcome = service
+            .prune_session(stale_candidate, now().unix_timestamp())
+            .await
+            .expect("stale candidate should be a bounded conflict");
+        assert!(matches!(outcome, SessionPruneOutcome::Conflict));
     }
 
     #[tokio::test]

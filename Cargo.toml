@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -37,7 +37,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "1e145a124e9e3f1b0ffd70165289170b627ecb73", version = "0.7.0", default-features = false }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "f996cdbe2ef1867dea029ec3ff16e051dbe7566e", version = "0.9.0", default-features = false }
 graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
 hex = "0.4"
 jsonschema = { version = "0.47", default-features = false }

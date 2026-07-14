@@ -1117,17 +1117,50 @@ pub(crate) struct AiRunStepRecord {
     derive(GraphQLEntity, GraphQLOperations)
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-#[graphql_entity(
-    table = "graphql_orm_ai_run_checkpoints",
-    plural = "GraphqlOrmAiRunCheckpoints",
-    default_sort = "created_at ASC",
-    append_only = true
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    graphql_orm(projection(
+        name = "AiRunCheckpointRetentionProjection",
+        fields = [
+            id,
+            run_id,
+            attempt_id,
+            lease_generation,
+            checkpoint_kind,
+            provider_response_id,
+            budget_reservation_id,
+            assistant_message_id,
+            checkpoint_hash,
+            created_at
+        ],
+        private = true
+    ))
+)]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    graphql_entity(
+        table = "graphql_orm_ai_run_checkpoints",
+        plural = "GraphqlOrmAiRunCheckpoints",
+        default_sort = "created_at ASC, id ASC",
+        append_only = true,
+        retention_purge = "graphql_orm_ai.run_checkpoint.retention_purge"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        table = "graphql_orm_ai_run_checkpoints",
+        plural = "GraphqlOrmAiRunCheckpoints",
+        default_sort = "created_at ASC, id ASC",
+        append_only = true
+    )
 )]
 pub(crate) struct AiRunCheckpointRecord {
     /// Checkpoint ID, assigned by the owning fenced transaction.
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
+    #[sortable]
     pub id: graphql_orm::uuid::Uuid,
     /// Owning run.
     #[filterable(type = "uuid")]
@@ -1794,7 +1827,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.34.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.35.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

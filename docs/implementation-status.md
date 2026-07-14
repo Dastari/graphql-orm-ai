@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.34.0`) and 39 private records
+- AI schema-module identity (currently version `0.35.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -280,9 +280,12 @@ production-ready behavior.
   protected session event kind, then exhaust independently bounded protected
   context-summary checkpoint pages before a later pass may scrub eligible
   terminal unattached message preview/blocks, even when ordinary message
-  retention is disabled. Metadata tombstones remain windowable, event gaps
-  request a client reset, unsafe dependencies remain blocked, and every
-  changed session appends redacted audit atomically.
+  retention is disabled. After all ordinary protected sources are exhausted,
+  it clears validated terminal run pointers before a separate generated-ORM
+  retention transaction purges bounded immutable coordinator-checkpoint pages
+  and atomically appends a redacted audit. Metadata tombstones remain
+  windowable, event gaps request a client reset, unsafe dependencies remain
+  blocked, and all other append-only security facts stay non-purgeable.
 - Project-neutral hierarchical rule management and runtime resolution through
   generated ORM operations. Host-derived application/tenant-project/user
   lineages intersect immutable deployment ceilings and every explicit exact
@@ -346,9 +349,10 @@ production-ready behavior.
   and provider-persistent-file retention workflows. Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
   context-summary/message-content pruning are implemented; session shells,
-  unsafe message dependencies, run/coordinator checkpoints, ordinary-retention
-  context invalidation, append-only facts, and external content remain, so
-  reports do not claim complete erasure.
+  unsafe message dependencies, runs and attempt history, ordinary-retention
+  context invalidation, non-checkpoint append-only facts, and external content
+  remain, so reports do not claim complete erasure. Bounded terminal
+  coordinator-checkpoint purge is implemented.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
@@ -399,8 +403,9 @@ production-ready behavior.
 ## Next implementation slice
 
 1. Continue dependency-ordered deleting-session, raw-payload, attachment, and
-   audit retention. Keep append-only purge closed until a reviewed reusable
-   generated-ORM primitive is available upstream.
+   audit retention. The reviewed generated-ORM primitive is now used only for
+   terminal coordinator checkpoints; keep every other append-only entity
+   closed until its independent scope, age, and dependency proofs exist.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -428,7 +433,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  `0.32.0` baseline; the current crate/schema versions are `0.36.0`/`0.34.0`.
+  `0.32.0` baseline; the current crate/schema versions are `0.37.0`/`0.35.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

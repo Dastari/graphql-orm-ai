@@ -112,5 +112,7 @@ The host-only `OrmAiSessionRetentionService` now deletes expired
 current GraphQL-managed scope policy. It never rewinds or reuses sequence
 values. A later replay that crosses a removed sequence returns
 `reset_required`, so the client discards provisional rendering and reloads its
-bounded authoritative windows. Stable lifecycle/completion events are not
-deleted by this worker. See the [session-retention guide](session-retention.md).
+bounded authoritative windows. Stable lifecycle/completion events are retained
+by ordinary delta expiry, but become eligible after the separately configured
+deleting-session cutoff. See the
+[session-retention guide](session-retention.md).

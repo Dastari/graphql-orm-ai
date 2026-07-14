@@ -84,9 +84,10 @@ camelCase to PascalCase.
    `next_session_cursor` is absent. This prunes eligible provisional deltas;
    after a deleting-session cutoff it also removes bounded protected session
    events, then protected context-summary checkpoints, then eligible terminal
-   unattached message content. It does not erase attachments, append-only
-   facts, or the session shell; see the
-   [retention guide](session-retention.md).
+   unattached message content, clears validated terminal-run checkpoint
+   pointers, and purges bounded immutable coordinator checkpoints. It does not
+   erase attachments, other append-only facts, runs, or the session shell; see
+   the [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.
@@ -285,8 +286,8 @@ ambiguous replay remain closed. See the
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
 upload/search/deletion, attachment quotas/derivatives, authoritative
-provider-built-in unit pricing, complete deleting-session and external-artifact
-retention,
+provider-built-in unit pricing, completion of deleting-session and external-
+artifact retention,
 provider-turn and partial-batch restart adoption and stateless/parallel
 supervised continuation remain
 under implementation. Protected provisional live output is opt-in and documented in

@@ -1,7 +1,7 @@
 # Bounded Session Retention
 
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
-for four narrowly defined classes of protected chat data:
+for five narrowly defined classes of protected chat data:
 
 - expired provisional `provider_live_delta` session events;
 - expired preview/block content from finalized messages whose producing run is
@@ -9,7 +9,9 @@ for four narrowly defined classes of protected chat data:
 - after a deleting-session cutoff, every bounded protected session event;
 - after that cutoff, protected context-summary checkpoints, followed only on a
   later pass by the same safely detachable terminal message content, even when
-  ordinary message retention is disabled.
+  ordinary message retention is disabled; and
+- after all those protected sources are exhausted, immutable coordinator
+  checkpoints belonging to a bounded, entirely terminal run set.
 
 It does not expose a GraphQL mutation and does not issue SQL. All reads, CAS
 updates, deletes, audit appends, keyset cursors, and transactions use generated
@@ -21,8 +23,9 @@ responsibility of `graphql-orm`.
 Construct the service with the AI ORM database, a trusted `agql-auth::Clock`,
 and validated `AiSessionRetentionLimits`. Use
 `new_with_context_checkpoints` when context summaries need a limit distinct
-from the message-row limit. Start a complete scan cycle by
-calling `prune_session_content(None)`. If the report contains
+from the message-row limit, and chain `with_run_checkpoint_limits` when run
+proofs and immutable checkpoint pages need independent bounds. Start a complete
+scan cycle by calling `prune_session_content(None)`. If the report contains
 `next_session_cursor`, pass that opaque value unchanged to the next call.
 Continue until the cursor is absent, then begin a later scheduled cycle from
 `None`.
@@ -30,8 +33,9 @@ Continue until the cursor is absent, then begin a later scheduled cycle from
 Every call and every session transaction is bounded independently. A report
 states only what that completed page changed; it is not a global erasure
 certificate. Persist worker scheduling/telemetry outside model-visible state,
-alert on repeated `sessions_not_ready`, `sessions_conflicted`, or
-`messages_blocked`, and never treat a partial scan cycle as complete.
+alert on repeated `sessions_not_ready`, `sessions_conflicted`,
+`messages_blocked`, or `run_checkpoint_purges_blocked`, and never treat a
+partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -76,6 +80,28 @@ The transaction clears the protected preview, deletes exact block rows, writes
 `content_purged_at`, sets `block_count` to zero, and appends a redacted audit
 fact. Any failure rolls back the whole session change.
 
+Run-checkpoint purge starts only in a later pass that proves no protected
+session event, context checkpoint, or unpurged message content remains. The run
+query uses a lookahead bound and every returned run must belong to the session,
+have valid fencing metadata, and be terminal. Each non-null current checkpoint
+pointer must identify an exact, structurally valid checkpoint for that run.
+The ordinary state-machine transaction clears those pointers with CAS before
+any physical deletion can start.
+
+The worker then opens a generated `graphql-orm` retention transaction. It
+reloads and validates the deleting session, current scope policy, cutoff,
+empty-source proofs, bounded terminal runs, and absent pointers. It selects one
+created-time/primary-key-ordered checkpoint page, validates only redacted
+structure without opening protected state, deletes the exact typed ID set under
+a nonzero `MutationLimit`, and appends a redacted purge audit atomically. A crash between
+pointer clearing and purge leaves an unreferenced checkpoint for a later pass;
+it cannot leave a run pointing at a deleted row.
+
+Constructing the service grants `RetentionMaintenance` only for the exact run-
+checkpoint entity and policy key on its private database-handle clone.
+Ordinary append-only update/delete remains database-prohibited. Pricing,
+skills, usage, audit, egress, and run-attempt/outcome facts are not opted in.
+
 ## Reader and frontend behavior
 
 Authorized message pagination retains a small metadata shell. A purged message
@@ -93,13 +119,14 @@ retention never requires loading the complete transcript into the DOM.
 ## Deliberate limits
 
 This worker does not delete session or message metadata, attachments or blob
-objects, runs, run/coordinator checkpoints, tool calls/results, proposals,
-approvals, provider raw payloads, provider-persistent files, usage, egress
-decisions, audit facts, fencing, or restore evidence. It therefore starts but
-does not complete the `deleting` session lifecycle. Unsafe message dependencies
-remain in place and are counted as blocked. The remaining resources require
-separate workers with their own dependency ordering, external delete
-confirmation, fencing, restore reconciliation, and audit contracts.
+objects, runs, run attempts/outcomes, tool calls/results, proposals, approvals,
+provider raw payloads, provider-persistent files, usage, egress decisions,
+audit facts, pricing/skill history, or restore evidence. It therefore advances
+but does not complete the `deleting` session lifecycle. Unsafe message or run
+dependencies remain in place and are counted as blocked. The remaining
+resources require separate workers with their own dependency ordering,
+external delete confirmation, fencing, restore reconciliation, and audit
+contracts.
 
 Ordinary message-retention expiry does not yet delete context checkpoints. The
 context-compaction producer remains unimplemented and must stay disabled until

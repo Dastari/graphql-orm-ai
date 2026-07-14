@@ -5,13 +5,31 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.36.0` and the
-AI schema module to `0.34.0`. No table, column, index, constraint, or entity is
-added; the module version changes because existing session, context-checkpoint,
-message/block, retention-policy, and audit records now participate in a
-context-before-content deleting-session retention contract.
+This development line advances the pre-1.0 crate version to `0.37.0` and the
+AI schema module to `0.35.0`. No table, column, index, constraint, or entity is
+added; the module version changes because run checkpoints now opt into managed
+append-only retention purge and the deleting-session worker gives existing
+session, run, checkpoint, retention-policy, and audit records a new ordered
+deletion meaning.
 
 ### Added
+
+- Deleting-session retention now physically purges bounded pages of immutable
+  coordinator checkpoints after protected events, context summaries, and
+  eligible message content are exhausted and every bounded run is terminal.
+  The ordinary state-machine transaction first validates each current
+  checkpoint and clears terminal run pointers; a separate generated-ORM
+  retention transaction then re-proves the cutoff and dependencies, deletes an
+  exact typed ID set, and appends a redacted audit atomically. Checkpoint pages
+  use stable created-time/primary-key ordering and a least-privilege projection
+  that excludes protected state.
+- `AiSessionRetentionLimits::with_run_checkpoint_limits` and its two getters
+  configure independent run-proof and checkpoint-page bounds. Existing
+  constructors remain source-compatible and conservatively reuse their
+  existing message/context limits.
+- `AiSessionRetentionReport` reports cleared checkpoint references, physically
+  deleted checkpoints, and sessions whose checkpoint purge remains blocked by
+  a nonterminal or over-bound run set.
 
 - Deleting-session retention now removes protected context-summary checkpoints
   in independently bounded pages before it can scrub any message content.
@@ -189,6 +207,22 @@ context-before-content deleting-session retention contract.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- Run checkpoints are the only append-only AI entity opted into retention
+  purge. Pricing, skill-version, usage, audit, egress, run-attempt, and attempt-
+  outcome facts remain non-purgeable. The trusted worker installs an exact
+  `RetentionMaintenance` entity policy only on its cloned database handle;
+  ordinary update/delete paths remain prohibited and row policy still narrows
+  access.
+- Pointer clearing commits before physical deletion. A crash between phases
+  leaves an unreferenced checkpoint for a later bounded pass, never a dangling
+  run pointer. Nonterminal runs, malformed bindings, excessive run sets,
+  retained protected sources, or policy/cutoff drift keep checkpoints in
+  place.
+- Session/message/run CAS conflicts now leave the state-machine transaction by
+  error, forcing rollback before the worker converts them into a bounded
+  `sessions_conflicted` report. Earlier event/context/content or pointer
+  changes can no longer commit without their same-transaction audit.
 
 - A deleting-session message body is not scrubbed while any bounded page of
   protected context summaries remains. The worker validates each checkpoint's
@@ -648,10 +682,12 @@ context-before-content deleting-session retention contract.
   `graphql-orm-ai` agents treat sibling worktrees as read-only, stage ignored
   handoff prompts for upstream owners, and repin only reviewed final upstream
   commits in dependency order.
-- Public Git builds now pin the final `graphql-orm` 0.7.0 merge commit and
+- Public Git builds now pin the final `graphql-orm` 0.9.0 merge commit and
   `agql-auth` 0.10.0 annotated-tag target instead of requiring an adjacent
   local sibling checkout or an open-PR revision. CI checks out the same exact
-  revisions for baseline compatibility verification.
+  revisions for baseline compatibility verification. The ORM update supplies
+  the generated, database-enforced append-only retention transaction used only
+  by the trusted checkpoint worker.
 - Crate version is now `0.2.0` because the public budget reconciliation and
   proof-serialization changes are pre-1.0 breaking API changes.
 - AI schema module version is now `0.8.0`. In addition to the `0.7.0` tool-call

@@ -21,6 +21,11 @@ pub struct AiSessionRetentionReport {
     pub deleting_session_events_deleted: u32,
     /// Protected context-summary checkpoints deleted before message scrubbing.
     pub deleting_session_context_checkpoints_deleted: u32,
+    /// Terminal run pointers cleared before append-only checkpoint deletion.
+    pub deleting_session_run_checkpoint_references_cleared: u32,
+    /// Append-only coordinator checkpoints physically deleted after their
+    /// terminal run pointers and ordinary protected sources were exhausted.
+    pub deleting_session_run_checkpoints_deleted: u32,
     /// Finalized message previews scrubbed after a retention cutoff.
     pub message_contents_purged: u32,
     /// Protected message-block rows deleted with those previews.
@@ -33,6 +38,9 @@ pub struct AiSessionRetentionReport {
     /// Eligible messages retained because their run was nonterminal or a
     /// linked attachment still owned external/protected content.
     pub messages_blocked: u32,
+    /// Deleting sessions whose run history exceeded the configured proof bound
+    /// or still contained a nonterminal run.
+    pub run_checkpoint_purges_blocked: u32,
     /// Opaque cursor for the next bounded session scan page. Absence means the
     /// current cycle reached the end; a later cycle starts again from `None`.
     pub next_session_cursor: Option<String>,
