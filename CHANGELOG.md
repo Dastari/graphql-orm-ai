@@ -5,13 +5,27 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.27.0` and the
-AI schema module to `0.25.0`. No table, column, index, constraint, or entity is
-added; the module version changes because existing session/inbox event fields
-now carry a strict fenced UI-intent suggestion and restore meaning.
+This development line advances the pre-1.0 crate version to `0.28.0` and the
+AI schema module to `0.26.0`. No table, column, index, constraint, or entity is
+added; the module version changes because the existing scope-policy record now
+has a deterministic identity and strict checksummed hierarchical-rule meaning,
+in addition to the earlier strict skill and UI-intent semantics.
 
 ### Added
 
+- Project-neutral hierarchical rule contracts and a generated-ORM-only
+  `OrmAiRulePolicyService`. A host-authored current-principal lineage intersects
+  immutable deployment limits and every explicit application-defined scope
+  across enabled state, disclosure/maturity, exact tool fingerprints,
+  providers/capabilities, approval floors, retention/BYOK, and seven budget
+  dimensions. Missing, cross-tenant, corrupt, unauthorized, stale, or widening
+  layers fail closed, and the resolved fingerprint grants no ordinary
+  authority.
+- Separately composable authenticated `AiRuleQueryRoot` and
+  `AiRuleMutationRoot` management with exact-scope access decisions, recent
+  MFA, compare-and-swap updates, strict v1 checksummed persistence, and atomic
+  redacted audit. Restore facts now classify an invalid hierarchical rule as
+  fatal start-gate evidence.
 - A protected `OrmAiSkillCatalogService` and separately composable GraphQL
   skill roots. Safe metadata, immutable publication, and enablement require
   exact host scope policy, recent MFA, compare-and-swap state, and atomic
@@ -49,7 +63,8 @@ now carry a strict fenced UI-intent suggestion and restore meaning.
 - A PostgreSQL parity integration test that creates and owns its disposable
   Docker container, random credentials, unique database, and loopback port.
   It applies the generated AI module and exercises atomic session/message/run,
-  protected skill publication/resolution, keyset, and stale-fence behavior
+  protected skill publication/resolution, hierarchical rule
+  management/resolution, keyset, and stale-fence behavior
   entirely through `graphql-orm`, then verifies the ownership label before
   cleanup. CI never accepts a database URL.
 
@@ -76,6 +91,12 @@ now carry a strict fenced UI-intent suggestion and restore meaning.
 
 ### Security
 
+- Hierarchical rules cannot expose secret classification or autonomous writes,
+  cannot widen immutable deployment ceilings, and cannot substitute for fresh
+  resolver, tool, egress, provider, budget, or approval authorization. Empty
+  allowlists and zero budgets explicitly deny; absent values only inherit
+  already-effective bounds. Runtime lineage validation rejects duplicate,
+  incomplete, over-depth, cross-tenant, and wrong-target hierarchies.
 - Skill discovery, enablement, and resolution cannot widen current tool,
   resolver, egress, provider, budget, proposal, approval, or UI policy.
   Unknown stored fields/formats, duplicate bindings, swapped scope/current

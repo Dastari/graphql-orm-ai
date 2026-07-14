@@ -56,6 +56,13 @@ budget, proposal, approval, or UI authority. In particular:
 - `AlwaysForScope` means eligible for consideration, not automatically trusted
   or authorized.
 
+When hierarchical rules are enabled, the current `AiResolvedRuleSet` further
+intersects a skill's exact tool fingerprints, classification and maturity,
+provider capabilities, approval floor, and run ceilings. Neither object grants
+authority, and unpublished or user-uploaded text never becomes trusted skill
+instruction through rule resolution. See the
+[hierarchical-rule guide](hierarchical-rules.md).
+
 ## GraphQL composition
 
 Compose `AiSkillQueryRoot` and `AiSkillMutationRoot` into the host schema and

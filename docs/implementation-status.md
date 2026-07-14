@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.25.0`) and 39 private records
+- AI schema-module identity (currently version `0.26.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -29,8 +29,8 @@ production-ready behavior.
   disposable Docker container and unique database. The harness accepts no
   database URL, binds only a Docker-assigned IPv4 loopback port, applies the
   generated module, exercises atomic session/message/run, protected skills,
-  and keyset behavior, proves stale-fence rejection, and verifies ownership
-  again before cleanup.
+  hierarchical rules, and keyset behavior, proves stale-fence rejection, and
+  verifies ownership again before cleanup.
 - Provider-neutral capability/request/event/stream interfaces with validated
   function schemas and separately authorized built-in tools.
 - Deterministic mock provider and native feature-gated OpenAI Responses/SSE
@@ -278,6 +278,14 @@ production-ready behavior.
   expired provisional live deltas and scrubbing of terminal unattached message
   preview/blocks; metadata tombstones remain windowable, event gaps request a
   client reset, and every changed session appends redacted audit atomically.
+- Project-neutral hierarchical rule management and runtime resolution through
+  generated ORM operations. Host-derived application/tenant-project/user
+  lineages intersect immutable deployment ceilings and every explicit exact
+  scope across tool fingerprints, disclosure/maturity, providers/capabilities,
+  approvals, retention/BYOK, and budgets. Reads, management, and resolution are
+  separately authorized; writes require recent MFA/CAS/audit; missing,
+  cross-tenant, corrupt, stale, or widening layers fail closed. A resolved rule
+  set is constraint evidence and grants no ordinary authority.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -344,8 +352,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add hierarchical rule narrowing without allowing lower scopes to widen
-   tool, egress, provider, approval, or budget policy.
+2. Bind resolved hierarchical-rule fingerprints and ceilings into the durable
+   run-planning/coordinator checkpoints so every later boundary can reject a
+   changed lineage without treating rule resolution as authority.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

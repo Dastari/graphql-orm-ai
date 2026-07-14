@@ -51,6 +51,12 @@ below are still being implemented.
   publication, exact scope/CAS/audit enforcement, tool and UI-intent
   descriptor fingerprints, capability/classification/maturity requests,
   schemas, and hard per-run ceilings. Skill resolution grants no authority.
+- Project-neutral hierarchical rules resolved through host-defined
+  application, tenant/project, and user scope lineages. Immutable deployment
+  limits and every exact GraphQL-managed layer are intersected across tool
+  fingerprints, classification/maturity, providers/capabilities, approvals,
+  retention/BYOK, and budgets; the result can only reject or narrow and never
+  grants ordinary authority.
 - A default-deny logical UI-intent registry with JSON Schema 2020-12 payload
   validation and exact descriptor fingerprints. Validated intents are
   suggestions only; consumers own resource reauthorization and route mapping.
@@ -329,8 +335,8 @@ harness proves that it created and owns a disposable Docker container, unique
 credentials, database, and cleanup. Generic `DATABASE_URL` fallbacks are
 forbidden. Consumer-application integration tests belong to those consumers.
 The owned PostgreSQL harness exercises only generated ORM migrations,
-transactions, queries, keysets, skill persistence, and fencing; it contains no
-application raw SQL.
+transactions, queries, keysets, skill/rule persistence, and fencing; it
+contains no application raw SQL.
 
 ```bash
 cargo fmt --check

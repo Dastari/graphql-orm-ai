@@ -16,6 +16,14 @@ built-ins, and remote MCP data as untrusted input.
 - Approval is intent confirmation, not authorization. Resolver, row, field,
   rate-limit, assurance, and resource-version checks run again after approval.
 
+Hierarchical rules are negative constraints, never cached authority. The host
+derives the complete application-defined lineage from the current principal;
+the runtime intersects immutable deployment bounds with every exact persisted
+layer and fails closed for missing, cross-tenant, stale, corrupt, or widening
+policy. A positive rule evaluation still requires ordinary tool enablement,
+resolver authorization, disclosure, egress, atomic budget, provider, and
+approval proofs at their actual side-effect boundaries.
+
 ## Disclosure
 
 Read permission does not imply permission to disclose data externally. Every

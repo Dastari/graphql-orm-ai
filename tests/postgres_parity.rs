@@ -249,6 +249,60 @@ impl AiSkillAccessPolicy for AllowSkills {
     }
 }
 
+struct AllowRules;
+
+#[async_trait]
+impl AiRuleAccessPolicy for AllowRules {
+    async fn can_access_rule(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        _action: AiRuleAction,
+    ) -> bool {
+        true
+    }
+}
+
+struct ExactRuleHierarchy;
+
+#[async_trait]
+impl AiRuleHierarchyResolver for ExactRuleHierarchy {
+    async fn hierarchy(
+        &self,
+        _principal: &AuthPrincipal,
+        target_scope: &AiScope,
+    ) -> Result<Vec<AiScope>, AiError> {
+        Ok(vec![target_scope.clone()])
+    }
+}
+
+fn rule_deployment_limits() -> AiRuleDeploymentLimits {
+    AiRuleDeploymentLimits::new(
+        4,
+        AiRuleConstraints {
+            enabled: true,
+            maximum_classification: DataClassification::Restricted,
+            maximum_tool_maturity: ToolMaturity::SupervisedWrite,
+            approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
+            allowed_tool_fingerprints: None,
+            allowed_provider_kinds: None,
+            allowed_provider_capabilities: None,
+            allow_provider_retention: true,
+            allow_byok: true,
+            budget: AiRuleBudgetCeilings {
+                maximum_steps: Some(100),
+                maximum_duration_seconds: Some(3_600),
+                maximum_output_tokens: Some(32_000),
+                maximum_cost_microunits: Some(10_000_000),
+                maximum_provider_calls: Some(100),
+                maximum_tool_units: Some(100),
+                maximum_image_units: Some(10),
+            },
+        },
+    )
+    .expect("PostgreSQL rule deployment limits should validate")
+}
+
 fn principal(now: OffsetDateTime) -> AuthPrincipal {
     let assurance = SessionAssurance::new(
         now,
@@ -275,7 +329,7 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
 }
 
 #[tokio::test]
-async fn owned_postgres_runs_generated_migration_sessions_skills_and_fencing() {
+async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fencing() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
@@ -286,7 +340,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_and_fencing() {
     let migration = database
         .schema()
         .plan_migration_to_entities(
-            "ai-postgres-parity-v024",
+            "ai-postgres-parity-v026",
             "graphql-orm-ai disposable PostgreSQL parity",
             module.entities(),
         )
@@ -429,6 +483,65 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_and_fencing() {
         1
     );
 
+    let rule_scope =
+        AiScope::new("postgres-parity", "scope-1").with_tenant_id("postgres-parity-tenant");
+    let rules = OrmAiRulePolicyService::new(
+        database.clone(),
+        Arc::new(AllowRules),
+        Arc::new(ExactRuleHierarchy),
+        RecentMfaPolicy {
+            maximum_age: Duration::minutes(5),
+            clock_skew: Duration::seconds(30),
+            allowed_amr: vec!["otp".to_owned()],
+            allowed_acr: vec!["urn:postgres-parity:loa:2".to_owned()],
+            match_mode: AssuranceMatchMode::All,
+        },
+        Arc::new(FixedClock::new(now)),
+        rule_deployment_limits(),
+    );
+    rules
+        .set_policy(
+            &principal,
+            SetAiRulePolicyInput {
+                scope: AiScopeInput {
+                    kind: rule_scope.kind.clone(),
+                    id: rule_scope.id.clone(),
+                    tenant_id: rule_scope.tenant_id.clone(),
+                },
+                enabled: true,
+                maximum_classification: AiRuleClassificationInput::Internal,
+                maximum_tool_maturity: AiRuleToolMaturityInput::ReadOnly,
+                approval_requirement: AiRuleApprovalRequirement::OneShotForAllApplicationTools,
+                allowed_tool_fingerprints: Some(vec!["b".repeat(64)]),
+                allowed_provider_kinds: Some(vec![AiProviderKindInput::Ollama]),
+                allowed_provider_capabilities: Some(vec![AiRuleProviderCapability::Streaming]),
+                allow_provider_retention: false,
+                allow_byok: false,
+                budget: AiRuleBudgetInput {
+                    maximum_steps: Some(5),
+                    maximum_duration_seconds: Some(120),
+                    maximum_output_tokens: Some(1_024),
+                    maximum_cost_microunits: Some(500_000),
+                    maximum_provider_calls: Some(5),
+                    maximum_tool_units: Some(2),
+                    maximum_image_units: Some(0),
+                },
+                expected_version: None,
+            },
+        )
+        .await
+        .expect("strict rule policy should persist through generated PostgreSQL ORM APIs");
+    let resolved_rules = rules
+        .resolve_for_run(&principal, rule_scope)
+        .await
+        .expect("exact PostgreSQL rule hierarchy should resolve");
+    assert_eq!(
+        resolved_rules.constraints().maximum_classification,
+        DataClassification::Internal
+    );
+    assert_eq!(resolved_rules.constraints().budget.maximum_steps, Some(5));
+    assert!(!resolved_rules.constraints().allow_byok);
+
     let runs = OrmAiRunService::new(
         database,
         Arc::new(SystemClock),
@@ -450,6 +563,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_and_fencing() {
 
     drop(sessions);
     drop(skills);
+    drop(rules);
     drop(runs);
     drop(container);
 }

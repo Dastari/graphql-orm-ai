@@ -63,6 +63,8 @@ mod orm_proposals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_provider_output;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_rules;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;
@@ -87,6 +89,7 @@ mod provider_calls;
 mod providers;
 mod remote_execution;
 mod restore;
+mod rules;
 mod run_state;
 mod runtime;
 mod secrets;
@@ -141,6 +144,8 @@ pub use orm_proposals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_provider_output::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_rules::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_session_retention::*;
@@ -167,6 +172,7 @@ pub use provider_calls::*;
 pub use providers::*;
 pub use remote_execution::*;
 pub use restore::*;
+pub use rules::*;
 pub use run_state::*;
 pub use runtime::*;
 pub use secrets::*;
@@ -193,6 +199,7 @@ pub mod prelude {
         AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
         AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
+        AiRuleAccessPolicy, AiRuleDeploymentLimits, AiRuleHierarchyResolver, AiRulePolicyService,
         AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiSessionRetentionService,
         AiSkillAccessPolicy, AiSkillCatalogService, AiToolAuthorizationPolicy, AiToolCatalog,
         AiToolDescriptor, AiUiIntentCatalog, AiUiIntentTypeDescriptor, AiUsageAccessPolicy,
@@ -214,8 +221,9 @@ pub mod prelude {
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
         OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
         OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRunService, OrmAiSessionRetentionService,
-        OrmAiSkillCatalogService, OrmAiUiIntentDeliveryService, OrmAiUsageService,
+        OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
+        OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiUiIntentDeliveryService,
+        OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

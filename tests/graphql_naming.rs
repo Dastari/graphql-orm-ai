@@ -1,7 +1,7 @@
 use async_graphql::{EmptySubscription, Schema};
 use graphql_orm_ai::{
     AiConfigurationMutationRoot, AiConfigurationQueryRoot, AiMutationRoot, AiQueryRoot,
-    AiSkillMutationRoot, AiSkillQueryRoot, AiSubscriptionRoot,
+    AiRuleMutationRoot, AiRuleQueryRoot, AiSkillMutationRoot, AiSkillQueryRoot, AiSubscriptionRoot,
 };
 
 #[test]
@@ -17,6 +17,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     .finish()
     .sdl();
     let skill_sdl = Schema::build(AiSkillQueryRoot, AiSkillMutationRoot, EmptySubscription)
+        .finish()
+        .sdl();
+    let rule_sdl = Schema::build(AiRuleQueryRoot, AiRuleMutationRoot, EmptySubscription)
         .finish()
         .sdl();
 
@@ -37,6 +40,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(skill_sdl.contains("upsertAiSkill(input:"));
         assert!(skill_sdl.contains("publishAiSkillVersion(input:"));
         assert!(skill_sdl.contains("allowedUiIntents: [AiSkillUiIntentBindingInput!]!"));
+        assert!(rule_sdl.contains("aiRulePolicy(scope:"));
+        assert!(rule_sdl.contains("setAiRulePolicy(input:"));
+        assert!(rule_sdl.contains("allowedProviderCapabilities: [AiRuleProviderCapability!]"));
         assert!(!sdl.contains("AiSessions("));
     }
 
@@ -57,6 +63,10 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(skill_sdl.contains("UpsertAiSkill(Input:"));
         assert!(skill_sdl.contains("PublishAiSkillVersion(Input:"));
         assert!(skill_sdl.contains("AllowedUiIntents: [AiSkillUiIntentBindingInput!]!"));
+        assert!(rule_sdl.contains("AiRulePolicy(Scope:"));
+        assert!(rule_sdl.contains("SetAiRulePolicy(Input:"));
+        assert!(rule_sdl.contains("AllowedProviderCapabilities: [AiRuleProviderCapability!]"));
+        assert!(!rule_sdl.contains("aiRulePolicy("));
         assert!(!configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("aiSessions("));
     }

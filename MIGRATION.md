@@ -4,6 +4,62 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: hierarchical rule narrowing (crate 0.27.0 to 0.28.0; schema 0.25.0 to 0.26.0)
+
+Apply AI schema module `0.26.0` while workers, rule/configuration mutations,
+backups, and restore callbacks are closed. Do not run 0.28.0 code against a
+module still registered as 0.25.0. The generated migration adds no table,
+column, index, constraint, or entity and still owns 39 private records. It
+advances the module because the existing private scope-policy record now has a
+strict deterministic ID, deny-unknown-fields v1 hierarchical-rule payload,
+scope-bound checksum, and restore meaning. No application raw SQL or
+consumer-owned data access is introduced.
+
+New public Rust APIs include `AiRuleConstraints`, budget/provider/approval
+constraint types, `AiRuleDeploymentLimits`, `AiResolvedRuleSet`, access and
+hierarchy traits, `AiRulePolicyService`, the redacted GraphQL input/view and
+roots, and `OrmAiRulePolicyService`. Compose the rule roots separately and
+install one `Arc<dyn AiRulePolicyService>`. Writes require a current principal,
+exact `Manage` authorization, recent MFA, immutable deployment-limit
+validation, and CAS. Reads and run resolution have independent authorization
+actions.
+
+Implement `AiRuleHierarchyResolver` from authoritative application state and
+the current principal. It must return the complete broadest-to-target lineage.
+Every participating layer must have an explicit policy; a missing, duplicate,
+over-depth, wrong-target, cross-tenant, unauthorized, corrupt, or deployment-
+widening layer fails closed. GraphQL scope kinds remain opaque strings and do
+not add any product entity or tenant hierarchy to this crate.
+
+Resolve the hierarchy before trusted run planning and carry its canonical
+fingerprint and exact row versions into host orchestration. Apply the effective
+tool approval floor and budget ceilings at their real execution boundaries.
+`AiResolvedRuleSet` is only negative constraint evidence: a positive helper
+result is not tool enablement, resolver authorization, disclosure approval,
+provider routing, egress authorization, spend reservation, BYOK permission, or
+one-shot approval consumption.
+
+The GraphQL SDL adds `aiRulePolicy`/`AiRulePolicy` and
+`setAiRulePolicy`/`SetAiRulePolicy`, plus their inputs and enums, following the
+selected camelCase/PascalCase feature without aliases. Secret classification
+and autonomous-write maturity are absent. An absent allowlist/budget value
+inherits the effective broader constraint; an empty allowlist or zero budget
+explicitly denies that dimension.
+
+Restore snapshot producers must populate the new
+`AiRestoreSnapshotFacts::invalid_rule_policy_count`. Any nonzero value emits
+fatal `AI_RESTORE_RULE_POLICY_INVALID` evidence and keeps the runtime closed.
+This added public struct field is a pre-1.0 source-breaking change for
+struct-literal producers.
+
+The public service did not exist in 0.27.0, so a normal deployment has no
+service-created policy rows and needs no row rewrite or consumer-data
+migration. If a private integration pre-seeded `AiScopePolicyRecord`, treat
+those rows as unsupported legacy data: keep the runtime closed and replace
+them through the authenticated `setAiRulePolicy` mutation as part of a
+controlled migration. Do not expose generic CRUD roots or repair private JSON
+with application SQL.
+
 ## Unreleased: durable validated UI-intent suggestions (crate 0.26.0 to 0.27.0; schema 0.24.0 to 0.25.0)
 
 Apply AI schema module `0.25.0` while AI workers, subscriptions, backups, and
