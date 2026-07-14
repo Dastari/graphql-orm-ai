@@ -20,11 +20,11 @@ use crate::orm_runs::{
 use crate::persistence::*;
 use crate::{
     AiAccessPolicy, AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
-    AiAgentContinuation, AiContentProtectionPolicy, AiContentProtectionPolicyResolver,
-    AiContentProtector, AiEgressManifest, AiError, AiPersistedApplicationToolCall,
-    AiProviderCallResult, AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute,
-    ContentProtectionContext, ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope,
-    ProviderKind,
+    AiAgentContinuation, AiAgentRuleResolver, AiContentProtectionPolicy,
+    AiContentProtectionPolicyResolver, AiContentProtector, AiEgressManifest, AiError,
+    AiPersistedApplicationToolCall, AiProviderCallResult, AiResolvedRuleSet, AiRuleRunUsage,
+    AiRunLease, AiScope, AiSessionAction, AiToolResultEgressRoute, ContentProtectionContext,
+    ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind,
 };
 
 #[derive(Deserialize)]
@@ -35,6 +35,8 @@ struct CoordinatorCheckpointPayload {
     provider_turns: u32,
     total_tool_calls: u32,
     scope: AiScope,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
     correlation_id: String,
     result_egress_route: serde_json::Value,
     provider_result: ProviderResultSnapshot,
@@ -140,6 +142,7 @@ pub struct OrmAiCoordinatorCheckpointService {
     access_policy: Arc<dyn AiAccessPolicy>,
     protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
     content_protector: Arc<dyn AiContentProtector>,
+    rule_resolver: Arc<dyn AiAgentRuleResolver>,
     clock: Arc<dyn Clock>,
     limits: AiCoordinatorCheckpointLimits,
 }
@@ -153,6 +156,7 @@ impl OrmAiCoordinatorCheckpointService {
         access_policy: Arc<dyn AiAccessPolicy>,
         protection_policy: Arc<dyn AiContentProtectionPolicyResolver>,
         content_protector: Arc<dyn AiContentProtector>,
+        rule_resolver: Arc<dyn AiAgentRuleResolver>,
         clock: Arc<dyn Clock>,
         limits: AiCoordinatorCheckpointLimits,
     ) -> Self {
@@ -162,6 +166,7 @@ impl OrmAiCoordinatorCheckpointService {
             access_policy,
             protection_policy,
             content_protector,
+            rule_resolver,
             clock,
             limits,
         }
@@ -175,6 +180,8 @@ impl OrmAiCoordinatorCheckpointService {
         scope: &AiScope,
         correlation_id: &str,
         route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
         provider_turns: u32,
         total_tool_calls: u32,
         checkpoint_kind: &str,
@@ -191,16 +198,30 @@ impl OrmAiCoordinatorCheckpointService {
             || !valid_reference(correlation_id)
             || scope.kind.trim().is_empty()
             || scope.id.trim().is_empty()
+            || rules.target_scope() != scope
+            || rule_usage.provider_calls() != u64::from(provider_turns)
         {
             return Err(AiError::Conflict);
         }
-        match checkpoint_kind {
-            "provider_turn_persisted" if completed_tools.is_empty() && continuation.is_none() => {}
+        let completed_tool_count = match checkpoint_kind {
+            "provider_turn_persisted" if completed_tools.is_empty() && continuation.is_none() => {
+                total_tool_calls
+                    .checked_sub(u32::try_from(result.tool_calls().len()).unwrap_or(u32::MAX))
+                    .ok_or(AiError::Conflict)?
+            }
             "tool_batch_persisted"
                 if !completed_tools.is_empty()
                     && continuation.is_some()
-                    && completed_tools.len() == result.tool_calls().len() => {}
+                    && completed_tools.len() == result.tool_calls().len() =>
+            {
+                total_tool_calls
+            }
             _ => return Err(AiError::Conflict),
+        };
+        if rule_usage.steps()
+            != u64::from(provider_turns).saturating_add(u64::from(completed_tool_count))
+        {
+            return Err(AiError::Conflict);
         }
 
         let session =
@@ -210,6 +231,12 @@ impl OrmAiCoordinatorCheckpointService {
                 .ok_or(AiError::NotFound)?;
         validate_session_binding(&session, lease, scope)?;
         let (principal, policy) = self.current_policy(lease, scope).await?;
+        let current_rules = self.rule_resolver.resolve_rules(lease, scope).await?;
+        if current_rules.rules().fingerprint() != rules.fingerprint()
+            || rule_usage.validate(&current_rules).is_err()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
         let checkpoint_id = Uuid::new_v4();
         let mut protected_tool_values = Vec::with_capacity(completed_tools.len());
         let mut prepared_tools = Vec::with_capacity(completed_tools.len());
@@ -271,11 +298,13 @@ impl OrmAiCoordinatorCheckpointService {
             }
         }
         let payload = json!({
-            "formatVersion": 1,
+            "formatVersion": 2,
             "checkpointKind": checkpoint_kind,
             "providerTurns": provider_turns,
             "totalToolCalls": total_tool_calls,
             "scope": scope,
+            "ruleFingerprint": rules.fingerprint(),
+            "ruleUsage": rule_usage,
             "correlationId": correlation_id,
             "resultEgressRoute": route.checkpoint_value(),
             "providerResult": result.checkpoint_value(),
@@ -298,9 +327,12 @@ impl OrmAiCoordinatorCheckpointService {
         enforce_size(&protected_state, self.limits.maximum_state_bytes)?;
 
         let (current, current_policy) = self.current_policy(lease, scope).await?;
+        let final_rules = self.rule_resolver.resolve_rules(lease, scope).await?;
         if current_policy != policy
             || principal.reference() != lease.principal_reference()
             || current.reference() != lease.principal_reference()
+            || final_rules.rules().fingerprint() != rules.fingerprint()
+            || rule_usage.validate(&final_rules).is_err()
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -503,9 +535,14 @@ impl OrmAiCoordinatorCheckpointService {
         enforce_size(&opened, self.limits.maximum_state_bytes)?;
         let payload: CoordinatorCheckpointPayload =
             serde_json::from_value(opened).map_err(|_| AiError::PersistenceFailed)?;
-        if payload.format_version != 1
+        if payload.format_version != 2
             || payload.checkpoint_kind != "tool_batch_persisted"
             || payload.scope != scope
+            || payload.rule_fingerprint.len() != 64
+            || payload.rule_usage.provider_calls() != u64::from(payload.provider_turns)
+            || payload.rule_usage.steps()
+                != u64::from(payload.provider_turns)
+                    .saturating_add(u64::from(payload.total_tool_calls))
             || !valid_reference(&payload.correlation_id)
             || payload.provider_turns == 0
             || payload.total_tool_calls == 0
@@ -868,9 +905,12 @@ impl OrmAiCoordinatorCheckpointService {
             }
         }
         let (current, current_policy) = self.current_policy(lease, &scope).await?;
+        let current_rules = self.rule_resolver.resolve_rules(lease, &scope).await?;
         if current_policy != policy
             || principal.reference() != lease.principal_reference()
             || current.reference() != lease.principal_reference()
+            || current_rules.rules().fingerprint() != payload.rule_fingerprint
+            || payload.rule_usage.validate(&current_rules).is_err()
         {
             return Err(AiError::ReauthorizationFailed);
         }
@@ -880,6 +920,8 @@ impl OrmAiCoordinatorCheckpointService {
             payload.total_tool_calls,
             scope,
             continuation,
+            payload.rule_fingerprint,
+            payload.rule_usage,
         ))
     }
 }
@@ -893,6 +935,8 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
         scope: &AiScope,
         correlation_id: &str,
         route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError> {
@@ -902,6 +946,8 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
             scope,
             correlation_id,
             route,
+            rules,
+            rule_usage,
             provider_turns,
             total_tool_calls,
             "provider_turn_persisted",
@@ -920,6 +966,8 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
         scope: &AiScope,
         correlation_id: &str,
         route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError> {
@@ -929,6 +977,8 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
             scope,
             correlation_id,
             route,
+            rules,
+            rule_usage,
             provider_turns,
             total_tool_calls,
             "tool_batch_persisted",

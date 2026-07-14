@@ -64,6 +64,9 @@ pub struct AiRestoreSnapshotFacts {
     /// Hierarchical rule layers with invalid deterministic scope identity,
     /// strict format, checksum, deployment ceiling, or lineage semantics.
     pub invalid_rule_policy_count: u64,
+    /// Protected coordinator checkpoints with invalid v2 rule fingerprint,
+    /// cumulative usage, scope, fence, or current-lineage binding.
+    pub invalid_coordinator_checkpoint_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
     pub invalid_ui_intent_event_count: u64,
@@ -231,6 +234,13 @@ impl AiRestoreReconciler {
         if facts.invalid_rule_policy_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_RULE_POLICY_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_coordinator_checkpoint_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_COORDINATOR_CHECKPOINT_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

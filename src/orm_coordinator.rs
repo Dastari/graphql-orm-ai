@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 use crate::{
     AiAgentContinuation, AiAgentLoopGuard, AiAgentLoopLimits, AiAgentLoopTurn,
-    AiApplicationToolCallContext, AiError, AiPersistedApplicationToolCall,
+    AiAgentRuleResolution, AiApplicationToolCallContext, AiError, AiPersistedApplicationToolCall,
     AiPersistedProviderOutput, AiProviderCallExecutor, AiProviderCallPlan, AiProviderCallResult,
-    AiReadOnlyAgentRunOutcome::*, AiRunCompletion, AiRunLease, AiRunState, AiScope,
-    AiToolResultEgressRoute, OrmAiApplicationToolCallService, OrmAiProviderOutputService,
-    OrmAiRunService,
+    AiReadOnlyAgentRunOutcome::*, AiResolvedRuleSet, AiRuleRunUsage, AiRunCompletion, AiRunLease,
+    AiRunState, AiScope, AiToolResultEgressRoute, OrmAiApplicationToolCallService,
+    OrmAiProviderOutputService, OrmAiRunService,
 };
 
 /// Deployment-owned bounds for a top-level read-only agent attempt.
@@ -53,39 +53,60 @@ impl AiReadOnlyAgentCoordinatorLimits {
 
 /// One host-planned provider turn for the read-only coordinator.
 ///
-/// Construction proves that custom application tools are present and that the
-/// result-egress route is structurally valid. It does not authorize discovery,
-/// resolver execution, or egress; those decisions remain fresh per turn/call.
+/// Construction proves that custom application tools, one exact resolved-rule
+/// set, and a structurally valid result-egress route are present. It does not
+/// authorize discovery, resolver execution, provider egress, BYOK use, or
+/// spend; those decisions remain fresh per turn/call.
 pub struct AiReadOnlyAgentTurnPlan {
     provider_call: AiProviderCallPlan,
     result_egress_route: AiToolResultEgressRoute,
+    rules: AiResolvedRuleSet,
+    uses_byok: bool,
 }
 
 impl AiReadOnlyAgentTurnPlan {
-    /// Binds a provider plan to the server-selected route used for every exact
-    /// application-tool result in that turn.
+    /// Binds a provider plan to current rule evidence and the server-selected
+    /// route used for every exact application-tool result in that turn.
+    ///
+    /// `uses_byok` must be derived by the trusted planner from the selected
+    /// credential profile. It is checked as a negative rule constraint and is
+    /// not itself credential or provider authority.
     ///
     /// # Errors
     ///
     /// Returns [`AiError::InvalidInput`] if the provider plan has no validated
-    /// application tools or the route is malformed.
+    /// application tools, its scope differs from the resolved-rule target, or
+    /// the route is malformed.
     pub fn new(
         provider_call: AiProviderCallPlan,
         result_egress_route: AiToolResultEgressRoute,
+        rules: AiResolvedRuleSet,
+        uses_byok: bool,
     ) -> Result<Self, AiError> {
-        if !provider_call.has_application_tools() {
+        if !provider_call.has_application_tools() || provider_call.scope() != rules.target_scope() {
             return Err(AiError::InvalidInput(
-                "agent turn plan has no application tools".to_owned(),
+                "agent turn plan has no tools or exact rule binding".to_owned(),
             ));
         }
         result_egress_route.validate()?;
         Ok(Self {
             provider_call,
             result_egress_route,
+            rules,
+            uses_byok,
         })
     }
 
-    fn into_parts(self) -> (AiProviderCallPlan, AiScope, String, AiToolResultEgressRoute) {
+    fn into_parts(
+        self,
+    ) -> (
+        AiProviderCallPlan,
+        AiScope,
+        String,
+        AiToolResultEgressRoute,
+        AiResolvedRuleSet,
+        bool,
+    ) {
         let scope = self.provider_call.scope().clone();
         let correlation_id = self.provider_call.correlation_id().to_owned();
         (
@@ -93,20 +114,27 @@ impl AiReadOnlyAgentTurnPlan {
             scope,
             correlation_id,
             self.result_egress_route,
+            self.rules,
+            self.uses_byok,
         )
     }
 
     fn is_continuation(&self) -> bool {
         self.provider_call.is_continuation()
     }
+
+    fn rule_fingerprint(&self) -> &str {
+        self.rules.fingerprint()
+    }
 }
 
 /// Host-owned construction of exact initial and continuation provider plans.
 ///
 /// Implementations select configuration, provider profile, model, context,
-/// enabled tool definitions, fresh atomic-budget estimates, and exact egress
-/// manifests. Model output must never select these values. Continuations must
-/// be consumed through [`AiProviderCallPlan::new_continuation_with_tools`].
+/// enabled tool definitions, current hierarchical-rule evidence, fresh
+/// atomic-budget estimates, and exact egress manifests. Model output must never
+/// select these values. Continuations must be consumed through
+/// [`AiProviderCallPlan::new_continuation_with_tools`].
 #[async_trait]
 pub trait AiReadOnlyAgentTurnPlanner: Send + Sync {
     /// Builds the first turn for a newly running fenced attempt.
@@ -133,6 +161,26 @@ pub trait AiReadOnlyAgentTurnPlanner: Send + Sync {
         provider_turns: u32,
         continuation: AiAgentContinuation,
     ) -> Result<AiReadOnlyAgentTurnPlan, AiError>;
+}
+
+/// Fresh current-principal hierarchical-rule resolution for one run boundary.
+///
+/// Implementations must rehydrate the lease principal and resolve the complete
+/// host-authored hierarchy. A result narrows planning only and never grants
+/// provider, tool, resolver, egress, budget, or approval authority.
+#[async_trait]
+pub trait AiAgentRuleResolver: Send + Sync {
+    /// Resolves current rules for the exact fenced lease and target scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale principal state, scope mismatch,
+    /// incomplete/unauthorized hierarchy, or persistence ambiguity.
+    async fn resolve_rules(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+    ) -> Result<AiAgentRuleResolution, AiError>;
 }
 
 /// Minimal fenced run operations required by the coordinator.
@@ -260,8 +308,9 @@ pub trait AiAgentProviderOutputWriter: Send + Sync {
 /// Protected fenced checkpoint persistence for replay-safe coordinator phases.
 ///
 /// A successful write proves only that an exact provider result or completed
-/// read-only tool batch is durably protected under the current attempt fence.
-/// It does not itself authorize generation adoption or external replay.
+/// read-only tool batch, current rule fingerprint, and cumulative rule-budget
+/// counters are durably protected under the current attempt fence. It does not
+/// itself authorize generation adoption or external replay.
 #[async_trait]
 pub trait AiAgentCheckpointWriter: Send + Sync {
     /// Persists one normalized provider turn before output or tools consume it.
@@ -278,6 +327,8 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
         scope: &AiScope,
         correlation_id: &str,
         route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError>;
@@ -299,6 +350,8 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
         scope: &AiScope,
         correlation_id: &str,
         route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        rule_usage: AiRuleRunUsage,
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError>;
@@ -307,10 +360,11 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
 /// Protected state recovered from one exact completed read-only tool batch.
 ///
 /// Fields are private so a host cannot manufacture resume counters, response
-/// chaining, or model-visible tool results. Adoption currently applies only
-/// to provider-retained continuations. It proves the prior batch's durable
-/// integrity under current access and protection policy; it does not authorize
-/// the next provider request, budget, or egress decision.
+/// chaining, rule usage, or model-visible tool results. Adoption applies only
+/// to exact completed provider-retained or bounded stateless read-only tool
+/// batches. It proves the prior batch's durable integrity under current
+/// access, rule, and protection policy; it does not authorize the next
+/// provider request, budget, or egress decision.
 #[derive(Clone, Debug)]
 pub struct AiAdoptedReadOnlyToolBatch {
     checkpoint_id: Uuid,
@@ -318,6 +372,8 @@ pub struct AiAdoptedReadOnlyToolBatch {
     total_tool_calls: u32,
     scope: AiScope,
     continuation: AiAgentContinuation,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
 }
 
 impl AiAdoptedReadOnlyToolBatch {
@@ -327,6 +383,8 @@ impl AiAdoptedReadOnlyToolBatch {
         total_tool_calls: u32,
         scope: AiScope,
         continuation: AiAgentContinuation,
+        rule_fingerprint: String,
+        rule_usage: AiRuleRunUsage,
     ) -> Self {
         Self {
             checkpoint_id,
@@ -334,6 +392,8 @@ impl AiAdoptedReadOnlyToolBatch {
             total_tool_calls,
             scope,
             continuation,
+            rule_fingerprint,
+            rule_usage,
         }
     }
 
@@ -355,6 +415,16 @@ impl AiAdoptedReadOnlyToolBatch {
     /// Application-defined scope reauthorized during adoption.
     pub fn scope(&self) -> &AiScope {
         &self.scope
+    }
+
+    /// Exact current hierarchical-rule fingerprint revalidated at adoption.
+    pub fn rule_fingerprint(&self) -> &str {
+        &self.rule_fingerprint
+    }
+
+    /// Cumulative authoritative rule-budget usage through this checkpoint.
+    pub const fn rule_usage(&self) -> AiRuleRunUsage {
+        self.rule_usage
     }
 }
 
@@ -452,7 +522,9 @@ pub enum AiReadOnlyAgentRunOutcome {
 /// persists final output, and commits a terminal outcome. It can adopt only an
 /// opaque, freshly validated complete read-only tool batch with a
 /// provider-retained or bounded stateless continuation and consumes that
-/// checkpoint before provider transport. Stateless adoption revalidates every
+/// checkpoint before provider transport. It re-resolves the exact rule
+/// fingerprint before provider egress and every application tool. Stateless
+/// adoption revalidates every
 /// historical durable result and never reruns a resolver. Any ambiguous
 /// provider/tool/output handoff is similarly closed; the coordinator never
 /// reconstructs or silently replays uncertain state.
@@ -463,6 +535,7 @@ pub struct AiReadOnlyAgentCoordinator {
     output_writer: Arc<dyn AiAgentProviderOutputWriter>,
     checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
     checkpoint_adopter: Arc<dyn AiAgentCheckpointAdopter>,
+    rule_resolver: Arc<dyn AiAgentRuleResolver>,
     planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
     limits: AiReadOnlyAgentCoordinatorLimits,
 }
@@ -477,6 +550,7 @@ impl AiReadOnlyAgentCoordinator {
         output_writer: Arc<dyn AiAgentProviderOutputWriter>,
         checkpoint_writer: Arc<dyn AiAgentCheckpointWriter>,
         checkpoint_adopter: Arc<dyn AiAgentCheckpointAdopter>,
+        rule_resolver: Arc<dyn AiAgentRuleResolver>,
         planner: Arc<dyn AiReadOnlyAgentTurnPlanner>,
         limits: AiReadOnlyAgentCoordinatorLimits,
     ) -> Self {
@@ -487,6 +561,7 @@ impl AiReadOnlyAgentCoordinator {
             output_writer,
             checkpoint_writer,
             checkpoint_adopter,
+            rule_resolver,
             planner,
             limits,
         }
@@ -510,7 +585,7 @@ impl AiReadOnlyAgentCoordinator {
         claimed: &AiRunLease,
     ) -> Result<AiReadOnlyAgentRunOutcome, AiError> {
         let mut lease = self.run_control.start(claimed).await?;
-        let (mut guard, mut turn_plan) = if lease.latest_checkpoint_id().is_some() {
+        let (mut guard, mut turn_plan, mut rule_usage) = if lease.latest_checkpoint_id().is_some() {
             let adopted = match self.checkpoint_adopter.adopt_tool_batch(&lease).await {
                 Ok(Some(adopted)) => adopted,
                 Ok(None) | Err(_) => {
@@ -562,13 +637,17 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
+            let adopted_rule_fingerprint = adopted.rule_fingerprint.clone();
+            let adopted_usage = adopted.rule_usage;
             let plan = match self
                 .planner
                 .continuation_plan(&lease, adopted.provider_turns, adopted.continuation)
                 .await
             {
                 Ok(plan)
-                    if plan.is_continuation() && plan.provider_call.scope() == &adopted.scope =>
+                    if plan.is_continuation()
+                        && plan.provider_call.scope() == &adopted.scope
+                        && plan.rule_fingerprint() == adopted_rule_fingerprint =>
                 {
                     plan
                 }
@@ -601,7 +680,7 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
-            (guard, plan)
+            (guard, plan, adopted_usage)
         } else {
             let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
             let plan = match self.planner.initial_plan(&lease).await {
@@ -617,11 +696,41 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
-            (guard, plan)
+            (guard, plan, AiRuleRunUsage::default())
         };
 
         loop {
-            let (provider_plan, scope, correlation_id, route) = turn_plan.into_parts();
+            let (provider_plan, scope, correlation_id, route, planned_rules, uses_byok) =
+                turn_plan.into_parts();
+            let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                Ok(resolution)
+                    if resolution.rules().fingerprint() == planned_rules.fingerprint() =>
+                {
+                    resolution
+                }
+                _ => {
+                    return self
+                        .finish_failed(&lease, &guard, "agent_rule_plan_stale")
+                        .await;
+                }
+            };
+            let started_rule_usage = match rule_usage.validate(&resolution) {
+                Ok(usage) => usage,
+                Err(_) => {
+                    return self
+                        .finish_failed(&lease, &guard, "agent_rule_duration_exceeded")
+                        .await;
+                }
+            };
+            if provider_plan
+                .project_rule_usage(&resolution, started_rule_usage, uses_byok)
+                .is_err()
+            {
+                return self
+                    .finish_failed(&lease, &guard, "agent_rule_plan_denied")
+                    .await;
+            }
+            rule_usage = started_rule_usage;
             let result = match self
                 .execute_provider_with_heartbeats(&mut lease, provider_plan)
                 .await
@@ -655,6 +764,36 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
+            let current_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                Ok(current) if current.rules().fingerprint() == planned_rules.fingerprint() => {
+                    current
+                }
+                _ => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderTurn,
+                            "agent_rule_changed_after_provider",
+                            result.provider_response_id(),
+                        )
+                        .await;
+                }
+            };
+            rule_usage = match rule_usage.accept_provider(result.usage(), &current_rules) {
+                Ok(usage) => usage,
+                Err(_) => {
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ProviderTurn,
+                            "agent_rule_budget_exceeded",
+                            result.provider_response_id(),
+                        )
+                        .await;
+                }
+            };
             lease = match self
                 .checkpoint_writer
                 .persist_provider_turn(
@@ -663,6 +802,8 @@ impl AiReadOnlyAgentCoordinator {
                     &scope,
                     &correlation_id,
                     &route,
+                    &planned_rules,
+                    rule_usage,
                     guard.provider_turns(),
                     guard.total_tool_calls(),
                 )
@@ -716,8 +857,50 @@ impl AiReadOnlyAgentCoordinator {
                     provider_turn_index,
                     call_count,
                 } => {
+                    let tool_rules = match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                        Ok(current)
+                            if current.rules().fingerprint() == planned_rules.fingerprint() =>
+                        {
+                            current
+                        }
+                        _ => {
+                            return self
+                                .finish_failed(&lease, &guard, "agent_rule_changed_before_tools")
+                                .await;
+                        }
+                    };
+                    let completed_rule_usage =
+                        match rule_usage.accept_tool_calls(call_count, &tool_rules) {
+                            Ok(usage) => usage,
+                            Err(_) => {
+                                return self
+                                    .finish_failed(&lease, &guard, "agent_rule_steps_exceeded")
+                                    .await;
+                            }
+                        };
                     let mut completed_tools = Vec::with_capacity(call_count);
                     for tool_call_index in 0..call_count {
+                        match self.rule_resolver.resolve_rules(&lease, &scope).await {
+                            Ok(current)
+                                if current.rules().fingerprint() == planned_rules.fingerprint() =>
+                            {
+                                if current.rules().constrain_tool(
+                                    result.tool_calls()[tool_call_index].tool_fingerprint(),
+                                    crate::ToolMaturity::ReadOnly,
+                                    crate::AiApprovalRule::None,
+                                ) != Some(crate::AiApprovalRule::None)
+                                {
+                                    return self
+                                        .finish_failed(&lease, &guard, "agent_rule_tool_denied")
+                                        .await;
+                                }
+                            }
+                            _ => {
+                                return self
+                                    .finish_failed(&lease, &guard, "agent_rule_changed_before_tool")
+                                    .await;
+                            }
+                        }
                         let context = AiApplicationToolCallContext::new(
                             provider_turn_index,
                             tool_call_index,
@@ -770,6 +953,7 @@ impl AiReadOnlyAgentCoordinator {
                                 .await;
                         }
                     };
+                    rule_usage = completed_rule_usage;
                     lease = match self
                         .checkpoint_writer
                         .persist_tool_batch(
@@ -780,6 +964,8 @@ impl AiReadOnlyAgentCoordinator {
                             &scope,
                             &correlation_id,
                             &route,
+                            &planned_rules,
+                            rule_usage,
                             guard.provider_turns(),
                             guard.total_tool_calls(),
                         )
@@ -1035,6 +1221,8 @@ mod tests {
             AiReadOnlyAgentTurnPlan::new(
                 AiProviderCallPlan::test_plan(lease, self.scope.clone(), false),
                 self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
             )
         }
 
@@ -1048,6 +1236,8 @@ mod tests {
             AiReadOnlyAgentTurnPlan::new(
                 AiProviderCallPlan::test_plan(lease, self.scope.clone(), true),
                 self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
             )
         }
     }
@@ -1082,6 +1272,8 @@ mod tests {
             AiReadOnlyAgentTurnPlan::new(
                 AiProviderCallPlan::test_plan(lease, self.scope.clone(), true),
                 self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
             )
         }
     }
@@ -1157,6 +1349,8 @@ mod tests {
             AiReadOnlyAgentTurnPlan::new(
                 AiProviderCallPlan::test_plan(lease, self.scope.clone(), false),
                 self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
             )
         }
 
@@ -1169,6 +1363,8 @@ mod tests {
             AiReadOnlyAgentTurnPlan::new(
                 AiProviderCallPlan::test_plan(lease, self.scope.clone(), false),
                 self.route.clone(),
+                test_rules(self.scope.clone()),
+                false,
             )
         }
     }
@@ -1227,6 +1423,8 @@ mod tests {
             _scope: &AiScope,
             _correlation_id: &str,
             _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
             provider_turns: u32,
             _total_tool_calls: u32,
         ) -> Result<AiRunLease, AiError> {
@@ -1245,6 +1443,8 @@ mod tests {
             _scope: &AiScope,
             _correlation_id: &str,
             _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
             _provider_turns: u32,
             total_tool_calls: u32,
         ) -> Result<AiRunLease, AiError> {
@@ -1290,6 +1490,8 @@ mod tests {
             _scope: &AiScope,
             _correlation_id: &str,
             _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
             _provider_turns: u32,
             _total_tool_calls: u32,
         ) -> Result<AiRunLease, AiError> {
@@ -1305,6 +1507,8 @@ mod tests {
             _scope: &AiScope,
             _correlation_id: &str,
             _route: &AiToolResultEgressRoute,
+            _rules: &AiResolvedRuleSet,
+            _rule_usage: AiRuleRunUsage,
             _provider_turns: u32,
             _total_tool_calls: u32,
         ) -> Result<AiRunLease, AiError> {
@@ -1329,6 +1533,68 @@ mod tests {
 
     fn test_scope() -> AiScope {
         AiScope::new("test", "coordinator-scope").with_tenant_id("coordinator-tenant")
+    }
+
+    fn test_rules(scope: AiScope) -> AiResolvedRuleSet {
+        test_rules_with_fingerprint(scope, '1')
+    }
+
+    fn test_rules_with_fingerprint(scope: AiScope, fingerprint: char) -> AiResolvedRuleSet {
+        AiResolvedRuleSet::new(
+            scope,
+            crate::AiRuleConstraints {
+                enabled: true,
+                maximum_classification: DataClassification::Restricted,
+                maximum_tool_maturity: crate::ToolMaturity::ReadOnly,
+                approval_requirement: crate::AiRuleApprovalRequirement::DescriptorPolicy,
+                allowed_tool_fingerprints: None,
+                allowed_provider_kinds: None,
+                allowed_provider_capabilities: None,
+                allow_provider_retention: true,
+                allow_byok: true,
+                budget: crate::AiRuleBudgetCeilings {
+                    maximum_steps: Some(16),
+                    maximum_duration_seconds: Some(3_600),
+                    maximum_output_tokens: Some(16_000),
+                    maximum_cost_microunits: Some(10_000_000),
+                    maximum_provider_calls: Some(8),
+                    maximum_tool_units: Some(100),
+                    maximum_image_units: Some(100),
+                },
+            },
+            Vec::new(),
+            fingerprint.to_string().repeat(64),
+        )
+    }
+
+    struct TestRuleResolver;
+
+    #[async_trait]
+    impl AiAgentRuleResolver for TestRuleResolver {
+        async fn resolve_rules(
+            &self,
+            _lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            AiAgentRuleResolution::new(test_rules(scope.clone()), time::OffsetDateTime::now_utc())
+        }
+    }
+
+    struct ChangingRuleResolver(AtomicUsize);
+
+    #[async_trait]
+    impl AiAgentRuleResolver for ChangingRuleResolver {
+        async fn resolve_rules(
+            &self,
+            _lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            AiAgentRuleResolution::new(
+                test_rules_with_fingerprint(scope.clone(), if call == 0 { '1' } else { '4' }),
+                time::OffsetDateTime::now_utc(),
+            )
+        }
     }
 
     fn test_route() -> AiToolResultEgressRoute {
@@ -1395,6 +1661,7 @@ mod tests {
             Arc::new(TestOutputWriter),
             Arc::new(TestCheckpointWriter),
             Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
             planner,
             coordinator_limits,
         )
@@ -1470,13 +1737,26 @@ mod tests {
         let checkpoint_id = Uuid::new_v4();
         let claimed = base_lease.test_with_checkpoint(checkpoint_id);
         let adopter = Arc::new(TestCheckpointAdopter {
-            adopted: Mutex::new(Some(AiAdoptedReadOnlyToolBatch::new(
-                checkpoint_id,
-                old_guard.provider_turns(),
-                old_guard.total_tool_calls(),
-                test_scope(),
-                continuation,
-            ))),
+            adopted: {
+                let resolution = AiAgentRuleResolution::new(
+                    test_rules(test_scope()),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .expect("test rules should resolve");
+                let rule_usage = AiRuleRunUsage::default()
+                    .accept_provider(old_result.usage(), &resolution)
+                    .and_then(|usage| usage.accept_tool_calls(1, &resolution))
+                    .expect("adopted usage should fit test rules");
+                Mutex::new(Some(AiAdoptedReadOnlyToolBatch::new(
+                    checkpoint_id,
+                    old_guard.provider_turns(),
+                    old_guard.total_tool_calls(),
+                    test_scope(),
+                    continuation,
+                    resolution.rules().fingerprint().to_owned(),
+                    rule_usage,
+                )))
+            },
             consumed: AtomicBool::new(false),
         });
         let planner = Arc::new(AdoptionOnlyPlanner {
@@ -1502,6 +1782,7 @@ mod tests {
             Arc::new(TestOutputWriter),
             Arc::new(TestCheckpointWriter),
             adopter.clone(),
+            Arc::new(TestRuleResolver),
             planner.clone(),
             limits(50),
         );
@@ -1546,6 +1827,7 @@ mod tests {
             Arc::new(TestOutputWriter),
             Arc::new(RejectProviderCheckpoint),
             Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
             Arc::new(TestPlanner {
                 scope: test_scope(),
                 route: test_route(),
@@ -1645,6 +1927,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rule_change_after_provider_egress_requires_recovery() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::from([Ok(AiProviderCallResult::test_result(
+                &lease,
+                None,
+                "response-rule-changed",
+                Vec::new(),
+            ))])),
+            delay: None,
+        });
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            Arc::new(TestToolExecutor {
+                expose_result: true,
+            }),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(ChangingRuleResolver(AtomicUsize::new(0))),
+            Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            }),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a changed post-egress rule must close durably");
+
+        assert_eq!(
+            outcome,
+            RecoveryRequired {
+                phase: AiAgentRecoveryPhase::ProviderTurn,
+                provider_turns: 1,
+                total_tool_calls: 0,
+            }
+        );
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(run.final_states(), vec![AiRunState::RecoveryRequired]);
+    }
+
+    #[tokio::test]
     async fn unavailable_tool_egress_fails_without_a_second_provider_call() {
         let lease = AiRunLease::test_running(principal_reference());
         let run = Arc::new(TestRunControl::new());
@@ -1712,6 +2042,7 @@ mod tests {
             Arc::new(TestOutputWriter),
             Arc::new(TestCheckpointWriter),
             Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
             invalid_planner,
             limits(50),
         );

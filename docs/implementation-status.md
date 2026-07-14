@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.26.0`) and 39 private records
+- AI schema-module identity (currently version `0.27.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -286,6 +286,12 @@ production-ready behavior.
   separately authorized; writes require recent MFA/CAS/audit; missing,
   cross-tenant, corrupt, stale, or widening layers fail closed. A resolved rule
   set is constraint evidence and grants no ordinary authority.
+- Mandatory read-only coordinator rule binding through a double-rehydrating
+  `OrmAiCurrentRuleResolver`. Plans are checked before provider egress and
+  results/tools are checked afterward; protected checkpoint v2 carries the
+  exact fingerprint and cumulative provider/step/time/token/cost/tool/image
+  usage. Adoption rejects changed lineages, exceeded budgets, and legacy
+  checkpoints without weakening ordinary budget/egress/resolver authority.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -352,9 +358,8 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Bind resolved hierarchical-rule fingerprints and ceilings into the durable
-   run-planning/coordinator checkpoints so every later boundary can reject a
-   changed lineage without treating rule resolution as authority.
+2. Add an approval-wait coordinator that preserves the same rule/fence/current-
+   principal guarantees without keeping a worker lease alive indefinitely.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

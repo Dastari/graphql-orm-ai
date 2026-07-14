@@ -5,6 +5,12 @@ previously existed between an accepted provider result and the next protected
 phase. This narrows recovery ambiguity without treating persistence as replay
 authority.
 
+Checkpoint format v2 also binds the exact hierarchical-rule fingerprint and
+the authoritative cumulative provider-call, provider/tool-step, elapsed-time,
+output-token, cost, tool-unit, and image-unit usage. The coordinator and ORM
+checkpoint service must use the same current-rule resolver. Format v1 lacks
+this evidence and is never eligible for adoption.
+
 ## Provider-turn checkpoint
 
 After `AiAgentLoopGuard` accepts a normalized provider result,
@@ -12,14 +18,18 @@ After `AiAgentLoopGuard` accepts a normalized provider result,
 final assistant-output writer consumes it. The ORM implementation:
 
 1. rehydrates the current principal and rechecks scope/session write access;
-2. resolves a ready content-protection policy;
-3. protects the exact normalized events, provider/model/response, authoritative
+2. resolves the complete current hierarchical rules and a ready
+   content-protection policy;
+3. validates the current rule fingerprint and cumulative actual usage;
+4. protects the exact normalized events, provider/model/response, authoritative
    usage, budget reservation, prior response, tool calls and arguments, loop
-   counts, scope, correlation ID, and server-selected result-egress route;
-4. rehydrates and resolves the policy again after protection, rejecting drift;
-5. transactionally verifies the current run fence and committed/reconciled
+   counts, scope, rule evidence, correlation ID, and server-selected
+   result-egress route;
+5. rehydrates and resolves the rules and protection policy again after
+   protection, rejecting drift;
+6. transactionally verifies the current run fence and committed/reconciled
    provider budget reservation; and
-6. appends the immutable checkpoint while renewing and rotating the current run
+7. appends the immutable checkpoint while renewing and rotating the current run
    row-version proof.
 
 If any step fails after provider execution, the coordinator commits
@@ -67,10 +77,12 @@ session/scope access, resolves the current ready protection policy, and opens
 the checkpoint plus every protected argument/result. The ORM implementation
 compares the original provider result, ordered calls, canonical arguments,
 descriptor fingerprints, disclosure-validated model blocks, exact manifests,
-immutable allow-audit records, counters, scope, and continuation chain. For a
-stateless checkpoint it repeats those checks for every historical result and
-its original budget/step rows, not just the current batch. It resolves the
-principal/policy again after opening before returning the opaque
+immutable allow-audit records, counters, scope, rule fingerprint, cumulative
+rule usage, and continuation chain. It re-resolves the complete current rule
+hierarchy and rejects any fingerprint or usage mismatch. For a stateless
+checkpoint it repeats those checks for every historical result and its
+original budget/step rows, not just the current batch. It resolves the
+principal/rules/policy again after opening before returning the opaque
 `AiAdoptedReadOnlyToolBatch`.
 
 The host planner must build a fresh continuation plan, including new budget and

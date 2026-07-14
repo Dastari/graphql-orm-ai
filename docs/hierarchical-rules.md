@@ -43,6 +43,33 @@ combined with all ordinary current-principal, tool enablement, GraphQL resolver,
 static disclosure, egress, atomic budget, provider-profile, attachment, and
 one-shot approval checks. Approval rules never replace resolver authorization.
 
+## Durable coordinator binding
+
+`OrmAiCurrentRuleResolver` adapts a fenced lease to current rule evidence. It
+rehydrates the exact principal and resolves the full hierarchy twice around
+the decision. Read-only coordinator turn plans carry that unforgeable resolved
+set plus a trusted server-derived BYOK classification.
+
+Before provider egress, the coordinator checks the exact current fingerprint,
+provider family, inferred request capabilities, highest manifest
+classification, retention/BYOK state, every tool fingerprint at `ReadOnly`
+maturity with no added approval, and remaining cumulative ceilings. It checks
+again after provider return using authoritative committed usage and before
+each resolver tool. A rule requiring one-shot approval therefore removes that
+tool from the read-only coordinator; it does not silently bypass approval.
+Any custom-tool turn requires both `CustomTools` and `ParallelToolCalls` in
+the effective capability allowlist because a provider can select one
+advertised definition multiple times in the same turn.
+
+Protected coordinator checkpoint v2 stores the exact fingerprint and
+`AiRuleRunUsage`: trusted start time, provider calls, provider/application-tool
+steps, output tokens, cost microunits, provider/tool units, and image units.
+Completed tool-batch adoption reopens that state, proves all existing durable
+tool/budget/egress evidence, and re-resolves the current fingerprint. A changed
+lineage, expired duration, exceeded counter, or legacy v1 checkpoint remains
+closed. Atomic budget reservations and all ordinary authorization are still
+separate mandatory proofs.
+
 ## GraphQL management
 
 For SQLite and PostgreSQL, `OrmAiRulePolicyService` uses only generated

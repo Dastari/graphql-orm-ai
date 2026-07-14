@@ -57,6 +57,11 @@ below are still being implemented.
   fingerprints, classification/maturity, providers/capabilities, approvals,
   retention/BYOK, and budgets; the result can only reject or narrow and never
   grants ordinary authority.
+- Mandatory hierarchical-rule binding for read-only coordinator turns and
+  protected checkpoint v2. Current rules are re-resolved before/after provider
+  egress and before every resolver tool; exact fingerprints and cumulative
+  provider/step/time/token/cost/tool/image usage survive safe checkpoint
+  adoption, while stale rules or exceeded actual usage fail closed.
 - A default-deny logical UI-intent registry with JSON Schema 2020-12 payload
   validation and exact descriptor fingerprints. Validated intents are
   suggestions only; consumers own resource reauthorization and route mapping.

@@ -5,7 +5,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use agql_auth::{AuthPrincipal, Clock, RecentMfaPolicy};
+use agql_auth::{
+    AuthPrincipal, Clock, CurrentPrincipalResolver, RecentMfaPolicy, ResolvedPrincipal,
+};
 use async_trait::async_trait;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -18,13 +20,122 @@ use uuid::Uuid;
 
 use crate::persistence::*;
 use crate::{
-    AiAppliedRuleLayer, AiError, AiResolvedRuleSet, AiRuleAccessPolicy, AiRuleAction,
-    AiRuleApprovalRequirement, AiRuleBudgetCeilings, AiRuleConstraints, AiRuleDeploymentLimits,
-    AiRuleHierarchyResolver, AiRulePolicyService, AiRulePolicyView, AiRuleProviderCapability,
-    AiScope, DataClassification, ProviderKind, SetAiRulePolicyInput, ToolMaturity,
+    AiAgentRuleResolution, AiAgentRuleResolver, AiAppliedRuleLayer, AiError, AiResolvedRuleSet,
+    AiRuleAccessPolicy, AiRuleAction, AiRuleApprovalRequirement, AiRuleBudgetCeilings,
+    AiRuleConstraints, AiRuleDeploymentLimits, AiRuleHierarchyResolver, AiRulePolicyService,
+    AiRulePolicyView, AiRuleProviderCapability, AiRunLease, AiScope, DataClassification,
+    ProviderKind, SetAiRulePolicyInput, ToolMaturity,
 };
 
 const RULE_FORMAT_VERSION: u32 = 1;
+
+/// Fresh-principal bounds for durable coordinator rule resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiCurrentRuleResolverLimits {
+    maximum_principal_age: time::Duration,
+}
+
+impl AiCurrentRuleResolverLimits {
+    /// Creates validated current-rule resolution bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless principal freshness is positive and no more
+    /// than one hour.
+    pub fn new(maximum_principal_age: time::Duration) -> Result<Self, AiError> {
+        if !maximum_principal_age.is_positive() || maximum_principal_age > time::Duration::hours(1)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid current-rule resolver limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_principal_age,
+        })
+    }
+
+    /// Maximum accepted age of each principal resolution.
+    pub const fn maximum_principal_age(self) -> time::Duration {
+        self.maximum_principal_age
+    }
+}
+
+/// Current-principal adapter from durable leases to hierarchical rule sets.
+///
+/// The adapter resolves the principal and complete rule lineage twice around
+/// the decision. It returns constraint evidence only and grants no provider,
+/// tool, resolver, egress, budget, or approval authority.
+pub struct OrmAiCurrentRuleResolver {
+    principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+    rule_service: Arc<dyn AiRulePolicyService>,
+    clock: Arc<dyn Clock>,
+    limits: AiCurrentRuleResolverLimits,
+}
+
+impl OrmAiCurrentRuleResolver {
+    /// Creates a fail-closed durable rule resolver.
+    pub fn new(
+        principal_resolver: Arc<dyn CurrentPrincipalResolver>,
+        rule_service: Arc<dyn AiRulePolicyService>,
+        clock: Arc<dyn Clock>,
+        limits: AiCurrentRuleResolverLimits,
+    ) -> Self {
+        Self {
+            principal_resolver,
+            rule_service,
+            clock,
+            limits,
+        }
+    }
+
+    async fn current_principal(&self, lease: &AiRunLease) -> Result<ResolvedPrincipal, AiError> {
+        let principal = self
+            .principal_resolver
+            .resolve(lease.principal_reference())
+            .await
+            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let now = self.clock.now();
+        if principal.reference() != lease.principal_reference()
+            || principal.resolved_at() > now
+            || now - principal.resolved_at() >= self.limits.maximum_principal_age
+            || principal
+                .reference()
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        Ok(principal)
+    }
+}
+
+#[async_trait]
+impl AiAgentRuleResolver for OrmAiCurrentRuleResolver {
+    async fn resolve_rules(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+    ) -> Result<AiAgentRuleResolution, AiError> {
+        let first_principal = self.current_principal(lease).await?;
+        let first = self
+            .rule_service
+            .resolve_for_run(first_principal.principal(), scope.clone())
+            .await?;
+        let second_principal = self.current_principal(lease).await?;
+        let second = self
+            .rule_service
+            .resolve_for_run(second_principal.principal(), scope.clone())
+            .await?;
+        if first.target_scope() != scope
+            || second.target_scope() != scope
+            || first.fingerprint() != second.fingerprint()
+            || first_principal.reference() != second_principal.reference()
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        AiAgentRuleResolution::new(second, self.clock.now())
+    }
+}
 
 /// Concrete generated-ORM-only hierarchical rule service.
 ///
@@ -596,5 +707,116 @@ fn map_orm(error: OrmPublicError) -> AiError {
         OrmErrorCode::ServiceUnavailable
         | OrmErrorCode::InternalError
         | OrmErrorCode::AuthorizationMisconfigured => AiError::PersistenceFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use agql_auth::{
+        AccessTokenMetadata, AuthUser, FixedClock, PrincipalReference, SessionContext,
+    };
+    use time::OffsetDateTime;
+
+    use super::*;
+
+    struct CountingPrincipalResolver {
+        principal: AuthPrincipal,
+        now: OffsetDateTime,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for CountingPrincipalResolver {
+        async fn resolve(
+            &self,
+            reference: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ResolvedPrincipal::new(reference.clone(), self.principal.clone(), self.now)
+        }
+    }
+
+    struct FixedRuleService;
+
+    #[async_trait]
+    impl AiRulePolicyService for FixedRuleService {
+        async fn policy(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: AiScope,
+        ) -> Result<Option<AiRulePolicyView>, AiError> {
+            Err(AiError::Forbidden)
+        }
+
+        async fn set_policy(
+            &self,
+            _principal: &AuthPrincipal,
+            _input: SetAiRulePolicyInput,
+        ) -> Result<AiRulePolicyView, AiError> {
+            Err(AiError::Forbidden)
+        }
+
+        async fn resolve_for_run(
+            &self,
+            _principal: &AuthPrincipal,
+            target_scope: AiScope,
+        ) -> Result<AiResolvedRuleSet, AiError> {
+            Ok(AiResolvedRuleSet::new(
+                target_scope,
+                AiRuleConstraints {
+                    enabled: true,
+                    maximum_classification: DataClassification::Internal,
+                    maximum_tool_maturity: ToolMaturity::ReadOnly,
+                    approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
+                    allowed_tool_fingerprints: None,
+                    allowed_provider_kinds: None,
+                    allowed_provider_capabilities: None,
+                    allow_provider_retention: false,
+                    allow_byok: false,
+                    budget: AiRuleBudgetCeilings::default(),
+                },
+                Vec::new(),
+                "b".repeat(64),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_rule_resolution_rehydrates_around_the_exact_hierarchy() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
+            .expect("fixed rule time should validate");
+        let principal = AuthPrincipal::User(AuthUser {
+            user_id: "current-rule-user".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: Vec::new(),
+            scopes: Vec::new(),
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata::default(),
+        });
+        let lease = AiRunLease::test_running(principal.reference());
+        let principal_resolver = Arc::new(CountingPrincipalResolver {
+            principal,
+            now,
+            calls: AtomicUsize::new(0),
+        });
+        let resolver = OrmAiCurrentRuleResolver::new(
+            principal_resolver.clone(),
+            Arc::new(FixedRuleService),
+            Arc::new(FixedClock::new(now)),
+            AiCurrentRuleResolverLimits::new(time::Duration::minutes(5))
+                .expect("current-rule limits should validate"),
+        );
+        let scope = AiScope::new("test", "durable-rule");
+
+        let resolved = resolver
+            .resolve_rules(&lease, &scope)
+            .await
+            .expect("fresh exact rules should resolve");
+
+        assert_eq!(resolved.rules().target_scope(), &scope);
+        assert_eq!(resolved.rules().fingerprint(), "b".repeat(64));
+        assert_eq!(principal_resolver.calls.load(Ordering::SeqCst), 2);
     }
 }

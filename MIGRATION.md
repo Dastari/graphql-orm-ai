@@ -4,6 +4,60 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: rule-bound coordinator checkpoints (crate 0.28.0 to 0.29.0; schema 0.26.0 to 0.27.0)
+
+Apply AI schema module `0.27.0` while workers, provider calls, backups, and
+restore callbacks are closed. Do not run 0.29.0 code against a module still
+registered as 0.26.0. The generated migration adds no table, column, index,
+constraint, or entity and still owns 39 private records. It advances the
+module because existing protected run-checkpoint fields now require strict v2
+rule fingerprint and cumulative usage semantics. No consumer table or raw SQL
+is introduced.
+
+Every `AiReadOnlyAgentTurnPlan::new` call now supplies an exact
+`AiResolvedRuleSet` and a trusted planner-derived `uses_byok` flag. Construct
+`OrmAiCurrentRuleResolver` from the durable current-principal resolver, the
+same `Arc<dyn AiRulePolicyService>` used for GraphQL rule management, a trusted
+clock, and bounded principal freshness. Install it as the new
+`AiAgentRuleResolver` argument on both `AiReadOnlyAgentCoordinator` and
+`OrmAiCoordinatorCheckpointService`; normally one shared instance is used at
+both boundaries.
+
+Checkpoint-writer implementations receive the exact rules and
+`AiRuleRunUsage`. Protected format v2 binds the target/fingerprint and
+cumulative provider calls, provider/application-tool steps, trusted start
+time, output tokens, cost, tool units, and image units. The coordinator checks
+estimated capacity before provider egress and replaces it with authoritative
+committed usage after return. It re-resolves the current hierarchy before
+transport, after transport, before each resolver tool, around checkpoint
+protection, and during adoption. A pre-egress mismatch fails safely; a
+post-egress mismatch or actual-usage overrun becomes `RecoveryRequired` rather
+than replaying or exposing the result.
+
+The new checks only narrow. They do not replace atomic budget reservations,
+authoritative pricing, egress manifests, provider-profile authorization,
+current tool policy, ordinary GraphQL resolver authorization, or approval.
+`uses_byok` is a server-owned planning assertion checked against the rule set,
+not proof that a credential exists or is usable. A turn exposing any custom
+application tool also requires both the `CustomTools` and
+`ParallelToolCalls` rule capabilities: even one advertised tool definition can
+be selected more than once in a provider turn.
+
+Legacy protected coordinator checkpoint v1 does not contain enough evidence
+for safe adoption and is deliberately rejected by 0.29.0. Before upgrade,
+finish or reconcile active 0.28.0 runs. If an old checkpoint remains after a
+crash/restore, keep the runtime closed and classify the run for privileged
+manual recovery; do not rewrite protected checkpoint JSON or counters with
+application SQL.
+
+Restore snapshot producers must populate the new
+`AiRestoreSnapshotFacts::invalid_coordinator_checkpoint_count`. Count legacy
+format, malformed protected state, rule fingerprint/current-lineage mismatch,
+invalid cumulative usage, or fence/scope mismatch. Any nonzero value emits
+fatal `AI_RESTORE_COORDINATOR_CHECKPOINT_INVALID` evidence. This field and the
+additional constructor/trait arguments are pre-1.0 source-breaking changes.
+No consumer-data migration is required.
+
 ## Unreleased: hierarchical rule narrowing (crate 0.27.0 to 0.28.0; schema 0.25.0 to 0.26.0)
 
 Apply AI schema module `0.26.0` while workers, rule/configuration mutations,

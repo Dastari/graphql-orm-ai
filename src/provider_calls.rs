@@ -9,14 +9,16 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::{
-    AiBudgetAmounts, AiBudgetReconciliation, AiBudgetReconciliationOutcome, AiBudgetReservation,
-    AiBudgetReservationId, AiBudgetReservationRequest, AiBudgetService, AiEgressCapability,
-    AiEgressDecisionAudit, AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer,
-    AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink,
-    AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiResolvedProviderAttachment,
-    AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet, ModelBuiltinTool,
-    ModelContinuation, ModelContinuationMode, ModelConversationMessage, ModelConversationToolCall,
-    ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind, ProviderRequestContext,
+    AiAgentRuleResolution, AiApprovalRule, AiBudgetAmounts, AiBudgetReconciliation,
+    AiBudgetReconciliationOutcome, AiBudgetReservation, AiBudgetReservationId,
+    AiBudgetReservationRequest, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit,
+    AiEgressManifest, AiError, AiLiveDeltaBatch, AiLiveDeltaCoalescer, AiLiveDeltaCoalescerLimits,
+    AiLiveDeltaPersistenceContext, AiLiveDeltaSink, AiProviderAttachmentRequest,
+    AiProviderAttachmentResolver, AiResolvedProviderAttachment, AiRuleProviderCapability,
+    AiRuleRunUsage, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet,
+    ModelBuiltinTool, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
+    ModelConversationToolCall, ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind,
+    ProviderRequestContext, ToolMaturity,
 };
 
 const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
@@ -476,6 +478,86 @@ impl AiProviderCallPlan {
     /// tool definition.
     pub fn has_application_tools(&self) -> bool {
         !self.request.tools.is_empty()
+    }
+
+    pub(crate) fn project_rule_usage(
+        &self,
+        resolution: &AiAgentRuleResolution,
+        usage: AiRuleRunUsage,
+        uses_byok: bool,
+    ) -> Result<AiRuleRunUsage, AiError> {
+        let rules = resolution.rules();
+        if rules.target_scope() != self.scope()
+            || self.request.maximum_output_tokens.unwrap_or(0) > self.budget.estimate.output_tokens
+            || self.request.tools.iter().any(|tool| {
+                rules.constrain_tool(
+                    &tool.fingerprint,
+                    ToolMaturity::ReadOnly,
+                    AiApprovalRule::None,
+                ) != Some(AiApprovalRule::None)
+            })
+        {
+            return Err(AiError::Forbidden);
+        }
+        let mut capabilities = BTreeSet::from([AiRuleProviderCapability::Streaming]);
+        for block in &self.request.input {
+            if let ModelInputBlock::Attachment { mime, .. } = block {
+                capabilities.insert(if mime.starts_with("image/") {
+                    AiRuleProviderCapability::ImageInput
+                } else {
+                    AiRuleProviderCapability::FileInput
+                });
+            }
+        }
+        if !self.request.tools.is_empty() {
+            capabilities.insert(AiRuleProviderCapability::CustomTools);
+            // One advertised definition can still be selected more than once
+            // in one provider turn. Requiring the parallel-call capability
+            // here keeps the rule proof conservative without trusting the
+            // provider to infer a single-call ceiling from definition count.
+            capabilities.insert(AiRuleProviderCapability::ParallelToolCalls);
+        }
+        if self.request.output_schema.is_some() {
+            capabilities.insert(AiRuleProviderCapability::StructuredOutput);
+        }
+        for builtin in &self.request.builtin_tools {
+            capabilities.insert(match builtin {
+                ModelBuiltinTool::WebSearch { .. } => AiRuleProviderCapability::WebSearch,
+                ModelBuiltinTool::FileSearch { .. } => AiRuleProviderCapability::FileSearch,
+                ModelBuiltinTool::CodeInterpreter => AiRuleProviderCapability::CodeExecution,
+                ModelBuiltinTool::ImageGeneration => AiRuleProviderCapability::ImageGeneration,
+            });
+        }
+        if self.request.continuation_mode == ModelContinuationMode::StatelessReplay {
+            capabilities.insert(AiRuleProviderCapability::StatelessContinuation);
+        }
+        let uses_provider_retention = self
+            .transfers
+            .iter()
+            .any(|manifest| manifest.retention != "none")
+            || matches!(
+                self.request.continuation.as_ref(),
+                Some(ModelContinuation::ProviderResponse { .. })
+            );
+        if uses_provider_retention {
+            capabilities.insert(AiRuleProviderCapability::ProviderRetainedContinuation);
+        }
+        let classification = self
+            .transfers
+            .iter()
+            .map(AiEgressManifest::maximum_classification)
+            .max()
+            .unwrap_or(crate::DataClassification::Public);
+        if !rules.permits_provider_request(
+            &self.provider_kind,
+            &capabilities,
+            classification,
+            uses_provider_retention,
+            uses_byok,
+        ) {
+            return Err(AiError::EgressDenied);
+        }
+        usage.projected_provider(self.budget.estimate, resolution)
     }
 
     pub(crate) fn is_continuation(&self) -> bool {
@@ -2042,6 +2124,82 @@ mod tests {
         }
     }
 
+    fn test_rules(scope: AiScope) -> AiResolvedRuleSet {
+        test_rules_with_fingerprint(scope, '2')
+    }
+
+    fn test_rules_with_fingerprint(scope: AiScope, fingerprint: char) -> AiResolvedRuleSet {
+        AiResolvedRuleSet::new(
+            scope,
+            AiRuleConstraints {
+                enabled: true,
+                maximum_classification: DataClassification::Restricted,
+                maximum_tool_maturity: ToolMaturity::ReadOnly,
+                approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
+                allowed_tool_fingerprints: None,
+                allowed_provider_kinds: None,
+                allowed_provider_capabilities: None,
+                allow_provider_retention: true,
+                allow_byok: true,
+                budget: AiRuleBudgetCeilings {
+                    maximum_steps: Some(32),
+                    maximum_duration_seconds: Some(3_600),
+                    maximum_output_tokens: Some(100_000),
+                    maximum_cost_microunits: Some(100_000_000),
+                    maximum_provider_calls: Some(16),
+                    maximum_tool_units: Some(1_000),
+                    maximum_image_units: Some(1_000),
+                },
+            },
+            Vec::new(),
+            fingerprint.to_string().repeat(64),
+        )
+    }
+
+    fn test_rule_checkpoint(
+        scope: &AiScope,
+        results: &[&AiProviderCallResult],
+        total_tool_calls: usize,
+    ) -> (AiResolvedRuleSet, AiRuleRunUsage) {
+        let resolution =
+            AiAgentRuleResolution::new(test_rules(scope.clone()), OffsetDateTime::now_utc())
+                .expect("test rules should resolve");
+        let mut usage = AiRuleRunUsage::default();
+        for result in results {
+            usage = usage
+                .accept_provider(result.usage(), &resolution)
+                .expect("provider usage should fit test rules");
+        }
+        usage = usage
+            .accept_tool_calls(total_tool_calls, &resolution)
+            .expect("tool steps should fit test rules");
+        (resolution.rules().clone(), usage)
+    }
+
+    #[derive(Default)]
+    struct TestRuleResolver {
+        fingerprint_version: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiAgentRuleResolver for TestRuleResolver {
+        async fn resolve_rules(
+            &self,
+            _lease: &AiRunLease,
+            scope: &AiScope,
+        ) -> Result<AiAgentRuleResolution, AiError> {
+            let rules = test_rules_with_fingerprint(
+                scope.clone(),
+                if self.fingerprint_version.load(Ordering::SeqCst) == 0 {
+                    '2'
+                } else {
+                    '3'
+                },
+            );
+            AiAgentRuleResolution::new(rules, OffsetDateTime::now_utc())
+        }
+    }
+
     struct Fixture {
         database: Database<SqliteBackend>,
         runtime: Arc<AiRuntime>,
@@ -2376,6 +2534,46 @@ mod tests {
             tool_policy_version,
             fail_execution,
         }
+    }
+
+    #[tokio::test]
+    async fn one_custom_tool_definition_still_requires_parallel_rule_capability() {
+        let fixture = fixture(Vec::new()).await;
+        let plan = tool_plan(&fixture);
+        assert_eq!(plan.request.tools.len(), 1);
+
+        let mut constraints = test_rules(fixture.scope.clone()).constraints().clone();
+        constraints.allowed_provider_capabilities = Some(BTreeSet::from([
+            AiRuleProviderCapability::Streaming,
+            AiRuleProviderCapability::CustomTools,
+        ]));
+        let without_parallel = AiAgentRuleResolution::new(
+            AiResolvedRuleSet::new(
+                fixture.scope.clone(),
+                constraints.clone(),
+                Vec::new(),
+                "5".repeat(64),
+            ),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("test rule resolution should validate");
+        assert!(matches!(
+            plan.project_rule_usage(&without_parallel, AiRuleRunUsage::default(), false),
+            Err(AiError::EgressDenied)
+        ));
+
+        constraints
+            .allowed_provider_capabilities
+            .as_mut()
+            .expect("test allowlist should exist")
+            .insert(AiRuleProviderCapability::ParallelToolCalls);
+        let with_parallel = AiAgentRuleResolution::new(
+            AiResolvedRuleSet::new(fixture.scope, constraints, Vec::new(), "6".repeat(64)),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("test rule resolution should validate");
+        plan.project_rule_usage(&with_parallel, AiRuleRunUsage::default(), false)
+            .expect("both custom-tool capabilities should permit the estimate");
     }
 
     fn plan(fixture: &Fixture) -> AiProviderCallPlan {
@@ -3116,10 +3314,13 @@ mod tests {
             Arc::new(AllowAccess),
             Arc::new(ProtectionPolicy),
             Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
             Arc::new(SystemClock),
             AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
                 .expect("checkpoint limits should validate"),
         );
+        let (rules, provider_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&provider_result], 0);
         let checkpointed_lease = checkpoint_service
             .persist_provider_turn(
                 &fixture.lease,
@@ -3127,6 +3328,8 @@ mod tests {
                 &fixture.scope,
                 "tool-loop-test",
                 &route,
+                &rules,
+                provider_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3176,6 +3379,7 @@ mod tests {
         let continuation = guard
             .continuation()
             .expect("all exact tool results should permit one continuation");
+        let (_, batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&provider_result], 1);
         let batch_lease = checkpoint_service
             .persist_tool_batch(
                 persisted.lease(),
@@ -3185,6 +3389,8 @@ mod tests {
                 &fixture.scope,
                 "tool-loop-test",
                 &route,
+                &rules,
+                batch_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3385,16 +3591,19 @@ mod tests {
             "egress-v1",
         )
         .expect("tool-result route should validate");
+        let rule_resolver = Arc::new(TestRuleResolver::default());
         let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
             fixture.run_service.clone(),
             Arc::new(Resolver(fixture.principal.clone())),
             Arc::new(AllowAccess),
             Arc::new(ProtectionPolicy),
             Arc::new(DatabaseManagedContentProtector),
+            rule_resolver.clone(),
             Arc::new(SystemClock),
             AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
                 .expect("checkpoint limits should validate"),
         );
+        let (rules, provider_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&result], 0);
         let lease = checkpoint_service
             .persist_provider_turn(
                 &fixture.lease,
@@ -3402,6 +3611,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-tool-loop",
                 &route,
+                &rules,
+                provider_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3448,6 +3659,7 @@ mod tests {
             continuation.checkpoint_value()["continuation"]["type"],
             "stateless_conversation"
         );
+        let (_, batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&result], 1);
         let lease = checkpoint_service
             .persist_tool_batch(
                 persisted.lease(),
@@ -3457,6 +3669,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-tool-loop",
                 &route,
+                &rules,
+                batch_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3470,6 +3684,12 @@ mod tests {
             .expect("checkpoint lookup should succeed")
             .expect("checkpoint should exist");
         assert_eq!(checkpoint.provider_response_id, None);
+        rule_resolver.fingerprint_version.store(1, Ordering::SeqCst);
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&lease).await,
+            Err(AiError::ReauthorizationFailed)
+        ));
+        rule_resolver.fingerprint_version.store(0, Ordering::SeqCst);
         let adopted = checkpoint_service
             .adopt_tool_batch(&lease)
             .await
@@ -3614,6 +3834,7 @@ mod tests {
             Arc::new(AllowAccess),
             Arc::new(ProtectionPolicy),
             Arc::new(DatabaseManagedContentProtector),
+            Arc::new(TestRuleResolver::default()),
             Arc::new(SystemClock),
             AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
                 .expect("checkpoint limits should validate"),
@@ -3636,6 +3857,8 @@ mod tests {
                 call_count: 1,
             }
         );
+        let (rules, first_provider_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result], 0);
         let first_lease = checkpoint_service
             .persist_provider_turn(
                 &fixture.lease,
@@ -3643,6 +3866,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-history",
                 &route,
+                &rules,
+                first_provider_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3670,6 +3895,7 @@ mod tests {
         let first_continuation = guard
             .continuation()
             .expect("first stateless batch should continue");
+        let (_, first_batch_rule_usage) = test_rule_checkpoint(&fixture.scope, &[&first_result], 1);
         let first_batch_lease = checkpoint_service
             .persist_tool_batch(
                 first_tool.lease(),
@@ -3679,6 +3905,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-history",
                 &route,
+                &rules,
+                first_batch_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3748,6 +3976,8 @@ mod tests {
                 call_count: 1,
             }
         );
+        let (_, second_provider_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 1);
         let second_lease = checkpoint_service
             .persist_provider_turn(
                 &first_consumed_lease,
@@ -3755,6 +3985,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-history",
                 &route,
+                &rules,
+                second_provider_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )
@@ -3783,6 +4015,8 @@ mod tests {
             .continuation()
             .expect("second stateless batch should continue");
         assert_eq!(second_continuation.replay_transfers().len(), 1);
+        let (_, second_batch_rule_usage) =
+            test_rule_checkpoint(&fixture.scope, &[&first_result, &second_result], 2);
         let second_batch_lease = checkpoint_service
             .persist_tool_batch(
                 second_tool.lease(),
@@ -3792,6 +4026,8 @@ mod tests {
                 &fixture.scope,
                 "stateless-history",
                 &route,
+                &rules,
+                second_batch_rule_usage,
                 guard.provider_turns(),
                 guard.total_tool_calls(),
             )

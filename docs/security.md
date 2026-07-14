@@ -24,6 +24,14 @@ policy. A positive rule evaluation still requires ordinary tool enablement,
 resolver authorization, disclosure, egress, atomic budget, provider, and
 approval proofs at their actual side-effect boundaries.
 
+The read-only coordinator binds the exact rule fingerprint and cumulative
+provider/step/time/token/cost/tool/image usage into protected checkpoint v2.
+It re-resolves current rules before provider egress, after transport, before
+every application resolver, around checkpoint protection, and at adoption.
+Changed rules fail before an external effect where possible; after transport,
+stale rule or actual-usage evidence requires recovery and cannot be replayed.
+Legacy/unbound checkpoints are not adoption authority.
+
 ## Disclosure
 
 Read permission does not imply permission to disclose data externally. Every

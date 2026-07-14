@@ -5,14 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.28.0` and the
-AI schema module to `0.26.0`. No table, column, index, constraint, or entity is
-added; the module version changes because the existing scope-policy record now
-has a deterministic identity and strict checksummed hierarchical-rule meaning,
-in addition to the earlier strict skill and UI-intent semantics.
+This development line advances the pre-1.0 crate version to `0.29.0` and the
+AI schema module to `0.27.0`. No table, column, index, constraint, or entity is
+added; the module version changes because protected coordinator checkpoints
+now require strict v2 hierarchical-rule and cumulative-usage bindings, in
+addition to the strict scope-policy, skill, and UI-intent semantics.
 
 ### Added
 
+- `OrmAiCurrentRuleResolver` and mandatory rule evidence on each read-only
+  coordinator plan. The adapter rehydrates the exact lease principal and
+  resolves the complete hierarchy twice; the coordinator re-resolves before
+  provider egress, after provider return, and before every application tool.
+  A changed fingerprint fails before transport when possible and otherwise
+  durably requires recovery.
+- Protected coordinator checkpoint v2 binds the exact rule fingerprint and
+  authoritative cumulative provider-call, provider/tool-step, elapsed-time,
+  output-token, cost, tool-unit, and image-unit usage. Estimates are checked
+  before egress, actual committed provider usage is checked afterward, and
+  adoption reopens the checkpoint and re-resolves the current hierarchy.
 - Project-neutral hierarchical rule contracts and a generated-ORM-only
   `OrmAiRulePolicyService`. A host-authored current-principal lineage intersects
   immutable deployment limits and every explicit application-defined scope
@@ -91,6 +102,12 @@ in addition to the earlier strict skill and UI-intent semantics.
 
 ### Security
 
+- Rule-bound planning rejects provider families/capabilities, disclosure
+  classification, retention, BYOK use, tool fingerprints/maturity/approval,
+  or cumulative budgets outside the exact resolved intersection. These checks
+  are additive: atomic budget, egress, provider-profile, current tool policy,
+  resolver authorization, and one-shot approval remain independently required.
+  Restore now treats malformed or legacy coordinator rule bindings as fatal.
 - Hierarchical rules cannot expose secret classification or autonomous writes,
   cannot widen immutable deployment ceilings, and cannot substitute for fresh
   resolver, tool, egress, provider, budget, or approval authorization. Empty

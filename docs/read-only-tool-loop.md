@@ -69,6 +69,16 @@ Provider, resolver, and output ambiguity is never silently retried. If a
 heartbeat loses the fence, the coordinator stops without attempting any final
 write.
 
+Each planner result must carry the exact current `AiResolvedRuleSet` and the
+server-derived BYOK decision. Install one shared `OrmAiCurrentRuleResolver` on
+the coordinator and ORM checkpoint service. It freshly rehydrates and resolves
+the complete hierarchy before transport, after provider return, before every
+resolver tool, around checkpoint protection, and during adoption. Estimates
+are checked before transport; authoritative usage replaces them afterward.
+The resulting v2 checkpoints bind the rule fingerprint and cumulative limits.
+This negative rule proof never replaces tool enablement, resolver
+authorization, egress authorization, atomic budget settlement, or approval.
+
 Create one `AiAgentLoopGuard` from the original running lease. It binds the
 session, run, attempt, generation, maximum provider turns, and maximum total
 tool calls. For every turn:

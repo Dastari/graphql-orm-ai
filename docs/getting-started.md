@@ -64,9 +64,12 @@ camelCase to PascalCase.
 9. Construct `OrmAiRulePolicyService` with immutable deployment ceilings, an
    exact-scope access policy, a current-principal-derived hierarchy resolver,
    recent-MFA policy, and trusted clock. Compose the separate rule roots and
-   resolve the complete hierarchy before planning a run. Treat the result only
-   as additional narrowing evidence and enforce its approval and budget
-   ceilings at the corresponding execution boundaries. See the
+   resolve the complete hierarchy before planning a run. Wrap that service in
+   `OrmAiCurrentRuleResolver` with the durable principal resolver, trusted
+   clock, and principal-freshness limit. Pass the same rule resolver to the
+   read-only coordinator and checkpoint service; every turn plan supplies the
+   exact resolved set and trusted BYOK classification. Treat the result only as
+   additional narrowing evidence. See the
    [hierarchical-rule guide](hierarchical-rules.md).
 10. Install `OrmAiProposalService`/`OrmAiApprovalService` when composing their
    authenticated GraphQL roots. Supply host policies, fresh principal
@@ -216,9 +219,13 @@ trusted `AiReadOnlyAgentTurnPlanner` that constructs initial turns with
 shorter than the run-service lease TTL. Also supply an
 `OrmAiCoordinatorCheckpointService` as both the required
 `AiAgentCheckpointWriter` and `AiAgentCheckpointAdopter`, using the same
-principal/access/protection boundaries as transcript persistence. A successful coordinator outcome means
-the terminal/recovery state was durably committed; a lost fence returns an
-error and must not be followed by another write from that worker. Only an exact
+principal/access/protection boundaries as transcript persistence. Resolve the
+complete hierarchy through one shared `OrmAiCurrentRuleResolver`, pass it to
+both the coordinator and checkpoint service, and include its exact
+`AiResolvedRuleSet` plus the trusted server-derived BYOK decision in every
+turn plan. A successful coordinator outcome means the terminal/recovery state
+was durably committed; a lost fence returns an error and must not be followed
+by another write from that worker. Only an exact
 completed provider-retained or bounded stateless read-only tool-batch
 checkpoint has cross-generation adoption authority, and only after fresh
 protected validation of every current and historical durable proof; see the

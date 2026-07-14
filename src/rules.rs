@@ -7,6 +7,7 @@ use agql_auth::AuthPrincipal;
 use async_graphql::{Context, Enum, ErrorExtensions, InputObject, Object, SimpleObject};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     AiApprovalRule, AiError, AiProviderKindInput, AiScope, AiScopeInput, DataClassification,
@@ -508,6 +509,231 @@ pub struct AiResolvedRuleSet {
     fingerprint: String,
 }
 
+/// Fresh current-principal rule resolution used at a durable agent boundary.
+///
+/// The contained rule set is still only constraint evidence. The evaluation
+/// timestamp lets bounded coordinators enforce elapsed-time ceilings without
+/// trusting wall-clock values supplied by a model or planner.
+#[derive(Clone, Debug)]
+pub struct AiAgentRuleResolution {
+    rules: AiResolvedRuleSet,
+    evaluated_at: OffsetDateTime,
+}
+
+impl AiAgentRuleResolution {
+    /// Creates a rule resolution from a trusted current-principal resolver.
+    ///
+    /// Alternative resolver implementations must use their trusted clock and
+    /// must not accept this timestamp from GraphQL or model input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timestamp cannot be represented as a whole
+    /// Unix second or the rule fingerprint is malformed.
+    pub fn new(rules: AiResolvedRuleSet, evaluated_at: OffsetDateTime) -> Result<Self, AiError> {
+        let evaluated_at = OffsetDateTime::from_unix_timestamp(evaluated_at.unix_timestamp())
+            .map_err(|_| {
+                AiError::InvalidConfiguration("invalid rule evaluation time".to_owned())
+            })?;
+        if rules.fingerprint.len() != 64
+            || !rules
+                .fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid resolved rule fingerprint".to_owned(),
+            ));
+        }
+        Ok(Self {
+            rules,
+            evaluated_at,
+        })
+    }
+
+    /// Current effective constraint evidence.
+    pub fn rules(&self) -> &AiResolvedRuleSet {
+        &self.rules
+    }
+
+    /// Trusted whole-second evaluation time.
+    pub const fn evaluated_at(&self) -> OffsetDateTime {
+        self.evaluated_at
+    }
+}
+
+/// Cumulative rule-budget usage bound into coordinator checkpoints.
+///
+/// Values are derived only from authoritative provider usage and exact durable
+/// application-tool counts. They do not replace atomic budget reservations or
+/// authoritative pricing settlement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiRuleRunUsage {
+    started_at_unix: Option<i64>,
+    provider_calls: u64,
+    steps: u64,
+    output_tokens: u64,
+    cost_microunits: u64,
+    tool_units: u64,
+    image_units: u64,
+}
+
+impl AiRuleRunUsage {
+    /// Trusted first rule-evaluation time, when execution has started.
+    pub const fn started_at_unix(self) -> Option<i64> {
+        self.started_at_unix
+    }
+
+    /// Accepted provider-call count.
+    pub const fn provider_calls(self) -> u64 {
+        self.provider_calls
+    }
+
+    /// Accepted provider turns plus exact application-tool calls.
+    pub const fn steps(self) -> u64 {
+        self.steps
+    }
+
+    /// Authoritative cumulative output tokens.
+    pub const fn output_tokens(self) -> u64 {
+        self.output_tokens
+    }
+
+    /// Authoritative cumulative deployment-defined cost.
+    pub const fn cost_microunits(self) -> u64 {
+        self.cost_microunits
+    }
+
+    /// Authoritative cumulative provider/tool billing units.
+    pub const fn tool_units(self) -> u64 {
+        self.tool_units
+    }
+
+    /// Authoritative cumulative image billing units.
+    pub const fn image_units(self) -> u64 {
+        self.image_units
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn projected_provider(
+        self,
+        estimated: crate::AiBudgetAmounts,
+        resolution: &AiAgentRuleResolution,
+    ) -> Result<Self, AiError> {
+        self.add_provider(estimated, resolution)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn accept_provider(
+        self,
+        actual: crate::AiBudgetAmounts,
+        resolution: &AiAgentRuleResolution,
+    ) -> Result<Self, AiError> {
+        self.add_provider(actual, resolution)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn accept_tool_calls(
+        mut self,
+        call_count: usize,
+        resolution: &AiAgentRuleResolution,
+    ) -> Result<Self, AiError> {
+        self.ensure_identity(resolution)?;
+        self.steps = self
+            .steps
+            .checked_add(u64::try_from(call_count).map_err(|_| AiError::BudgetDenied)?)
+            .ok_or(AiError::BudgetDenied)?;
+        self.validate(resolution)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate(mut self, resolution: &AiAgentRuleResolution) -> Result<Self, AiError> {
+        self.ensure_identity(resolution)?;
+        let constraints = resolution.rules().constraints();
+        let elapsed = resolution
+            .evaluated_at()
+            .unix_timestamp()
+            .checked_sub(self.started_at_unix.ok_or(AiError::BudgetDenied)?)
+            .filter(|elapsed| *elapsed >= 0)
+            .and_then(|elapsed| u64::try_from(elapsed).ok())
+            .ok_or(AiError::BudgetDenied)?;
+        let within = |value: u64, ceiling: Option<u64>| ceiling.is_none_or(|limit| value <= limit);
+        if !constraints.enabled
+            || !within(
+                self.provider_calls,
+                constraints.budget.maximum_provider_calls,
+            )
+            || !within(self.steps, constraints.budget.maximum_steps)
+            || !within(elapsed, constraints.budget.maximum_duration_seconds)
+            || !within(self.output_tokens, constraints.budget.maximum_output_tokens)
+            || !within(
+                self.cost_microunits,
+                constraints.budget.maximum_cost_microunits,
+            )
+            || !within(self.tool_units, constraints.budget.maximum_tool_units)
+            || !within(self.image_units, constraints.budget.maximum_image_units)
+        {
+            return Err(AiError::BudgetDenied);
+        }
+        Ok(self)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn add_provider(
+        mut self,
+        amounts: crate::AiBudgetAmounts,
+        resolution: &AiAgentRuleResolution,
+    ) -> Result<Self, AiError> {
+        if amounts.runs != 1 {
+            return Err(AiError::BudgetDenied);
+        }
+        self.ensure_identity(resolution)?;
+        self.provider_calls = self
+            .provider_calls
+            .checked_add(1)
+            .ok_or(AiError::BudgetDenied)?;
+        self.steps = self.steps.checked_add(1).ok_or(AiError::BudgetDenied)?;
+        self.output_tokens = self
+            .output_tokens
+            .checked_add(amounts.output_tokens)
+            .ok_or(AiError::BudgetDenied)?;
+        self.cost_microunits = self
+            .cost_microunits
+            .checked_add(amounts.cost_microunits)
+            .ok_or(AiError::BudgetDenied)?;
+        self.tool_units = self
+            .tool_units
+            .checked_add(amounts.tool_units)
+            .ok_or(AiError::BudgetDenied)?;
+        self.image_units = self
+            .image_units
+            .checked_add(amounts.image_units)
+            .ok_or(AiError::BudgetDenied)?;
+        self.validate(resolution)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn ensure_identity(&mut self, resolution: &AiAgentRuleResolution) -> Result<(), AiError> {
+        let evaluated_at = resolution.evaluated_at().unix_timestamp();
+        match self.started_at_unix {
+            Some(started_at) if started_at > evaluated_at => Err(AiError::BudgetDenied),
+            Some(_) => Ok(()),
+            None if self.provider_calls == 0
+                && self.steps == 0
+                && self.output_tokens == 0
+                && self.cost_microunits == 0
+                && self.tool_units == 0
+                && self.image_units == 0 =>
+            {
+                self.started_at_unix = Some(evaluated_at);
+                Ok(())
+            }
+            None => Err(AiError::BudgetDenied),
+        }
+    }
+}
+
 impl AiResolvedRuleSet {
     /// Exact target scope.
     pub fn target_scope(&self) -> &AiScope {
@@ -934,4 +1160,95 @@ fn nonnegative(value: Option<i64>) -> Result<Option<u64>, AiError> {
                 .map_err(|_| AiError::InvalidInput("negative hierarchical rule budget".to_owned()))
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rules() -> AiResolvedRuleSet {
+        AiResolvedRuleSet::new(
+            AiScope::new("test", "rule-usage"),
+            AiRuleConstraints {
+                enabled: true,
+                maximum_classification: DataClassification::Internal,
+                maximum_tool_maturity: ToolMaturity::ReadOnly,
+                approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
+                allowed_tool_fingerprints: None,
+                allowed_provider_kinds: None,
+                allowed_provider_capabilities: None,
+                allow_provider_retention: false,
+                allow_byok: false,
+                budget: AiRuleBudgetCeilings {
+                    maximum_steps: Some(2),
+                    maximum_duration_seconds: Some(10),
+                    maximum_output_tokens: Some(100),
+                    maximum_cost_microunits: Some(1_000),
+                    maximum_provider_calls: Some(1),
+                    maximum_tool_units: Some(2),
+                    maximum_image_units: Some(1),
+                },
+            },
+            Vec::new(),
+            "a".repeat(64),
+        )
+    }
+
+    fn resolution(at: i64) -> AiAgentRuleResolution {
+        AiAgentRuleResolution::new(
+            rules(),
+            OffsetDateTime::from_unix_timestamp(at).expect("test time should validate"),
+        )
+        .expect("test rule resolution should validate")
+    }
+
+    #[test]
+    fn cumulative_rule_usage_enforces_estimate_actual_steps_and_elapsed_time() {
+        let first = resolution(1_800_000_000);
+        let started = AiRuleRunUsage::default()
+            .validate(&first)
+            .expect("zero usage should start at trusted evaluation time");
+        let estimated = crate::AiBudgetAmounts {
+            output_tokens: 80,
+            tool_units: 1,
+            image_units: 1,
+            cost_microunits: 800,
+            runs: 1,
+            ..crate::AiBudgetAmounts::default()
+        };
+        assert_eq!(
+            started
+                .projected_provider(estimated, &first)
+                .expect("estimate should fit")
+                .provider_calls(),
+            1
+        );
+        let actual = crate::AiBudgetAmounts {
+            output_tokens: 70,
+            tool_units: 1,
+            cost_microunits: 700,
+            runs: 1,
+            ..crate::AiBudgetAmounts::default()
+        };
+        let accepted = started
+            .accept_provider(actual, &resolution(1_800_000_004))
+            .and_then(|usage| usage.accept_tool_calls(1, &resolution(1_800_000_005)))
+            .expect("authoritative usage and one tool should fit");
+        assert_eq!(accepted.steps(), 2);
+        assert!(matches!(
+            accepted.validate(&resolution(1_800_000_011)),
+            Err(AiError::BudgetDenied)
+        ));
+        assert!(matches!(
+            started.accept_provider(
+                crate::AiBudgetAmounts {
+                    output_tokens: 101,
+                    runs: 1,
+                    ..crate::AiBudgetAmounts::default()
+                },
+                &first,
+            ),
+            Err(AiError::BudgetDenied)
+        ));
+    }
 }
