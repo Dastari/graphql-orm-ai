@@ -61,7 +61,7 @@ impl OwnedPostgres {
                 "--tmpfs",
                 "/var/lib/postgresql/data:rw,nosuid,nodev,size=1g",
                 "--health-cmd",
-                "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB",
+                "pg_isready -h 127.0.0.1 -U $POSTGRES_USER -d $POSTGRES_DB",
                 "--health-interval",
                 "250ms",
                 "--health-timeout",
