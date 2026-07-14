@@ -4,6 +4,53 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: cross-generation supervised checkpoint adoption (crate 0.31.0 to 0.32.0; schema 0.29.0 to 0.30.0)
+
+Apply AI schema module `0.30.0` while workers, provider calls, restore
+callbacks, and approval execution are closed. Do not run 0.32.0 code against a
+module still registered as 0.29.0. The generated migration adds no table,
+column, index, constraint, or entity and still owns 39 private records. It
+advances the module because the existing protected supervised-checkpoint kind
+gains a stricter approval-binding payload and becomes eligible for
+cross-generation adoption. No data migration, consumer table, application
+SQL, or payload rewrite is required.
+
+After an exact `supervised_tool_batch_persisted` checkpoint loses its worker
+lease, expired-lease recovery may now requeue it under a new attempt and lease
+generation. The recovery transaction requires one completed write-risk tool,
+its exact consumed one-use approval, complete step/result/egress state, a
+committed reconciled provider budget, and the checkpoint hash. It never
+executes or retries the consequential resolver.
+
+`OrmAiCoordinatorCheckpointService::adopt_supervised_tool_batch` then reopens
+the old generation's protected checkpoint and every protected argument,
+result, approval-resource, and canonical-preview envelope. It verifies the
+exact provider response/budget/tool/approval/egress rows, approval binding,
+preview hash, policy/auth-state evidence, current principal/scope/protection
+policy, and current hierarchical rules before returning the opaque
+`AiAdoptedSupervisedToolBatch`. The provider-retained continuation remains
+private. `consume_supervised_before_provider` accepts that proof and clears the
+exact latest-checkpoint link through the current row-version fence; it must run
+before the next provider transport and succeeds only once.
+
+Trusted backup/restore fact producers must populate the new
+`AiRestoredRun::coordinator_checkpoint` field using
+`AiRestoredCoordinatorCheckpoint`. A confirmed external effect is eligible for
+`RequeueWithNewAttempt` only when the snapshot state is `Running`, the linked
+checkpoint was fully validated as `SupervisedToolBatch`, and a provider
+continuation exists. `WaitingApproval`, `WaitingTool`, uncertain effects,
+uncheckpointed confirmed mutations, invalid coordinator counts, and malformed
+adoption evidence remain `RecoveryRequired` or fatal. This new required field
+is a public Rust construction API change; update snapshot adapters before
+upgrading. Legacy serialized facts without the field deserialize as `None` and
+therefore fail closed rather than acquiring adoption eligibility.
+
+The supported supervised checkpoint is still exactly one mutation with a
+provider-retained response ID. Multi-call, partial-batch, and stateless
+supervised adoption (including Ollama/local-harness approval waits) remain
+closed. The top-level supervised provider coordinator is a later gate. Existing
+read-only checkpoint adoption remains strictly read-only.
+
 ## Unreleased: protected supervised continuation handoff (crate 0.30.0 to 0.31.0; schema 0.28.0 to 0.29.0)
 
 Apply AI schema module `0.29.0` while workers, provider calls, human approval

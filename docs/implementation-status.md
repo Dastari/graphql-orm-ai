@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.29.0`) and 39 private records
+- AI schema-module identity (currently version `0.30.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -304,6 +304,12 @@ production-ready behavior.
   authorization; then writes a distinct consumed-approval-bound continuation
   checkpoint. Read-only checkpoint append/adoption structurally rejects write
   and approval-bearing tool rows.
+- Cross-generation adoption of that exact completed provider-retained
+  mutation result. Expired-lease and trusted snapshot restore planning can
+  requeue only after complete approval/tool/result/egress/budget evidence;
+  adoption reopens every protected envelope under current authority/rules and
+  consumes the checkpoint once before later provider transport without
+  replaying the resolver.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -331,8 +337,9 @@ production-ready behavior.
 - Top-level supervised coordinator for decision classification, protected
   continuation consumption, and the remaining provider loop. One claimed
   provider-retained mutation now has exact pre-wait adoption and post-mutation
-  checkpointing, but multi-call/stateless/cross-generation supervised
-  adoption remains closed; the read-only coordinator cannot route mutations.
+  checkpointing plus cross-generation result adoption, but multi-call and
+  stateless supervised adoption remain closed; the read-only coordinator
+  cannot route mutations.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
@@ -346,10 +353,11 @@ production-ready behavior.
   ordinary transactional reservation/reconciliation, and authenticated usage
   reporting are implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
-  application-tool checkpoints. Exact completed provider-retained and bounded
-  stateless read-only tool-batch adoption, the bounded coordinator, protected
-  checkpoints/continuation, protected live output, and final-output crash
-  reconciliation are implemented; all ambiguous resume remains closed.
+  application-tool checkpoints. Exact completed provider-retained supervised
+  and provider-retained/bounded-stateless read-only tool-batch adoption, the
+  bounded read-only coordinator, protected checkpoints/continuation, protected
+  live output, and final-output crash reconciliation are implemented; all
+  ambiguous resume remains closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -371,10 +379,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add cross-generation adoption for the protected supervised tool-batch,
-   then build the top-level approval-wait coordinator that consumes it and
-   resumes the full provider loop under fresh rule/fence/current-principal
-   guarantees.
+2. Build the top-level approval-wait coordinator that consumes the adopted
+   supervised checkpoint and resumes the full provider loop under fresh
+   rule/fence/current-principal guarantees.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

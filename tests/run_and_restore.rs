@@ -34,6 +34,8 @@ fn restore_never_replays_uncertain_external_effect() {
     let uncertain_run_id = AiRunId::new();
     let safe_run_id = AiRunId::new();
     let approval_wait_run_id = AiRunId::new();
+    let checkpointed_mutation_run_id = AiRunId::new();
+    let uncheckpointed_mutation_run_id = AiRunId::new();
     let plan = reconciler.plan(&AiRestoreSnapshotFacts {
         module_fingerprint: fingerprint.to_owned(),
         missing_key_versions: vec![],
@@ -42,6 +44,7 @@ fn restore_never_replays_uncertain_external_effect() {
                 run_id: uncertain_run_id,
                 state: AiRunState::WaitingTool,
                 external_effect: AiExternalEffectState::Uncertain,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
                 has_provider_continuation: true,
                 has_provider_file: false,
             },
@@ -49,6 +52,7 @@ fn restore_never_replays_uncertain_external_effect() {
                 run_id: safe_run_id,
                 state: AiRunState::Running,
                 external_effect: AiExternalEffectState::ProvenIdempotent,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
                 has_provider_continuation: false,
                 has_provider_file: true,
             },
@@ -56,6 +60,23 @@ fn restore_never_replays_uncertain_external_effect() {
                 run_id: approval_wait_run_id,
                 state: AiRunState::WaitingApproval,
                 external_effect: AiExternalEffectState::None,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
+                has_provider_continuation: true,
+                has_provider_file: false,
+            },
+            AiRestoredRun {
+                run_id: checkpointed_mutation_run_id,
+                state: AiRunState::Running,
+                external_effect: AiExternalEffectState::Confirmed,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::SupervisedToolBatch,
+                has_provider_continuation: true,
+                has_provider_file: false,
+            },
+            AiRestoredRun {
+                run_id: uncheckpointed_mutation_run_id,
+                state: AiRunState::Running,
+                external_effect: AiExternalEffectState::Confirmed,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
                 has_provider_continuation: true,
                 has_provider_file: false,
             },
@@ -87,6 +108,27 @@ fn restore_never_replays_uncertain_external_effect() {
     assert!(uncertain.clear_lease);
     assert!(uncertain.reverify_provider_continuation);
 
+    let checkpointed_mutation = plan
+        .run_actions
+        .iter()
+        .find(|action| action.run_id == checkpointed_mutation_run_id)
+        .expect("checkpointed mutation action should exist");
+    assert_eq!(
+        checkpointed_mutation.disposition,
+        AiRestoredRunDisposition::RequeueWithNewAttempt
+    );
+    assert!(checkpointed_mutation.reverify_provider_continuation);
+
+    let uncheckpointed_mutation = plan
+        .run_actions
+        .iter()
+        .find(|action| action.run_id == uncheckpointed_mutation_run_id)
+        .expect("uncheckpointed mutation action should exist");
+    assert_eq!(
+        uncheckpointed_mutation.disposition,
+        AiRestoredRunDisposition::RecoveryRequired
+    );
+
     let safe = plan
         .run_actions
         .iter()
@@ -110,6 +152,29 @@ fn restore_never_replays_uncertain_external_effect() {
     assert_eq!(plan.approvals_to_revalidate, 2);
     assert_eq!(plan.consents_to_revalidate, 3);
     assert_eq!(plan.fatal_issue_count(), 0);
+}
+
+#[test]
+fn legacy_restore_fact_has_no_checkpoint_authority() {
+    let mut value = serde_json::to_value(AiRestoredRun {
+        run_id: AiRunId::new(),
+        state: AiRunState::Running,
+        external_effect: AiExternalEffectState::Confirmed,
+        coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::SupervisedToolBatch,
+        has_provider_continuation: true,
+        has_provider_file: false,
+    })
+    .expect("restore fact should serialize");
+    value
+        .as_object_mut()
+        .expect("restore fact should be an object")
+        .remove("coordinator_checkpoint");
+    let legacy: AiRestoredRun =
+        serde_json::from_value(value).expect("legacy restore fact should fail closed");
+    assert_eq!(
+        legacy.coordinator_checkpoint,
+        AiRestoredCoordinatorCheckpoint::None
+    );
 }
 
 #[test]

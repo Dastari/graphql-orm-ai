@@ -5,15 +5,27 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.31.0` and the
-AI schema module to `0.29.0`. No table, column, index, constraint, or entity is
-added; the module version changes because protected coordinator records now
-have a distinct approval-bound `supervised_tool_batch_persisted` semantic and
-read-only checkpoints explicitly exclude approval-bearing/write calls, in
-addition to the approved-wait handoff and protected checkpoint v2 contracts.
+This development line advances the pre-1.0 crate version to `0.32.0` and the
+AI schema module to `0.30.0`. No table, column, index, constraint, or entity is
+added; the module version changes because a complete approval-bound
+`supervised_tool_batch_persisted` record is now eligible for one-shot
+cross-generation adoption after exact protected-state, approval, result,
+egress, budget, rule, and current-authority revalidation.
 
 ### Added
 
+- `OrmAiCoordinatorCheckpointService::adopt_supervised_tool_batch`, the opaque
+  `AiAdoptedSupervisedToolBatch`, and proof-consuming
+  `consume_supervised_before_provider`. Expired-lease recovery may now requeue
+  one exact completed provider-retained supervised mutation under a new
+  attempt/generation; adoption never executes the mutation and the checkpoint
+  is atomically cleared before any later provider transport.
+- `AiRestoredCoordinatorCheckpoint` lets trusted snapshot fact producers
+  distinguish no checkpoint, a validated read-only batch, and a validated
+  approval-bound supervised batch. A confirmed external mutation is requeued
+  only for a running snapshot with the exact supervised classification and a
+  provider continuation; uncheckpointed/uncertain effects and human-wait
+  states remain recovery-only.
 - `OrmAiSupervisedResumeService` now reopens the exact protected provider turn
   behind a one-owner approved-wait claim, revalidates current principal,
   policy, hierarchical rules, provider budget, approval, tool, and route
@@ -131,9 +143,10 @@ addition to the approved-wait handoff and protected checkpoint v2 contracts.
   `risk = read_only` and no approval ID for every current and stateless-history
   tool row. Consequential results use the distinct supervised checkpoint kind,
   whose append transaction verifies an exact consumed one-shot approval.
-  Neither kind can be substituted for the other. Sudden-process recovery of a
-  supervised continuation remains conservative until cross-generation
-  adoption is implemented.
+  Neither kind can be substituted for the other. A supervised checkpoint now
+  additionally protects the exact approval binding, canonical-preview hash,
+  policy version, and authorization-state digest before cross-generation
+  adoption; any mismatch fails before continuation consumption.
 - Approved-wait handoff preserves the original attempt/generation bindings but
   replaces owner and row-version proof, immediately fencing the staging
   worker. `approved` becomes `resume_claimed` and `WaitingApproval` becomes

@@ -4781,14 +4781,51 @@ mod tests {
             .run_service
             .recover_expired_leases()
             .await
-            .expect("supervised checkpoint recovery should close conservatively");
-        assert_eq!(recovery.recovery_required, 1);
-        assert_eq!(recovery.checkpoint_requeued, 0);
+            .expect("supervised checkpoint recovery should requeue exact evidence");
+        assert_eq!(recovery.recovery_required, 0);
+        assert_eq!(recovery.checkpoint_requeued, 1);
+        let replacement = fixture
+            .run_service
+            .claim_next("supervised-checkpoint-adopter")
+            .await
+            .expect("replacement supervised claim should succeed")
+            .expect("checkpointed mutation should be immediately eligible");
+        assert_eq!(
+            replacement.lease_generation(),
+            protected.lease().lease_generation() + 1
+        );
+        let running = fixture
+            .run_service
+            .start(&replacement)
+            .await
+            .expect("replacement supervised claim should start");
+        let adopted = checkpoint_service
+            .adopt_supervised_tool_batch(&running)
+            .await
+            .expect("supervised checkpoint should revalidate")
+            .expect("supervised checkpoint should be adoptable");
+        assert_eq!(adopted.approval_id(), requested.approval_id());
+        assert_eq!(adopted.tool_call_id(), requested.tool_call_id());
+        assert_eq!(adopted.provider_turns(), 1);
+        assert_eq!(adopted.total_tool_calls(), 1);
+        assert_eq!(adopted.continuation_result_count(), 1);
+        assert_eq!(fixture.mock.request_count(), 1);
+        let consumed = checkpoint_service
+            .consume_supervised_before_provider(&running, &adopted)
+            .await
+            .expect("supervised checkpoint should consume once");
+        assert!(consumed.latest_checkpoint_id().is_none());
+        assert!(matches!(
+            checkpoint_service
+                .consume_supervised_before_provider(&consumed, &adopted)
+                .await,
+            Err(AiError::Conflict)
+        ));
         let run = AiRunRecord::find_by_id(&fixture.database, &run_id.0)
             .await
             .expect("recovered run lookup should succeed")
             .expect("recovered run should exist");
-        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(run.state, AiRunState::Running.as_str());
     }
 
     #[tokio::test]

@@ -246,9 +246,10 @@ approval and execute it through fresh ordinary resolver authorization;
 after a human decision, a different process may use the one-owner
 `claim_next_approved` handoff before the same fresh execution path. Protected
 provider-turn adoption plus continuation checkpointing is implemented for one
-provider-retained mutation through `OrmAiSupervisedResumeService`; multi-call,
-stateless, cross-generation, and top-level approval-wait continuation remain
-unfinished. Arbitrary GraphQL and ambiguous replay remain closed. See the
+provider-retained mutation through `OrmAiSupervisedResumeService`; its exact
+completed result can be re-adopted under a new generation before one-shot
+checkpoint consumption. Multi-call, stateless, and top-level approval-wait
+continuation remain unfinished. Arbitrary GraphQL and ambiguous replay remain closed. See the
 [read-only tool-loop guide](read-only-tool-loop.md) and
 [supervised tool-loop guide](supervised-tool-loop.md).
 

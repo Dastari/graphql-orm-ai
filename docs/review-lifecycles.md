@@ -124,7 +124,8 @@ not reusable.
 - The staging worker no longer heartbeats through a human wait; approved work
   has a one-owner same-attempt handoff. A top-level coordinator still needs to
   classify denied, revoked, and expired decisions and protect the exact
-  multi-call/stateless provider continuation. Expired-lease and restore
-  recovery stay conservative until cross-generation adoption exists.
+  multi-call/stateless provider continuation. Exact completed
+  provider-retained mutation results can be adopted across generations;
+  incomplete or ambiguous effects remain recovery-only.
 - Consumer-specific UI, domain mutations, proposal rendering, and integration
   tests remain in each consuming application.

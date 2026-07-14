@@ -130,9 +130,12 @@ approval/resolver path above, and protects the result plus continuation as
 checkpoint adoption rejects this distinct approval-bearing kind.
 
 The crate does not yet expose the top-level coordinator that consumes that
-supervised checkpoint and continues the full provider loop. Multi-call,
-stateless (including Ollama/local-harness), and cross-generation supervised
-adoption remain closed; sudden process loss is `RecoveryRequired`.
+supervised checkpoint and continues the full provider loop. An exact complete
+provider-retained result can be requeued after lease loss, reopened under
+current principal/rule/protection authority, and consumed once before later
+transport without executing the resolver again. Multi-call and stateless
+(including Ollama/local-harness) supervised adoption remain closed; incomplete
+or ambiguous process loss is `RecoveryRequired`.
 `AiReadOnlyAgentCoordinator` remains read-only. Deployments must not route
 supervised descriptors through it, reconstruct provider state from an
 approval/tool row, or infer mutation replay authority after a resumed-worker

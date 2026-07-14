@@ -212,13 +212,14 @@ pub mod prelude {
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
-        AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAgentCheckpointAdopter,
-        AiAgentCheckpointWriter, AiAgentRuleResolver, AiApplicationToolCallLimits,
-        AiApprovalServiceLimits, AiApprovedRunClaim, AiAttachmentCleanupLimits,
-        AiAttachmentServiceLimits, AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder,
-        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits,
-        AiInboxPruningLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
-        AiLiveDeltaSink, AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
+        AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAdoptedSupervisedToolBatch,
+        AiAgentCheckpointAdopter, AiAgentCheckpointWriter, AiAgentRuleResolver,
+        AiApplicationToolCallLimits, AiApprovalServiceLimits, AiApprovedRunClaim,
+        AiAttachmentCleanupLimits, AiAttachmentServiceLimits, AiBudgetServiceLimits,
+        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits, AiInboxPruningLimits,
+        AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
+        AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
         AiProviderAttachmentResolutionLimits, AiProviderCallExecutor, AiProviderCallLimits,
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,

@@ -44,6 +44,28 @@ struct CoordinatorCheckpointPayload {
     continuation: Option<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SupervisedCoordinatorCheckpointPayload {
+    format_version: u32,
+    checkpoint_kind: String,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
+    correlation_id: String,
+    result_egress_route: serde_json::Value,
+    provider_result: ProviderResultSnapshot,
+    completed_tools: Vec<ToolResultSnapshot>,
+    continuation: serde_json::Value,
+    approval_id: Uuid,
+    approval_binding_hash: String,
+    approval_action_preview_hash: String,
+    approval_policy_version: String,
+    approval_authorization_state_digest: String,
+}
+
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderResultSnapshot {
@@ -214,6 +236,73 @@ impl AiProtectedSupervisedToolBatch {
     }
 
     /// Exact current hierarchical-rule fingerprint.
+    pub fn rule_fingerprint(&self) -> &str {
+        &self.rule_fingerprint
+    }
+
+    /// Cumulative authoritative rule usage through this checkpoint.
+    pub const fn rule_usage(&self) -> AiRuleRunUsage {
+        self.rule_usage
+    }
+}
+
+/// Current-authority adoption proof for one completed supervised tool batch.
+///
+/// The proof binds the old generation's exact protected provider result,
+/// consumed one-shot approval, consequential tool result, egress decision,
+/// provider-retained continuation, cumulative rule usage, and the current
+/// run/scope/principal fence. It never authorizes replay of the mutation or a
+/// subsequent provider request.
+#[derive(Clone, Debug)]
+pub struct AiAdoptedSupervisedToolBatch {
+    checkpoint_id: Uuid,
+    approval_id: crate::AiApprovalId,
+    tool_call_id: crate::AiToolCallId,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    continuation: AiAgentContinuation,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
+}
+
+impl AiAdoptedSupervisedToolBatch {
+    /// Immutable checkpoint selected for one-shot adoption.
+    pub const fn checkpoint_id(&self) -> Uuid {
+        self.checkpoint_id
+    }
+
+    /// Exact consumed human approval proven by the checkpoint.
+    pub const fn approval_id(&self) -> crate::AiApprovalId {
+        self.approval_id
+    }
+
+    /// Exact consequential tool result proven by the checkpoint.
+    pub const fn tool_call_id(&self) -> crate::AiToolCallId {
+        self.tool_call_id
+    }
+
+    /// Number of accepted provider turns preceding the adopted result.
+    pub const fn provider_turns(&self) -> u32 {
+        self.provider_turns
+    }
+
+    /// Number of completed application-tool calls through this checkpoint.
+    pub const fn total_tool_calls(&self) -> u32 {
+        self.total_tool_calls
+    }
+
+    /// Number of exact model-visible results in the retained continuation.
+    pub fn continuation_result_count(&self) -> usize {
+        self.continuation.input().len()
+    }
+
+    /// Application-defined scope reauthorized during adoption.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
+    /// Exact current hierarchical-rule fingerprint revalidated at adoption.
     pub fn rule_fingerprint(&self) -> &str {
         &self.rule_fingerprint
     }
@@ -616,6 +705,26 @@ impl OrmAiCoordinatorCheckpointService {
         if completed.provider_call_id() != provider_tool.call_id {
             return Err(AiError::Conflict);
         }
+        let approval =
+            AiApprovalRecord::find_by_id(self.run_service.database(), &adopted.approval_id.0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        if approval.tool_call_id != completed.id().0
+            || approval.session_id != lease.session_id().0
+            || approval.argument_hash != canonical_json_hash(&provider_tool.arguments)?
+            || approval.tool_fingerprint != provider_tool.tool_fingerprint
+            || approval.state != "consumed"
+            || approval.maximum_uses != 1
+            || approval.consumed_uses != 1
+            || approval.consumed_at.is_none()
+            || approval.binding_hash.len() != 64
+            || approval.action_preview_hash.len() != 64
+            || approval.policy_version.trim().is_empty()
+            || approval.authorization_state_digest.trim().is_empty()
+        {
+            return Err(AiError::Conflict);
+        }
         let continuation = crate::AiAgentContinuation::from_persisted_results(
             adopted.pending_continuation.clone(),
             std::slice::from_ref(completed),
@@ -658,6 +767,10 @@ impl OrmAiCoordinatorCheckpointService {
             "completedTools": [protected_tool],
             "continuation": continuation.checkpoint_value(),
             "approvalId": adopted.approval_id.0,
+            "approvalBindingHash": approval.binding_hash,
+            "approvalActionPreviewHash": approval.action_preview_hash,
+            "approvalPolicyVersion": approval.policy_version,
+            "approvalAuthorizationStateDigest": approval.authorization_state_digest,
         });
         enforce_size(&payload, self.limits.maximum_state_bytes)?;
         let protected_state = self
@@ -739,6 +852,434 @@ impl OrmAiCoordinatorCheckpointService {
             scope: adopted.scope,
             rule_fingerprint: adopted.rule_fingerprint,
             rule_usage: adopted.rule_usage,
+        })
+    }
+
+    /// Reopens the linked completed supervised batch under the current fence.
+    ///
+    /// This operation never executes the consequential resolver. It validates
+    /// the old generation's protected provider/tool/approval/egress evidence
+    /// and returns an opaque provider-retained continuation proof only after
+    /// fresh principal, scope, protection-policy, and hierarchical-rule
+    /// checks. A later coordinator must consume the checkpoint atomically
+    /// before any provider transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for a non-running or stale lease, a non-supervised
+    /// linked checkpoint, malformed/tampered protected state, an unproven
+    /// consumed approval or tool result, changed current authority/rules, or
+    /// persistence ambiguity.
+    pub async fn adopt_supervised_tool_batch(
+        &self,
+        lease: &AiRunLease,
+    ) -> Result<Option<AiAdoptedSupervisedToolBatch>, AiError> {
+        if lease.state() != crate::AiRunState::Running {
+            return Err(AiError::Conflict);
+        }
+        match lease.latest_checkpoint_id() {
+            Some(checkpoint_id) => self.adopt_supervised(lease, checkpoint_id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Atomically consumes one adopted supervised checkpoint before provider
+    /// transport.
+    ///
+    /// Consumption clears only the current run's exact latest-checkpoint link;
+    /// it never deletes audit history and grants no provider, budget, egress,
+    /// mutation, or resolver authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error unless the proof remains linked to the exact
+    /// current running lease and can be cleared through its row-version fence.
+    pub async fn consume_supervised_before_provider(
+        &self,
+        lease: &AiRunLease,
+        adopted: &AiAdoptedSupervisedToolBatch,
+    ) -> Result<AiRunLease, AiError> {
+        self.run_service
+            .consume_adoption_checkpoint(
+                lease,
+                adopted.checkpoint_id,
+                "supervised_tool_batch_persisted",
+            )
+            .await
+    }
+
+    async fn adopt_supervised(
+        &self,
+        lease: &AiRunLease,
+        checkpoint_id: Uuid,
+    ) -> Result<AiAdoptedSupervisedToolBatch, AiError> {
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let scope = AiScope {
+            kind: session.scope_kind.clone(),
+            id: session.scope_id.clone(),
+            tenant_id: session.tenant_id.clone(),
+        };
+        validate_session_binding(&session, lease, &scope)?;
+        let (principal, policy) = self.current_policy(lease, &scope).await?;
+        let principal_kind = principal_reference_kind(lease.principal_reference());
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let provider_response_id = checkpoint
+            .provider_response_id
+            .as_deref()
+            .filter(|value| valid_reference(value))
+            .ok_or(AiError::Conflict)?;
+        let budget_reservation_id = checkpoint.budget_reservation_id.ok_or(AiError::Conflict)?;
+        let protected_state = checkpoint
+            .protected_state
+            .as_ref()
+            .ok_or(AiError::Conflict)?;
+        if checkpoint.run_id != lease.run_id().0
+            || checkpoint.checkpoint_kind != "supervised_tool_batch_persisted"
+            || checkpoint.assistant_message_id.is_some()
+            || checkpoint.lease_generation <= 0
+            || checkpoint.lease_generation > lease.lease_generation()
+        {
+            return Err(AiError::Conflict);
+        }
+        enforce_size(protected_state, self.limits.maximum_state_bytes)?;
+        let reservation = AiBudgetReservationRecord::find_by_id(
+            self.run_service.database(),
+            &budget_reservation_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        if !checkpoint_budget_matches(
+            &reservation,
+            lease,
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            &scope,
+            &principal_kind,
+            &reservation.provider_kind,
+            &reservation.provider_model,
+        ) {
+            return Err(AiError::Conflict);
+        }
+        let expected_hash = coordinator_checkpoint_hash(
+            crate::AiRunId(checkpoint.run_id),
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            checkpoint.id,
+            &checkpoint.checkpoint_kind,
+            &reservation.provider_kind,
+            &reservation.provider_model,
+            Some(provider_response_id),
+            budget_reservation_id,
+            protected_state,
+        )?;
+        if checkpoint.checkpoint_hash != expected_hash {
+            return Err(AiError::Conflict);
+        }
+        let opened = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_run_checkpoints".to_owned(),
+                    row_id: checkpoint_id.to_string(),
+                    field: "protected_state".to_owned(),
+                    scope: scope.clone(),
+                },
+                protected_state,
+            )
+            .await?;
+        enforce_size(&opened, self.limits.maximum_state_bytes)?;
+        let payload: SupervisedCoordinatorCheckpointPayload =
+            serde_json::from_value(opened).map_err(|_| AiError::PersistenceFailed)?;
+        if payload.format_version != 2
+            || payload.checkpoint_kind != "supervised_tool_batch_persisted"
+            || payload.scope != scope
+            || payload.rule_fingerprint.len() != 64
+            || payload.provider_turns == 0
+            || payload.total_tool_calls == 0
+            || payload.completed_tools.len() != 1
+            || !valid_reference(&payload.correlation_id)
+            || payload.approval_binding_hash.len() != 64
+            || payload.approval_action_preview_hash.len() != 64
+            || payload.approval_policy_version.trim().is_empty()
+            || payload
+                .approval_authorization_state_digest
+                .trim()
+                .is_empty()
+            || payload.rule_usage.provider_calls() != u64::from(payload.provider_turns)
+            || payload.rule_usage.steps()
+                != u64::from(payload.provider_turns)
+                    .saturating_add(u64::from(payload.total_tool_calls))
+        {
+            return Err(AiError::Conflict);
+        }
+        let provider = &payload.provider_result;
+        let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
+        if provider.format_version != 1
+            || provider.session_id != lease.session_id().0
+            || provider.run_id != lease.run_id().0
+            || provider.attempt_id != checkpoint.attempt_id
+            || provider.lease_generation != checkpoint.lease_generation
+            || provider.provider_kind.as_str() != reservation.provider_kind
+            || provider.provider_model != reservation.provider_model
+            || provider.provider_response_id.as_deref() != Some(provider_response_id)
+            || provider.budget_reservation_id != budget_reservation_id
+            || provider.tool_calls.len() != 1
+            || provider
+                .previous_response_id
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || !valid_reference(&provider_tool.call_id)
+            || provider_tool.tool_id.trim().is_empty()
+            || provider_tool.tool_fingerprint.len() != 64
+        {
+            return Err(AiError::Conflict);
+        }
+        let route = AiToolResultEgressRoute::from_checkpoint_value(payload.result_egress_route)?;
+        let continuation = AiAgentContinuation::from_checkpoint_value(payload.continuation)?;
+        let tool = payload.completed_tools.first().ok_or(AiError::Conflict)?;
+        let input = continuation.input().first().ok_or(AiError::Conflict)?;
+        let transfer = continuation.transfers().first().ok_or(AiError::Conflict)?;
+        let ModelInputBlock::ToolResult {
+            call_id,
+            tool_id,
+            output,
+        } = input
+        else {
+            return Err(AiError::Conflict);
+        };
+        if continuation.provider_response_id() != Some(provider_response_id)
+            || continuation.input().len() != 1
+            || continuation.transfers().len() != 1
+            || !continuation.replay_transfers().is_empty()
+            || continuation.stateless_evidence()?.is_some()
+            || tool.provider_call_id != provider_tool.call_id
+            || tool.model_input != *input
+            || tool.egress_manifest != *transfer
+            || call_id != &provider_tool.call_id
+            || tool_id != &provider_tool.tool_id
+            || !route.matches_manifest(
+                transfer,
+                lease,
+                &scope,
+                &reservation.provider_kind,
+                &reservation.provider_model,
+            )
+            || transfer.sources.len() != 1
+            || transfer.sources[0].kind != "application_tool_result"
+            || transfer.sources[0].reference != tool.id.to_string()
+        {
+            return Err(AiError::EgressDenied);
+        }
+        let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        let approval =
+            AiApprovalRecord::find_by_id(self.run_service.database(), &payload.approval_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let manifest_hash = transfer.stable_hash();
+        let classification = classification_value(transfer.maximum_classification());
+        let expected_turn_index = i64::from(
+            payload
+                .provider_turns
+                .checked_sub(1)
+                .ok_or(AiError::Conflict)?,
+        );
+        if call.run_id != lease.run_id().0
+            || call.lease_generation != checkpoint.lease_generation
+            || call.provider_call_id != provider_tool.call_id
+            || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
+            || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
+            || call.provider_response_id.as_deref() != Some(provider_response_id)
+            || call.budget_reservation_id != Some(budget_reservation_id)
+            || call.provider_turn_index != expected_turn_index
+            || call.tool_call_index != 0
+            || call.tool_id != provider_tool.tool_id
+            || call.tool_fingerprint != provider_tool.tool_fingerprint
+            || call.argument_hash != canonical_json_hash(&provider_tool.arguments)?
+            || !matches!(
+                call.risk.as_str(),
+                "low_risk_write" | "non_idempotent_write" | "high_impact"
+            )
+            || call.approval_id != Some(payload.approval_id)
+            || call.state != tool.state
+            || !matches!(call.state.as_str(), "completed" | "execution_failed")
+            || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
+            || call.result_egress_decision_id.is_none()
+            || call.authorization_code.is_none()
+            || call.disclosure_schema_fingerprint.is_none()
+            || call.result_classification.as_deref() != Some(classification)
+            || (call.state == "completed"
+                && (call.authorization_policy_version.is_none()
+                    || call.authorization_state_digest.is_none()))
+            || call.completed_at.is_none()
+            || call.correlation_id.as_deref() != Some(payload.correlation_id.as_str())
+            || step.run_id != lease.run_id().0
+            || step.lease_generation != checkpoint.lease_generation
+            || step.state != call.state
+            || step.finished_at.is_none()
+            || approval.tool_call_id != call.id
+            || approval.session_id != lease.session_id().0
+            || approval.argument_hash != call.argument_hash
+            || approval.tool_fingerprint != call.tool_fingerprint
+            || approval.state != "consumed"
+            || approval.maximum_uses != 1
+            || approval.consumed_uses != 1
+            || approval.consumed_at.is_none()
+            || approval.decided_at.is_none()
+            || approval
+                .approver_subject
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || approval.binding_hash.len() != 64
+            || approval.action_preview_hash.len() != 64
+            || approval.policy_version.trim().is_empty()
+            || approval.authorization_state_digest.trim().is_empty()
+            || approval.binding_hash != payload.approval_binding_hash
+            || approval.action_preview_hash != payload.approval_action_preview_hash
+            || approval.policy_version != payload.approval_policy_version
+            || approval.authorization_state_digest != payload.approval_authorization_state_digest
+            || call.authorization_policy_version.as_deref()
+                != Some(approval.policy_version.as_str())
+            || call.authorization_state_digest.as_deref()
+                != Some(approval.authorization_state_digest.as_str())
+            || approval.principal_reference_fingerprint
+                != crate::AiApprovalBinding::principal_fingerprint(lease.principal_reference())
+        {
+            return Err(AiError::Conflict);
+        }
+        let arguments = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_tool_calls".to_owned(),
+                    row_id: tool.id.to_string(),
+                    field: "protected_arguments".to_owned(),
+                    scope: scope.clone(),
+                },
+                &call.protected_arguments,
+            )
+            .await?;
+        let result = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_tool_calls".to_owned(),
+                    row_id: tool.id.to_string(),
+                    field: "protected_result".to_owned(),
+                    scope: scope.clone(),
+                },
+                call.protected_result.as_ref().ok_or(AiError::Conflict)?,
+            )
+            .await?;
+        let resources = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_approvals".to_owned(),
+                    row_id: approval.id.to_string(),
+                    field: "protected_resource_bindings".to_owned(),
+                    scope: scope.clone(),
+                },
+                &approval.protected_resource_bindings,
+            )
+            .await?;
+        let mut resources: Vec<crate::AiApprovalResourceBinding> =
+            serde_json::from_value(resources).map_err(|_| AiError::PersistenceFailed)?;
+        let preview_value = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_approvals".to_owned(),
+                    row_id: approval.id.to_string(),
+                    field: "protected_action_preview".to_owned(),
+                    scope: scope.clone(),
+                },
+                &approval.protected_action_preview,
+            )
+            .await?;
+        let preview: crate::AiCanonicalActionPreview =
+            serde_json::from_value(preview_value).map_err(|_| AiError::PersistenceFailed)?;
+        resources.sort();
+        let mut preview_targets = preview.targets.clone();
+        preview_targets.sort();
+        if arguments != provider_tool.arguments
+            || result != *output
+            || preview.stable_hash() != approval.action_preview_hash
+            || resources != preview_targets
+        {
+            return Err(AiError::Conflict);
+        }
+        let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
+        let event = AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+            .ok_or(AiError::NotFound)?;
+        if event.run_id != Some(lease.run_id().0)
+            || event.principal_subject != lease.principal_reference().subject
+            || event.scope_kind != scope.kind
+            || event.scope_id != scope.id
+            || event.manifest_hash != manifest_hash
+            || event.destination != transfer.destination
+            || event.capability != "tool_result"
+            || event.classification != classification
+            || event.outcome != "allow"
+            || u64::try_from(event.estimated_bytes).ok() != Some(transfer.estimated_bytes)
+            || u64::try_from(event.estimated_tokens).ok() != Some(transfer.estimated_tokens)
+        {
+            return Err(AiError::EgressDenied);
+        }
+        let rules = self.rule_resolver.resolve_rules(lease, &scope).await?;
+        if rules.rules().fingerprint() != payload.rule_fingerprint
+            || payload.rule_usage.validate(&rules).is_err()
+            || rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let (current, current_policy) = self.current_policy(lease, &scope).await?;
+        let final_rules = self.rule_resolver.resolve_rules(lease, &scope).await?;
+        if current_policy != policy
+            || principal.reference() != lease.principal_reference()
+            || current.reference() != lease.principal_reference()
+            || final_rules.rules().fingerprint() != payload.rule_fingerprint
+            || payload.rule_usage.validate(&final_rules).is_err()
+            || final_rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        Ok(AiAdoptedSupervisedToolBatch {
+            checkpoint_id,
+            approval_id: crate::AiApprovalId(approval.id),
+            tool_call_id: crate::AiToolCallId(call.id),
+            provider_turns: payload.provider_turns,
+            total_tool_calls: payload.total_tool_calls,
+            scope,
+            continuation,
+            rule_fingerprint: payload.rule_fingerprint,
+            rule_usage: payload.rule_usage,
         })
     }
 
@@ -1581,7 +2122,7 @@ impl AiAgentCheckpointAdopter for OrmAiCoordinatorCheckpointService {
         checkpoint_id: Uuid,
     ) -> Result<AiRunLease, AiError> {
         self.run_service
-            .consume_adoption_checkpoint(lease, checkpoint_id)
+            .consume_adoption_checkpoint(lease, checkpoint_id, "tool_batch_persisted")
             .await
     }
 }

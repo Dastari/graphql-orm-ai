@@ -18,6 +18,28 @@ pub enum AiExternalEffectState {
     Confirmed,
 }
 
+/// Coordinator-checkpoint evidence captured by a trusted snapshot adapter.
+///
+/// This classification is not itself replay authority. The restored runtime
+/// must still reopen the exact protected checkpoint under current authority
+/// and consume it through the new run fence before provider transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRestoredCoordinatorCheckpoint {
+    /// No complete adoptable tool-batch checkpoint is linked.
+    None,
+    /// A validated completed read-only tool batch is linked.
+    ReadOnlyToolBatch,
+    /// A validated approval-bound completed supervised tool batch is linked.
+    SupervisedToolBatch,
+}
+
+impl Default for AiRestoredCoordinatorCheckpoint {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Restored run facts needed for reconciliation; payloads are intentionally
 /// absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +50,9 @@ pub struct AiRestoredRun {
     pub state: AiRunState,
     /// External-effect certainty.
     pub external_effect: AiExternalEffectState,
+    /// Trusted classification of the exact linked coordinator checkpoint.
+    #[serde(default)]
+    pub coordinator_checkpoint: AiRestoredCoordinatorCheckpoint,
     /// Whether a provider continuation reference exists.
     pub has_provider_continuation: bool,
     /// Whether a provider file reference exists.
@@ -312,6 +337,14 @@ fn restored_run_disposition(run: &AiRestoredRun) -> AiRestoredRunDisposition {
     }
     match run.external_effect {
         AiExternalEffectState::None | AiExternalEffectState::ProvenIdempotent => {
+            AiRestoredRunDisposition::RequeueWithNewAttempt
+        }
+        AiExternalEffectState::Confirmed
+            if run.state == AiRunState::Running
+                && run.coordinator_checkpoint
+                    == AiRestoredCoordinatorCheckpoint::SupervisedToolBatch
+                && run.has_provider_continuation =>
+        {
             AiRestoredRunDisposition::RequeueWithNewAttempt
         }
         AiExternalEffectState::Uncertain | AiExternalEffectState::Confirmed => {

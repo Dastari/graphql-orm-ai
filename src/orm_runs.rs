@@ -931,7 +931,12 @@ impl OrmAiRunService {
                                     return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                                 }
                                 (Some(checkpoint.provider_response_id), false)
-                            } else if checkpoint.checkpoint_kind == "tool_batch_persisted" {
+                            } else if matches!(
+                                checkpoint.checkpoint_kind.as_str(),
+                                "tool_batch_persisted" | "supervised_tool_batch_persisted"
+                            ) {
+                                let supervised =
+                                    checkpoint.checkpoint_kind == "supervised_tool_batch_persisted";
                                 let provider_response_id =
                                     checkpoint.provider_response_id.as_deref();
                                 if provider_response_id
@@ -1016,6 +1021,7 @@ impl OrmAiRunService {
                                     .collect::<Vec<_>>();
                                 if relevant.is_empty()
                                     || relevant.len() > 4_096
+                                    || (supervised && relevant.len() != 1)
                                     || relevant.iter().any(|call| {
                                         !matches!(
                                             call.state.as_str(),
@@ -1029,6 +1035,41 @@ impl OrmAiRunService {
                                     return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                                 }
                                 for call in relevant {
+                                    let authorization_matches = if supervised {
+                                        let Some(approval_id) = call.approval_id else {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::InternalError,
+                                            ));
+                                        };
+                                        let approval = tx
+                                            .find_by_id::<AiApprovalRecord>(&approval_id)
+                                            .await
+                                            .map_err(OrmPublicError::from)?
+                                            .ok_or_else(|| {
+                                                OrmPublicError::new(OrmErrorCode::InternalError)
+                                            })?;
+                                        matches!(
+                                            call.risk.as_str(),
+                                            "low_risk_write"
+                                                | "non_idempotent_write"
+                                                | "high_impact"
+                                        ) && approval.tool_call_id == call.id
+                                            && approval.session_id == current.session_id
+                                            && approval.state == "consumed"
+                                            && approval.maximum_uses == 1
+                                            && approval.consumed_uses == 1
+                                            && approval.consumed_at.is_some()
+                                            && approval.argument_hash == call.argument_hash
+                                            && approval.tool_fingerprint == call.tool_fingerprint
+                                            && call.authorization_policy_version.as_deref()
+                                                == Some(approval.policy_version.as_str())
+                                            && call.authorization_state_digest.as_deref()
+                                                == Some(
+                                                    approval.authorization_state_digest.as_str(),
+                                                )
+                                    } else {
+                                        call.risk == "read_only" && call.approval_id.is_none()
+                                    };
                                     let step = tx
                                         .find_by_id::<AiRunStepRecord>(&call.id)
                                         .await
@@ -1040,17 +1081,20 @@ impl OrmAiRunService {
                                         || step.lease_generation != lease.lease_generation
                                         || step.state != call.state
                                         || step.finished_at.is_none()
+                                        || !authorization_matches
                                     {
                                         return Err(OrmPublicError::new(
                                             OrmErrorCode::InternalError,
                                         ));
                                     }
                                 }
-                                // Both provider-retained and stateless batches
-                                // have complete durable tool/step/budget proof
-                                // here. The adopter still opens and validates
-                                // every protected historical row under current
-                                // authority before transport.
+                                // Read-only provider-retained/stateless batches
+                                // and the narrow supervised provider-retained
+                                // batch have complete durable
+                                // tool/approval/step/budget proof here. The
+                                // adopter still opens and validates every
+                                // protected row under current authority before
+                                // transport.
                                 (None, true)
                             } else {
                                 (None, false)
@@ -1427,6 +1471,10 @@ impl OrmAiRunService {
                                     && approval.consumed_at.is_some()
                                     && approval.argument_hash == call.argument_hash
                                     && approval.tool_fingerprint == call.tool_fingerprint
+                                    && call.authorization_policy_version.as_deref()
+                                        == Some(approval.policy_version.as_str())
+                                    && call.authorization_state_digest.as_deref()
+                                        == Some(approval.authorization_state_digest.as_str())
                             }
                             _ => false,
                         };
@@ -1540,7 +1588,14 @@ impl OrmAiRunService {
         &self,
         lease: &AiRunLease,
         checkpoint_id: Uuid,
+        expected_kind: &'static str,
     ) -> Result<AiRunLease, AiError> {
+        if !matches!(
+            expected_kind,
+            "tool_batch_persisted" | "supervised_tool_batch_persisted"
+        ) {
+            return Err(AiError::Conflict);
+        }
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
@@ -1568,7 +1623,7 @@ impl OrmAiRunService {
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
                     if checkpoint.run_id != current.id
-                        || checkpoint.checkpoint_kind != "tool_batch_persisted"
+                        || checkpoint.checkpoint_kind != expected_kind
                         || checkpoint.budget_reservation_id.is_none()
                         || checkpoint.assistant_message_id.is_some()
                         || checkpoint.protected_state.is_none()

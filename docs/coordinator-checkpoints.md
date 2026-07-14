@@ -112,9 +112,17 @@ An exact model-visible result is immediately written as
 write-risk tool row and exact consumed one-use approval and protects the
 provider-retained continuation with the current rule/usage evidence. The
 service never calls the provider. This first contract intentionally rejects
-multi-call and stateless turns. The new supervised checkpoint is also not yet
-eligible for cross-generation adoption; a sudden process loss remains
-`RecoveryRequired` rather than replayable.
+multi-call and stateless turns.
+
+After lease loss, expired-run recovery may requeue this exact completed batch
+under a new attempt/generation. `adopt_supervised_tool_batch` then reopens the
+checkpoint and its tool/approval payloads, verifies the consumed one-shot
+binding, preview/policy/auth-state evidence, committed budget, egress row,
+current authority and current rules, and returns an opaque retained-response
+proof. `consume_supervised_before_provider` clears the exact current link once
+through the new fence before transport. Neither operation executes or retries
+the mutation. Uncheckpointed, partial, multi-call, stateless, or mismatched
+evidence remains `RecoveryRequired`.
 
 Provider-turn checkpoints, incomplete batches, uncheckpointed consequential
 mutations, missing/denied egress, malformed or unprovable stateless history,

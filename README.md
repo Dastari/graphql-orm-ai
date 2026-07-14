@@ -104,8 +104,10 @@ below are still being implemented.
   The runtime reopens the exact pre-wait provider checkpoint, current rules,
   committed budget, approval, staged tool, and route; executes through fresh
   ordinary resolver authorization; and writes a distinct approval-bound
-  continuation checkpoint without another provider call. Multi-call,
-  stateless, cross-generation, and full-loop continuation remain closed.
+  continuation checkpoint without another provider call. An expired worker or
+  validated restored snapshot can re-adopt that exact result under a new fence
+  and consume it once before provider transport. Multi-call, stateless, and
+  full-loop supervised continuation remain closed.
 - A supervised application-mutation service that accepts only explicitly
   enabled exact `SupervisedWrite` descriptors, builds current server-owned
   previews, consumes approval once, recomputes host policy before ordinary
@@ -137,12 +139,13 @@ below are still being implemented.
   harnesses. Only bounded visible text/JSON, exact assistant calls, and
   disclosure-validated tool outputs are retained; every replayed output has a
   unique freshly authorized egress proof.
-- One-shot cross-generation adoption for exact completed provider-retained and
-  stateless read-only tool batches. Recovery preserves only a hash- and
-  budget-bound complete batch; the new worker freshly reauthorizes, reopens
-  and validates every current and historical durable result, budget, step, and
-  egress proof, reconstructs bounded continuation state without rerunning a
-  resolver, and consumes the checkpoint before the next provider transport.
+- One-shot cross-generation adoption for exact completed provider-retained or
+  stateless read-only tool batches and one approval-bound provider-retained
+  mutation result. Recovery preserves only a hash- and budget-bound complete
+  batch; the new worker freshly reauthorizes, reopens and validates every
+  required result, approval, budget, step, and egress proof, reconstructs the
+  bounded continuation without rerunning a resolver, and consumes the
+  checkpoint before the next provider transport.
 - Optional protected durable provisional output. Only visible text and
   reasoning summaries are UTF-8-coalesced within 50 ms / 4 KiB; each batch is
   freshly authorized, protected, exact-fence/budget validated, and committed
@@ -301,8 +304,8 @@ Protected immutable skill publication/resolution and exact schema-fingerprinted
 logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
-Production blockers include cross-generation supervised provider-turn and
-partial-tool-batch adoption, a top-level supervised approval-wait coordinator,
+Production blockers include partial/multi-call and stateless supervised
+tool-batch adoption, a top-level supervised approval-wait coordinator,
 authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,
