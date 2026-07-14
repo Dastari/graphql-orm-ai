@@ -92,11 +92,35 @@ that consume can be reconsidered within the retry ceiling; a crash after it is
 conservative external-boundary recovery. The append-only checkpoint remains in
 history, but no longer grants adoption eligibility.
 
-Provider-turn checkpoints, incomplete batches, consequential mutations,
-missing/denied egress, malformed or unprovable stateless history, retry
-exhaustion, and any changed current access/policy remain `RecoveryRequired`.
-Operators must never manually relink a checkpoint or reconstruct a
-continuation.
+Ordinary read-only checkpoint append/adoption additionally requires every
+current and historical tool row to have `risk = read_only` and no approval ID.
+This structurally prevents an approval-bearing mutation result from being
+smuggled into the read-only adopter.
+
+## Approved supervised handoff
+
+`OrmAiSupervisedResumeService` handles the narrow same-attempt boundary after
+`claim_next_approved`. It reopens the exact `provider_turn_persisted` payload,
+committed provider budget, single staged mutation, `resume_claimed` approval,
+result route, rule fingerprint, and cumulative usage under freshly rehydrated
+authority. It then calls the consequential service, which still rebuilds the
+canonical preview, consumes approval exactly once, and uses ordinary GraphQL
+resolver authorization.
+
+An exact model-visible result is immediately written as
+`supervised_tool_batch_persisted`. Its state-machine append requires the one
+write-risk tool row and exact consumed one-use approval and protects the
+provider-retained continuation with the current rule/usage evidence. The
+service never calls the provider. This first contract intentionally rejects
+multi-call and stateless turns. The new supervised checkpoint is also not yet
+eligible for cross-generation adoption; a sudden process loss remains
+`RecoveryRequired` rather than replayable.
+
+Provider-turn checkpoints, incomplete batches, uncheckpointed consequential
+mutations, missing/denied egress, malformed or unprovable stateless history,
+retry exhaustion, and any changed current access/policy remain
+`RecoveryRequired`. Operators must never manually relink a checkpoint or
+reconstruct a continuation.
 
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already

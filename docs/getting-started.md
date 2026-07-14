@@ -245,18 +245,21 @@ and `OrmAiConsequentialToolCallService` to request a server-previewed one-shot
 approval and execute it through fresh ordinary resolver authorization;
 after a human decision, a different process may use the one-owner
 `claim_next_approved` handoff before the same fresh execution path. Protected
-provider-turn adoption and top-level approval-wait continuation remain
+provider-turn adoption plus continuation checkpointing is implemented for one
+provider-retained mutation through `OrmAiSupervisedResumeService`; multi-call,
+stateless, cross-generation, and top-level approval-wait continuation remain
 unfinished. Arbitrary GraphQL and ambiguous replay remain closed. See the
-[read-only tool-loop guide](read-only-tool-loop.md).
+[read-only tool-loop guide](read-only-tool-loop.md) and
+[supervised tool-loop guide](supervised-tool-loop.md).
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
 upload/search/deletion, attachment quotas/derivatives, authoritative
 provider-built-in unit pricing, complete deleting-session and external-artifact
 retention,
-provider-turn/partial-
-batch restart adoption, and full top-level approval-wait continuation remain under
-implementation. Protected provisional live output is opt-in and documented in
+provider-turn and partial-batch restart adoption, and full top-level
+approval-wait continuation remain
+under implementation. Protected provisional live output is opt-in and documented in
 the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL
 lifecycles and consequential executor are implemented; approval consumption is
 always followed by fresh ordinary resolver authorization in that path. See the

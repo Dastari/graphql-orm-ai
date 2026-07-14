@@ -83,6 +83,43 @@ pub(crate) struct AiStatelessConversationEvidence {
 }
 
 impl AiAgentContinuation {
+    pub(crate) fn from_persisted_results(
+        continuation: ModelContinuation,
+        completed_tools: &[AiPersistedApplicationToolCall],
+        replay_transfers: Vec<AiEgressManifest>,
+    ) -> Result<Self, AiError> {
+        if completed_tools.is_empty() || completed_tools.len() > 256 {
+            return Err(AiError::Conflict);
+        }
+        let mut input = Vec::with_capacity(completed_tools.len());
+        let mut transfers = Vec::with_capacity(completed_tools.len());
+        let mut call_ids = BTreeSet::new();
+        for completed in completed_tools {
+            if !call_ids.insert(completed.provider_call_id()) {
+                return Err(AiError::Conflict);
+            }
+            input.push(
+                completed
+                    .model_input()
+                    .cloned()
+                    .ok_or(AiError::EgressDenied)?,
+            );
+            transfers.push(
+                completed
+                    .egress_manifest()
+                    .cloned()
+                    .ok_or(AiError::EgressDenied)?,
+            );
+        }
+        let candidate = Self {
+            continuation,
+            input,
+            transfers,
+            replay_transfers,
+        };
+        Self::from_checkpoint_value(candidate.checkpoint_value())
+    }
+
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
             "formatVersion": 2,

@@ -75,6 +75,8 @@ mod orm_skills;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_supervised;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_ui_intents;
@@ -156,6 +158,8 @@ pub use orm_skills::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_supervised::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_ui_intents::*;
@@ -208,24 +212,25 @@ pub mod prelude {
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
-        AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
-        AiAgentRuleResolver, AiApplicationToolCallLimits, AiApprovalServiceLimits,
-        AiApprovedRunClaim, AiAttachmentCleanupLimits, AiAttachmentServiceLimits,
-        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
-        AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits, AiInboxPruningLimits,
-        AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
-        AiProposalServiceLimits, AiProviderAttachmentResolutionLimits, AiProviderCallExecutor,
-        AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
-        AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,
-        AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
-        AiSessionRetentionLimits, AiUiIntentDeliveryLimits, AiUiIntentDeliveryService,
+        AiAdoptedReadOnlyToolBatch, AiAdoptedSupervisedProviderTurn, AiAgentCheckpointAdopter,
+        AiAgentCheckpointWriter, AiAgentRuleResolver, AiApplicationToolCallLimits,
+        AiApprovalServiceLimits, AiApprovedRunClaim, AiAttachmentCleanupLimits,
+        AiAttachmentServiceLimits, AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder,
+        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits,
+        AiInboxPruningLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
+        AiLiveDeltaSink, AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
+        AiProviderAttachmentResolutionLimits, AiProviderCallExecutor, AiProviderCallLimits,
+        AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
+        AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
+        AiRequestedConsequentialToolCall, AiRunServiceLimits, AiSessionRetentionLimits,
+        AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits, AiUiIntentDeliveryService,
         OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
         OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
         OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
         OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
         OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
-        OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiUiIntentDeliveryService,
-        OrmAiUsageService,
+        OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
+        OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

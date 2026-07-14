@@ -1,4 +1,4 @@
-//! Protected fenced checkpoints for replay-safe read-only coordinator phases.
+//! Protected fenced checkpoints for replay-safe coordinator phases.
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
@@ -44,7 +44,7 @@ struct CoordinatorCheckpointPayload {
     continuation: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderResultSnapshot {
     format_version: u32,
@@ -60,7 +60,7 @@ struct ProviderResultSnapshot {
     tool_calls: Vec<ProviderToolSnapshot>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderToolSnapshot {
     call_id: String,
@@ -86,6 +86,142 @@ struct ToolResultSnapshot {
 pub struct AiCoordinatorCheckpointLimits {
     maximum_state_bytes: usize,
     maximum_principal_age: Duration,
+}
+
+/// Current-authority proof for the one provider turn that staged an approved
+/// supervised mutation.
+///
+/// The fields are private because the proof binds the durable provider
+/// checkpoint, approval, tool call, rule fingerprint, cumulative usage, and
+/// exact result-egress route. It is not approval consumption or resolver
+/// authority; those checks still run freshly in the supervised resume service.
+#[derive(Clone, Debug)]
+pub struct AiAdoptedSupervisedProviderTurn {
+    checkpoint_id: Uuid,
+    approval_id: crate::AiApprovalId,
+    tool_call_id: crate::AiToolCallId,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    correlation_id: String,
+    result_egress_route: AiToolResultEgressRoute,
+    provider_result: ProviderResultSnapshot,
+    provider_result_value: serde_json::Value,
+    pending_continuation: crate::ModelContinuation,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
+}
+
+impl AiAdoptedSupervisedProviderTurn {
+    pub(crate) fn result_egress_route(&self) -> &AiToolResultEgressRoute {
+        &self.result_egress_route
+    }
+
+    pub(crate) fn provider_response_id(&self) -> Option<&str> {
+        self.provider_result.provider_response_id.as_deref()
+    }
+
+    /// Exact protected provider-turn checkpoint selected for this handoff.
+    pub const fn checkpoint_id(&self) -> Uuid {
+        self.checkpoint_id
+    }
+
+    /// Human approval bound to the staged tool call.
+    pub const fn approval_id(&self) -> crate::AiApprovalId {
+        self.approval_id
+    }
+
+    /// Durable staged consequential tool call.
+    pub const fn tool_call_id(&self) -> crate::AiToolCallId {
+        self.tool_call_id
+    }
+
+    /// Accepted provider-turn count including the turn that requested the
+    /// mutation.
+    pub const fn provider_turns(&self) -> u32 {
+        self.provider_turns
+    }
+
+    /// Requested application-tool count including the staged mutation.
+    pub const fn total_tool_calls(&self) -> u32 {
+        self.total_tool_calls
+    }
+
+    /// Application-defined scope freshly reauthorized during adoption.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
+    /// Exact current hierarchical-rule fingerprint.
+    pub fn rule_fingerprint(&self) -> &str {
+        &self.rule_fingerprint
+    }
+
+    /// Cumulative rule usage including the accepted provider turn and staged
+    /// application-tool step.
+    pub const fn rule_usage(&self) -> AiRuleRunUsage {
+        self.rule_usage
+    }
+}
+
+/// Durable post-mutation continuation checkpoint.
+///
+/// This proof means the exact approved resolver result and model-visible
+/// continuation were protected under the current fence. It grants no provider
+/// egress, budget, rule, or replay authority; a later coordinator-adoption
+/// operation must reopen and consume the checkpoint before transport.
+#[derive(Clone, Debug)]
+pub struct AiProtectedSupervisedToolBatch {
+    checkpoint_id: Uuid,
+    tool_call_id: crate::AiToolCallId,
+    lease: AiRunLease,
+    provider_turns: u32,
+    total_tool_calls: u32,
+    scope: AiScope,
+    rule_fingerprint: String,
+    rule_usage: AiRuleRunUsage,
+}
+
+impl AiProtectedSupervisedToolBatch {
+    /// Newly appended supervised tool-batch checkpoint.
+    pub const fn checkpoint_id(&self) -> Uuid {
+        self.checkpoint_id
+    }
+
+    /// Exact approved consequential tool whose result is protected.
+    pub const fn tool_call_id(&self) -> crate::AiToolCallId {
+        self.tool_call_id
+    }
+
+    /// Current running lease whose latest checkpoint is this proof.
+    pub fn lease(&self) -> &AiRunLease {
+        &self.lease
+    }
+
+    /// Accepted provider-turn count.
+    pub const fn provider_turns(&self) -> u32 {
+        self.provider_turns
+    }
+
+    /// Completed application-tool count.
+    pub const fn total_tool_calls(&self) -> u32 {
+        self.total_tool_calls
+    }
+
+    /// Reauthorized application scope.
+    pub fn scope(&self) -> &AiScope {
+        &self.scope
+    }
+
+    /// Exact current hierarchical-rule fingerprint.
+    pub fn rule_fingerprint(&self) -> &str {
+        &self.rule_fingerprint
+    }
+
+    /// Cumulative authoritative rule usage through this checkpoint.
+    pub const fn rule_usage(&self) -> AiRuleRunUsage {
+        self.rule_usage
+    }
 }
 
 impl AiCoordinatorCheckpointLimits {
@@ -170,6 +306,440 @@ impl OrmAiCoordinatorCheckpointService {
             clock,
             limits,
         }
+    }
+
+    /// Reopens the exact provider turn behind one approved-wait claim.
+    ///
+    /// Only a single provider-retained supervised mutation is accepted in
+    /// this first adoption contract. The method rehydrates current authority,
+    /// validates the protected checkpoint and committed provider budget,
+    /// verifies the exact resume-claimed approval/tool linkage, and reapplies
+    /// hierarchical rule limits. It does not consume the approval or execute
+    /// the resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale fencing, non-provider-retained or
+    /// multi-call turns, malformed/tampered protected state, changed current
+    /// authority/rules, expired or mismatched approval evidence, denied tool
+    /// maturity, or persistence ambiguity.
+    pub async fn adopt_supervised_provider_turn(
+        &self,
+        claim: &crate::AiApprovedRunClaim,
+    ) -> Result<AiAdoptedSupervisedProviderTurn, AiError> {
+        let lease = claim.lease();
+        if lease.state() != crate::AiRunState::WaitingTool {
+            return Err(AiError::Conflict);
+        }
+        let checkpoint_id = lease.latest_checkpoint_id().ok_or(AiError::Conflict)?;
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let scope = AiScope {
+            kind: session.scope_kind.clone(),
+            id: session.scope_id.clone(),
+            tenant_id: session.tenant_id.clone(),
+        };
+        validate_session_binding(&session, lease, &scope)?;
+        let (principal, policy) = self.current_policy(lease, &scope).await?;
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let provider_response_id = checkpoint
+            .provider_response_id
+            .as_deref()
+            .filter(|value| valid_reference(value))
+            .ok_or(AiError::Conflict)?;
+        let budget_reservation_id = checkpoint.budget_reservation_id.ok_or(AiError::Conflict)?;
+        let protected_state = checkpoint
+            .protected_state
+            .as_ref()
+            .ok_or(AiError::Conflict)?;
+        if checkpoint.run_id != lease.run_id().0
+            || checkpoint.attempt_id != lease.attempt_id()
+            || checkpoint.lease_generation != lease.lease_generation()
+            || checkpoint.checkpoint_kind != "provider_turn_persisted"
+            || checkpoint.assistant_message_id.is_some()
+        {
+            return Err(AiError::Conflict);
+        }
+        enforce_size(protected_state, self.limits.maximum_state_bytes)?;
+        let reservation = AiBudgetReservationRecord::find_by_id(
+            self.run_service.database(),
+            &budget_reservation_id,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        if !checkpoint_budget_matches(
+            &reservation,
+            lease,
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            &scope,
+            &principal_reference_kind(lease.principal_reference()),
+            &reservation.provider_kind,
+            &reservation.provider_model,
+        ) {
+            return Err(AiError::Conflict);
+        }
+        let expected_hash = coordinator_checkpoint_hash(
+            crate::AiRunId(checkpoint.run_id),
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            checkpoint.id,
+            &checkpoint.checkpoint_kind,
+            &reservation.provider_kind,
+            &reservation.provider_model,
+            Some(provider_response_id),
+            budget_reservation_id,
+            protected_state,
+        )?;
+        if checkpoint.checkpoint_hash != expected_hash {
+            return Err(AiError::Conflict);
+        }
+        let opened = self
+            .open(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_run_checkpoints".to_owned(),
+                    row_id: checkpoint_id.to_string(),
+                    field: "protected_state".to_owned(),
+                    scope: scope.clone(),
+                },
+                protected_state,
+            )
+            .await?;
+        enforce_size(&opened, self.limits.maximum_state_bytes)?;
+        let provider_result_value = opened
+            .get("providerResult")
+            .cloned()
+            .ok_or(AiError::Conflict)?;
+        let payload: CoordinatorCheckpointPayload =
+            serde_json::from_value(opened).map_err(|_| AiError::PersistenceFailed)?;
+        if payload.format_version != 2
+            || payload.checkpoint_kind != "provider_turn_persisted"
+            || payload.scope != scope
+            || payload.rule_fingerprint.len() != 64
+            || payload.provider_turns == 0
+            || payload.total_tool_calls == 0
+            || !payload.completed_tools.is_empty()
+            || payload.continuation.is_some()
+            || !valid_reference(&payload.correlation_id)
+            || payload.rule_usage.provider_calls() != u64::from(payload.provider_turns)
+            || payload.rule_usage.steps()
+                != u64::from(
+                    payload
+                        .total_tool_calls
+                        .checked_sub(1)
+                        .ok_or(AiError::Conflict)?,
+                )
+                .saturating_add(u64::from(payload.provider_turns))
+        {
+            return Err(AiError::Conflict);
+        }
+        let provider = payload.provider_result;
+        let provider_tool = provider.tool_calls.first().ok_or(AiError::Conflict)?;
+        if provider.format_version != 1
+            || provider.session_id != lease.session_id().0
+            || provider.run_id != lease.run_id().0
+            || provider.attempt_id != lease.attempt_id()
+            || provider.lease_generation != lease.lease_generation()
+            || provider.provider_kind.as_str() != reservation.provider_kind
+            || provider.provider_model != reservation.provider_model
+            || provider.provider_response_id.as_deref() != Some(provider_response_id)
+            || provider.budget_reservation_id != budget_reservation_id
+            || provider.tool_calls.len() != 1
+            || provider
+                .previous_response_id
+                .as_deref()
+                .is_some_and(|value| !valid_reference(value))
+            || !valid_reference(&provider_tool.call_id)
+            || provider_tool.tool_id.trim().is_empty()
+            || provider_tool.tool_fingerprint.len() != 64
+        {
+            return Err(AiError::Conflict);
+        }
+        let route = AiToolResultEgressRoute::from_checkpoint_value(payload.result_egress_route)?;
+        let call =
+            AiToolCallRecord::find_by_id(self.run_service.database(), &claim.tool_call_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let approval =
+            AiApprovalRecord::find_by_id(self.run_service.database(), &claim.approval_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        let expected_turn_index = i64::from(
+            payload
+                .provider_turns
+                .checked_sub(1)
+                .ok_or(AiError::Conflict)?,
+        );
+        let now = self.clock.now().unix_timestamp();
+        if call.run_id != lease.run_id().0
+            || call.lease_generation != lease.lease_generation()
+            || call.provider_call_id != provider_tool.call_id
+            || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
+            || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
+            || call.provider_response_id.as_deref() != Some(provider_response_id)
+            || call.budget_reservation_id != Some(budget_reservation_id)
+            || call.provider_turn_index != expected_turn_index
+            || call.tool_call_index != 0
+            || call.tool_id != provider_tool.tool_id
+            || call.tool_fingerprint != provider_tool.tool_fingerprint
+            || call.argument_hash != canonical_json_hash(&provider_tool.arguments)?
+            || !matches!(
+                call.risk.as_str(),
+                "low_risk_write" | "non_idempotent_write" | "high_impact"
+            )
+            || call.state != "waiting_approval"
+            || call.approval_id != Some(approval.id)
+            || call.completed_at.is_some()
+            || call.protected_result.is_some()
+            || approval.id != claim.approval_id().0
+            || approval.tool_call_id != call.id
+            || approval.session_id != lease.session_id().0
+            || approval.argument_hash != call.argument_hash
+            || approval.tool_fingerprint != call.tool_fingerprint
+            || approval.state != "resume_claimed"
+            || approval.maximum_uses != 1
+            || approval.consumed_uses != 0
+            || approval.consumed_at.is_some()
+            || approval.decided_at.is_none()
+            || approval
+                .approver_subject
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || approval.expires_at <= now
+            || approval.principal_reference_fingerprint
+                != crate::AiApprovalBinding::principal_fingerprint(lease.principal_reference())
+        {
+            return Err(AiError::Conflict);
+        }
+        let rules = self.rule_resolver.resolve_rules(lease, &scope).await?;
+        if rules.rules().fingerprint() != payload.rule_fingerprint
+            || rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let rule_usage = payload.rule_usage.accept_tool_calls(1, &rules)?;
+        let (current, current_policy) = self.current_policy(lease, &scope).await?;
+        let final_rules = self.rule_resolver.resolve_rules(lease, &scope).await?;
+        if current_policy != policy
+            || principal.reference() != lease.principal_reference()
+            || current.reference() != lease.principal_reference()
+            || final_rules.rules().fingerprint() != payload.rule_fingerprint
+            || rule_usage.validate(&final_rules).is_err()
+            || final_rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        Ok(AiAdoptedSupervisedProviderTurn {
+            checkpoint_id,
+            approval_id: claim.approval_id(),
+            tool_call_id: claim.tool_call_id(),
+            provider_turns: payload.provider_turns,
+            total_tool_calls: payload.total_tool_calls,
+            scope,
+            correlation_id: payload.correlation_id,
+            result_egress_route: route,
+            provider_result: provider,
+            provider_result_value,
+            pending_continuation: crate::ModelContinuation::ProviderResponse {
+                response_id: provider_response_id.to_owned(),
+            },
+            rule_fingerprint: payload.rule_fingerprint,
+            rule_usage,
+        })
+    }
+
+    /// Protects the exact result of one adopted, approved supervised mutation.
+    ///
+    /// The resulting checkpoint remains linked to the current running fence
+    /// and contains the exact provider-retained continuation, protected tool
+    /// result, egress manifest, approval-bound tool identity, current rule
+    /// fingerprint, and cumulative usage. This method does not authorize the
+    /// next provider request and does not make cross-generation adoption
+    /// replay-safe by itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error for stale fencing/checkpoint linkage, swapped or
+    /// non-model-visible tool results, changed current authority/rules,
+    /// invalid egress evidence, protection failure, or persistence ambiguity.
+    pub async fn persist_supervised_tool_batch(
+        &self,
+        adopted: AiAdoptedSupervisedProviderTurn,
+        completed: &AiPersistedApplicationToolCall,
+    ) -> Result<AiProtectedSupervisedToolBatch, AiError> {
+        let lease = completed.lease();
+        if lease.state() != crate::AiRunState::Running
+            || lease.latest_checkpoint_id() != Some(adopted.checkpoint_id)
+            || completed.id() != adopted.tool_call_id
+        {
+            return Err(AiError::Conflict);
+        }
+        let provider_tool = adopted
+            .provider_result
+            .tool_calls
+            .first()
+            .filter(|_| adopted.provider_result.tool_calls.len() == 1)
+            .ok_or(AiError::Conflict)?;
+        let manifest = completed
+            .egress_manifest()
+            .filter(|manifest| {
+                adopted.result_egress_route.matches_manifest(
+                    manifest,
+                    lease,
+                    &adopted.scope,
+                    adopted.provider_result.provider_kind.as_str(),
+                    &adopted.provider_result.provider_model,
+                ) && manifest.sources.len() == 1
+                    && manifest.sources[0].kind == "application_tool_result"
+                    && manifest.sources[0].reference == completed.id().0.to_string()
+            })
+            .ok_or(AiError::EgressDenied)?;
+        if completed.provider_call_id() != provider_tool.call_id {
+            return Err(AiError::Conflict);
+        }
+        let continuation = crate::AiAgentContinuation::from_persisted_results(
+            adopted.pending_continuation.clone(),
+            std::slice::from_ref(completed),
+            Vec::new(),
+        )?;
+        let protected_tool = completed.checkpoint_value().ok_or(AiError::EgressDenied)?;
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, &adopted.scope)?;
+        let (principal, policy) = self.current_policy(lease, &adopted.scope).await?;
+        let rules = self
+            .rule_resolver
+            .resolve_rules(lease, &adopted.scope)
+            .await?;
+        if rules.rules().fingerprint() != adopted.rule_fingerprint
+            || adopted.rule_usage.validate(&rules).is_err()
+            || rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let checkpoint_id = Uuid::new_v4();
+        let payload = json!({
+            "formatVersion": 2,
+            "checkpointKind": "supervised_tool_batch_persisted",
+            "providerTurns": adopted.provider_turns,
+            "totalToolCalls": adopted.total_tool_calls,
+            "scope": adopted.scope,
+            "ruleFingerprint": adopted.rule_fingerprint,
+            "ruleUsage": adopted.rule_usage,
+            "correlationId": adopted.correlation_id,
+            "resultEgressRoute": adopted.result_egress_route.checkpoint_value(),
+            "providerResult": adopted.provider_result_value,
+            "completedTools": [protected_tool],
+            "continuation": continuation.checkpoint_value(),
+            "approvalId": adopted.approval_id.0,
+        });
+        enforce_size(&payload, self.limits.maximum_state_bytes)?;
+        let protected_state = self
+            .protect(
+                &policy,
+                ContentProtectionContext {
+                    entity: "graphql_orm_ai_run_checkpoints".to_owned(),
+                    row_id: checkpoint_id.to_string(),
+                    field: "protected_state".to_owned(),
+                    scope: adopted.scope.clone(),
+                },
+                payload,
+            )
+            .await?;
+        enforce_size(&protected_state, self.limits.maximum_state_bytes)?;
+        let (current, current_policy) = self.current_policy(lease, &adopted.scope).await?;
+        let final_rules = self
+            .rule_resolver
+            .resolve_rules(lease, &adopted.scope)
+            .await?;
+        if current_policy != policy
+            || principal.reference() != lease.principal_reference()
+            || current.reference() != lease.principal_reference()
+            || final_rules.rules().fingerprint() != adopted.rule_fingerprint
+            || adopted.rule_usage.validate(&final_rules).is_err()
+            || final_rules.rules().constrain_tool(
+                &provider_tool.tool_fingerprint,
+                crate::ToolMaturity::SupervisedWrite,
+                crate::AiApprovalRule::OneShot,
+            ) != Some(crate::AiApprovalRule::OneShot)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        let provider_response_id = adopted
+            .provider_result
+            .provider_response_id
+            .as_deref()
+            .ok_or(AiError::Conflict)?;
+        let checkpoint_hash = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            checkpoint_id,
+            "supervised_tool_batch_persisted",
+            adopted.provider_result.provider_kind.as_str(),
+            &adopted.provider_result.provider_model,
+            Some(provider_response_id),
+            adopted.provider_result.budget_reservation_id,
+            &protected_state,
+        )?;
+        let renewed = self
+            .run_service
+            .append_coordinator_checkpoint(
+                lease,
+                PreparedCoordinatorCheckpoint {
+                    id: checkpoint_id,
+                    checkpoint_kind: "supervised_tool_batch_persisted".to_owned(),
+                    provider_kind: adopted.provider_result.provider_kind.as_str().to_owned(),
+                    provider_model: adopted.provider_result.provider_model.clone(),
+                    provider_response_id: Some(provider_response_id.to_owned()),
+                    budget_reservation_id: adopted.provider_result.budget_reservation_id,
+                    protected_state,
+                    checkpoint_hash,
+                    completed_tools: vec![PreparedCoordinatorCheckpointTool {
+                        id: completed.id().0,
+                        provider_call_id: provider_tool.call_id.clone(),
+                        tool_id: provider_tool.tool_id.clone(),
+                        result_egress_manifest_hash: manifest.stable_hash(),
+                    }],
+                },
+            )
+            .await?;
+        Ok(AiProtectedSupervisedToolBatch {
+            checkpoint_id,
+            tool_call_id: completed.id(),
+            lease: renewed,
+            provider_turns: adopted.provider_turns,
+            total_tool_calls: adopted.total_tool_calls,
+            scope: adopted.scope,
+            rule_fingerprint: adopted.rule_fingerprint,
+            rule_usage: adopted.rule_usage,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -680,6 +1250,8 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.tool_id != provider_tool.tool_id
                 || call.tool_fingerprint != provider_tool.tool_fingerprint
                 || call.argument_hash != canonical_json_hash(&provider_tool.arguments)?
+                || call.risk != "read_only"
+                || call.approval_id.is_some()
                 || call.state != tool.state
                 || !matches!(call.state.as_str(), "completed" | "execution_failed")
                 || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
@@ -829,6 +1401,8 @@ impl OrmAiCoordinatorCheckpointService {
                     || call.tool_id != item.tool_id
                     || call.tool_fingerprint != item.tool_fingerprint
                     || call.argument_hash != canonical_json_hash(&item.arguments)?
+                    || call.risk != "read_only"
+                    || call.approval_id.is_some()
                     || !matches!(call.state.as_str(), "completed" | "execution_failed")
                     || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
                     || call.result_egress_decision_id.is_none()

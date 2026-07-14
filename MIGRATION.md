@@ -4,6 +4,59 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: protected supervised continuation handoff (crate 0.30.0 to 0.31.0; schema 0.28.0 to 0.29.0)
+
+Apply AI schema module `0.29.0` while workers, provider calls, human approval
+waits, and restore callbacks are closed. Do not run 0.31.0 code against a
+module still registered as 0.28.0. The generated migration adds no table,
+column, index, constraint, or entity and still owns 39 private records. It
+advances the module because existing private checkpoint records gain a new
+authorization-sensitive kind and stricter interpretation. No consumer table,
+application SQL, or data copy is introduced.
+
+`OrmAiSupervisedResumeService::execute_claimed` accepts the exact
+`AiApprovedRunClaim`. It reopens the linked `provider_turn_persisted`
+checkpoint, committed provider budget, single staged tool, and
+`resume_claimed` approval under current principal, scope/session, protection,
+and hierarchical-rule authority. It then uses the normal consequential tool
+service to rebuild the canonical preview, consume approval once, and execute
+the ordinary authenticated GraphQL mutation. It never calls the provider.
+
+An unambiguous model-visible result is protected as
+`supervised_tool_batch_persisted`, with the exact consumed approval, result
+egress manifest, provider-retained response continuation, rule fingerprint,
+and cumulative provider/tool usage. `AiSupervisedResumeOutcome` returns either
+that opaque checkpoint or a durable recovery-required tool ID. If resolver or
+post-mutation persistence is ambiguous, no approval or mutation is replayed.
+
+This first resume contract accepts exactly one supervised mutation and a
+provider-retained response ID. Multi-call batches and stateless continuation
+(including Ollama and local-harness turns) remain closed at this handoff until
+their complete ordering/history evidence is implemented. Existing provider
+and local-harness support is unchanged outside approved-wait resumption.
+
+Trusted supervised planners should call the new public
+`AiProviderCallPlan::project_supervised_rule_usage` with the exact freshly
+resolved hierarchy before provider execution. Plans now retain private
+plan-time fingerprint/maturity/approval bindings: safe reads must remain
+approval-free, and supervised mutations must remain one-shot. The method also
+checks provider capabilities, classification, retention/BYOK, and estimated
+usage, but does not replace atomic budget reservation, egress, tool policy, or
+resolver authorization.
+
+Read-only `tool_batch_persisted` append and adoption now reject every tool row
+whose risk is not `read_only` or whose approval ID is present, including all
+stateless history. The new supervised kind requires one allowed write-risk row
+and its exact consumed, one-use approval. Finish or reconcile active 0.30.0
+coordinator checkpoints before upgrading; legacy ambiguous/misclassified
+records are not adopted. No data migration is required.
+
+Live expired-lease and snapshot restore do not yet adopt a supervised
+continuation across a new attempt/generation. A process loss before or after
+the supervised checkpoint therefore remains `RecoveryRequired`; do not relink
+or replay it manually. Cross-generation adoption and the top-level supervised
+provider loop are later gates.
+
 ## Unreleased: fenced approved-wait handoff (crate 0.29.0 to 0.30.0; schema 0.27.0 to 0.28.0)
 
 Apply AI schema module `0.28.0` while workers, approval decisions, backups,

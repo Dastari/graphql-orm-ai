@@ -15,6 +15,13 @@ Only the host's ordinary GraphQL resolver can perform the domain write.
 - application mutations at `SupervisedWrite` maturity with approval `OneShot`
   and `LowRiskWrite`, `NonIdempotentWrite`, or `HighImpact` risk.
 
+Before provider execution, the trusted planner calls
+`project_supervised_rule_usage` with the exact current hierarchy and cumulative
+usage. The plan retains private plan-time fingerprint/maturity/approval
+bindings, so a safe read cannot acquire approval semantics and a supervised
+write cannot lose one-shot approval. This remains constraint evidence only;
+provider egress and atomic budget proofs still run independently.
+
 Proposal staging remains an AI-owned lifecycle, not an application mutation.
 `Secret`, `AutonomousWrite`, introspection, AI control-plane, unregistered,
 wrong-fingerprint, and policy-disabled definitions fail closed. These plan
@@ -115,10 +122,18 @@ the persisted outcome. A recovery-required outcome has no continuing lease.
 
 ## Remaining orchestration gate
 
-The generic service and restart-safe approved-wait claim are suitable for a
-host-owned supervised workflow, but the crate does not yet provide the
-top-level coordinator that reopens the protected provider turn and resumes its
-exact continuation after the mutation result. The `AiReadOnlyAgentCoordinator`
-remains read-only. Deployments must not route supervised descriptors through
-it, reconstruct provider state from an approval/tool row, or infer mutation
-replay authority after a resumed-worker crash.
+`OrmAiSupervisedResumeService` now owns the first protected resumption step for
+one provider-retained mutation. It reopens the exact pre-wait provider
+checkpoint from `AiApprovedRunClaim`, executes through the complete fresh
+approval/resolver path above, and protects the result plus continuation as
+`supervised_tool_batch_persisted` without a second provider call. Read-only
+checkpoint adoption rejects this distinct approval-bearing kind.
+
+The crate does not yet expose the top-level coordinator that consumes that
+supervised checkpoint and continues the full provider loop. Multi-call,
+stateless (including Ollama/local-harness), and cross-generation supervised
+adoption remain closed; sudden process loss is `RecoveryRequired`.
+`AiReadOnlyAgentCoordinator` remains read-only. Deployments must not route
+supervised descriptors through it, reconstruct provider state from an
+approval/tool row, or infer mutation replay authority after a resumed-worker
+crash.

@@ -100,6 +100,12 @@ below are still being implemented.
   state, worker owner, expiry, row-version fence, and redacted audit rotate
   atomically; concurrent resumers cannot receive the same action. Protected
   full-turn supervised continuation remains a separate unfinished gate.
+- Protected execution of one claimed, approved, provider-retained mutation.
+  The runtime reopens the exact pre-wait provider checkpoint, current rules,
+  committed budget, approval, staged tool, and route; executes through fresh
+  ordinary resolver authorization; and writes a distinct approval-bound
+  continuation checkpoint without another provider call. Multi-call,
+  stateless, cross-generation, and full-loop continuation remain closed.
 - A supervised application-mutation service that accepts only explicitly
   enabled exact `SupervisedWrite` descriptors, builds current server-owned
   previews, consumes approval once, recomputes host policy before ordinary
@@ -288,12 +294,16 @@ preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots. An
 approved wait can be handed to exactly one new worker under a rotated
 owner/row-version fence without changing its action-bound attempt/generation.
+A claimed single provider-retained mutation can then reopen its exact protected
+provider turn, execute through fresh approval/resolver authority, and protect a
+distinct consumed-approval-bound continuation without another provider call.
 Protected immutable skill publication/resolution and exact schema-fingerprinted
 logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
-Production blockers include provider-turn and partial-tool-batch adoption, a
-top-level supervised approval-wait coordinator, authoritative built-in-tool
+Production blockers include cross-generation supervised provider-turn and
+partial-tool-batch adoption, a top-level supervised approval-wait coordinator,
+authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,

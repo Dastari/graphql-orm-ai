@@ -5,15 +5,31 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.30.0` and the
-AI schema module to `0.28.0`. No table, column, index, constraint, or entity is
-added; the module version changes because approved human waits now have an
-explicit one-owner `resume_claimed` approval state and `WaitingTool` run
-handoff, in addition to protected checkpoint v2 and the strict scope-policy,
-skill, and UI-intent semantics.
+This development line advances the pre-1.0 crate version to `0.31.0` and the
+AI schema module to `0.29.0`. No table, column, index, constraint, or entity is
+added; the module version changes because protected coordinator records now
+have a distinct approval-bound `supervised_tool_batch_persisted` semantic and
+read-only checkpoints explicitly exclude approval-bearing/write calls, in
+addition to the approved-wait handoff and protected checkpoint v2 contracts.
 
 ### Added
 
+- `OrmAiSupervisedResumeService` now reopens the exact protected provider turn
+  behind a one-owner approved-wait claim, revalidates current principal,
+  policy, hierarchical rules, provider budget, approval, tool, and route
+  bindings, executes one approved resolver through the ordinary GraphQL path,
+  and protects its exact provider-retained continuation without making a
+  second provider call. The first contract is deliberately one mutation and
+  one provider-retained response; stateless/multi-call resume stays closed.
+- `AiAdoptedSupervisedProviderTurn`, `AiProtectedSupervisedToolBatch`, and
+  `AiSupervisedResumeOutcome` provide opaque proofs for the pre-execution and
+  post-mutation handoffs. A failed post-side-effect checkpoint is durably
+  classified `RecoveryRequired` and is never replayed.
+- `AiProviderCallPlan::project_supervised_rule_usage` binds immutable
+  plan-time tool maturity/approval evidence and checks exact current
+  hierarchical tool/provider/capability/disclosure/retention/BYOK/budget
+  constraints before supervised provider egress. It is narrowing evidence,
+  not provider or resolver authority.
 - `OrmAiRunService::claim_next_approved` and the opaque
   `AiApprovedRunClaim`. Exactly one worker can atomically adopt an approved,
   unconsumed wait without creating a second provider attempt: approval state,
@@ -111,6 +127,13 @@ skill, and UI-intent semantics.
 
 ### Security
 
+- Read-only checkpoint append/adoption now structurally requires
+  `risk = read_only` and no approval ID for every current and stateless-history
+  tool row. Consequential results use the distinct supervised checkpoint kind,
+  whose append transaction verifies an exact consumed one-shot approval.
+  Neither kind can be substituted for the other. Sudden-process recovery of a
+  supervised continuation remains conservative until cross-generation
+  adoption is implemented.
 - Approved-wait handoff preserves the original attempt/generation bindings but
   replaces owner and row-version proof, immediately fencing the staging
   worker. `approved` becomes `resume_claimed` and `WaitingApproval` becomes

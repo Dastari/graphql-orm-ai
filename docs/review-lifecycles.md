@@ -113,8 +113,10 @@ not reusable.
 ## Deliberate remaining gates
 
 - The generic consequential tool executor and host canonical-preview builder
-  contract are implemented. A top-level coordinator that supervises long-lived
-  approval waits and resumes the exact provider loop is not yet implemented;
+  contract are implemented. One claimed provider-retained mutation can now
+  reopen its exact pre-wait checkpoint and persist an approval-bound
+  post-mutation continuation. A top-level coordinator that consumes that
+  checkpoint and resumes the exact provider loop is not yet implemented;
   mutation/proposal/approval-required descriptors remain excluded from the
   read-only coordinator.
 - Per-item proposal review is not yet exposed; whole structured payload review
@@ -122,7 +124,7 @@ not reusable.
 - The staging worker no longer heartbeats through a human wait; approved work
   has a one-owner same-attempt handoff. A top-level coordinator still needs to
   classify denied, revoked, and expired decisions and protect the exact
-  post-mutation provider continuation. Expired-lease and restore recovery stay
-  conservative until that full lifecycle exists.
+  multi-call/stateless provider continuation. Expired-lease and restore
+  recovery stay conservative until cross-generation adoption exists.
 - Consumer-specific UI, domain mutations, proposal rendering, and integration
   tests remain in each consuming application.

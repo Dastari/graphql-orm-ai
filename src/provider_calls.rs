@@ -159,6 +159,14 @@ pub struct AiProviderCallPlan {
     budget: AiBudgetReservationRequest,
     transfers: Vec<AiEgressManifest>,
     correlation_id: String,
+    tool_rule_bindings: Vec<AiPlanToolRuleBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct AiPlanToolRuleBinding {
+    fingerprint: String,
+    maturity: ToolMaturity,
+    approval: AiApprovalRule,
 }
 
 impl AiProviderCallPlan {
@@ -242,6 +250,7 @@ impl AiProviderCallPlan {
             budget,
             transfers,
             correlation_id,
+            tool_rule_bindings: Vec::new(),
         })
     }
 
@@ -354,14 +363,25 @@ impl AiProviderCallPlan {
         for definition in &request.tools {
             catalog.validate_read_only_model_definition(definition, policy)?;
         }
-        Self::new_internal(
+        let bindings = request
+            .tools
+            .iter()
+            .map(|definition| AiPlanToolRuleBinding {
+                fingerprint: definition.fingerprint.clone(),
+                maturity: ToolMaturity::ReadOnly,
+                approval: AiApprovalRule::None,
+            })
+            .collect();
+        let mut plan = Self::new_internal(
             provider_kind,
             request,
             budget,
             transfers,
             correlation_id.into(),
             true,
-        )
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
     }
 
     fn new_with_bound_supervised_tools(
@@ -378,17 +398,28 @@ impl AiProviderCallPlan {
                 "supervised provider tool plan has no tools".to_owned(),
             ));
         }
+        let mut bindings = Vec::with_capacity(request.tools.len());
         for definition in &request.tools {
             catalog.validate_supervised_model_definition(definition, policy)?;
+            let descriptor = catalog
+                .descriptor(&crate::AiToolId::parse(definition.tool_id.clone())?)
+                .ok_or(AiError::Forbidden)?;
+            bindings.push(AiPlanToolRuleBinding {
+                fingerprint: descriptor.fingerprint.clone(),
+                maturity: descriptor.maturity,
+                approval: descriptor.approval,
+            });
         }
-        Self::new_internal(
+        let mut plan = Self::new_internal(
             provider_kind,
             request,
             budget,
             transfers,
             correlation_id.into(),
             true,
-        )
+        )?;
+        plan.tool_rule_bindings = bindings;
+        Ok(plan)
     }
 
     /// Creates a subsequent read-only tool turn from one exact bounded-loop
@@ -486,16 +517,75 @@ impl AiProviderCallPlan {
         usage: AiRuleRunUsage,
         uses_byok: bool,
     ) -> Result<AiRuleRunUsage, AiError> {
+        self.project_bound_rule_usage(resolution, usage, uses_byok, false)
+    }
+
+    /// Projects hierarchical rule usage for one supervised-compatible tool
+    /// plan.
+    ///
+    /// This verifies every immutable plan-time tool binding against the exact
+    /// current resolved rule set: safe reads must remain approval-free and
+    /// supervised mutations must retain one-shot approval. It also checks the
+    /// provider family/capabilities, disclosure ceiling, retention, BYOK, and
+    /// estimated provider budget. The returned usage is planning evidence
+    /// only and grants no provider, egress, budget, approval, or resolver
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe denial when the plan has no bound application tools, any
+    /// tool/rule binding changed, provider constraints reject the request, or
+    /// cumulative estimated usage exceeds current rules.
+    pub fn project_supervised_rule_usage(
+        &self,
+        resolution: &AiAgentRuleResolution,
+        usage: AiRuleRunUsage,
+        uses_byok: bool,
+    ) -> Result<AiRuleRunUsage, AiError> {
+        if self.request.tools.is_empty() {
+            return Err(AiError::Forbidden);
+        }
+        self.project_bound_rule_usage(resolution, usage, uses_byok, true)
+    }
+
+    fn project_bound_rule_usage(
+        &self,
+        resolution: &AiAgentRuleResolution,
+        usage: AiRuleRunUsage,
+        uses_byok: bool,
+        allow_supervised: bool,
+    ) -> Result<AiRuleRunUsage, AiError> {
         let rules = resolution.rules();
         if rules.target_scope() != self.scope()
             || self.request.maximum_output_tokens.unwrap_or(0) > self.budget.estimate.output_tokens
-            || self.request.tools.iter().any(|tool| {
-                rules.constrain_tool(
-                    &tool.fingerprint,
-                    ToolMaturity::ReadOnly,
-                    AiApprovalRule::None,
-                ) != Some(AiApprovalRule::None)
-            })
+            || self.request.tools.len() != self.tool_rule_bindings.len()
+            || self
+                .request
+                .tools
+                .iter()
+                .zip(&self.tool_rule_bindings)
+                .any(|(tool, binding)| {
+                    tool.fingerprint != binding.fingerprint
+                        || match (binding.maturity, binding.approval) {
+                            (ToolMaturity::ReadOnly, AiApprovalRule::None) => {
+                                rules.constrain_tool(
+                                    &binding.fingerprint,
+                                    binding.maturity,
+                                    binding.approval,
+                                ) != Some(AiApprovalRule::None)
+                            }
+                            (ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot)
+                                if allow_supervised =>
+                            {
+                                rules.constrain_tool(
+                                    &binding.fingerprint,
+                                    binding.maturity,
+                                    binding.approval,
+                                ) != Some(AiApprovalRule::OneShot)
+                            }
+                            _ => true,
+                        }
+                })
         {
             return Err(AiError::Forbidden);
         }
@@ -618,6 +708,11 @@ impl AiProviderCallPlan {
             },
             transfers: Vec::new(),
             correlation_id: uuid::Uuid::new_v4().to_string(),
+            tool_rule_bindings: vec![AiPlanToolRuleBinding {
+                fingerprint: "test-fingerprint".to_owned(),
+                maturity: ToolMaturity::ReadOnly,
+                approval: AiApprovalRule::None,
+            }],
         }
     }
 }
@@ -1872,6 +1967,10 @@ mod tests {
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
+    use crate::orm_runs::{
+        PreparedCoordinatorCheckpoint, PreparedCoordinatorCheckpointTool,
+        coordinator_checkpoint_hash,
+    };
     use crate::persistence::*;
     use crate::*;
 
@@ -2134,7 +2233,7 @@ mod tests {
             AiRuleConstraints {
                 enabled: true,
                 maximum_classification: DataClassification::Restricted,
-                maximum_tool_maturity: ToolMaturity::ReadOnly,
+                maximum_tool_maturity: ToolMaturity::SupervisedWrite,
                 approval_requirement: AiRuleApprovalRequirement::DescriptorPolicy,
                 allowed_tool_fingerprints: None,
                 allowed_provider_kinds: None,
@@ -4163,8 +4262,29 @@ mod tests {
             AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
                 .expect("test provider limits should validate"),
         );
+        let provider_plan = supervised_tool_plan(&fixture);
+        let rule_resolution = AiAgentRuleResolution::new(
+            test_rules(fixture.scope.clone()),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("supervised rules should resolve");
+        assert!(matches!(
+            plan(&fixture).project_supervised_rule_usage(
+                &rule_resolution,
+                AiRuleRunUsage::default(),
+                false,
+            ),
+            Err(AiError::Forbidden)
+        ));
+        assert!(matches!(
+            provider_plan.project_rule_usage(&rule_resolution, AiRuleRunUsage::default(), false,),
+            Err(AiError::Forbidden)
+        ));
+        provider_plan
+            .project_supervised_rule_usage(&rule_resolution, AiRuleRunUsage::default(), false)
+            .expect("supervised plan should fit exact current rules");
         let provider_result = provider_executor
-            .execute(&fixture.lease, supervised_tool_plan(&fixture))
+            .execute(&fixture.lease, provider_plan)
             .await
             .expect("supervised provider call should normalize");
         let approval_service = OrmAiApprovalService::new(
@@ -4373,6 +4493,302 @@ mod tests {
             )
             .await
             .expect("renewed supervised fence should complete the run");
+    }
+
+    #[tokio::test]
+    async fn approved_wait_reopens_exact_provider_turn_and_checkpoints_mutation_continuation() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted {
+                response_id: Some("supervised-resume-response".to_owned()),
+            },
+            ProviderEvent::ToolCallStarted {
+                call_id: "supervised-resume-call".to_owned(),
+                tool_id: "records.update".to_owned(),
+            },
+            ProviderEvent::ToolArgumentsDelta {
+                call_id: "supervised-resume-call".to_owned(),
+                delta: "{\"recordId\":\"56\"}".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "supervised-resume-call".to_owned(),
+                arguments: json!({"recordId": "56"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("supervised-resume-response".to_owned()),
+            },
+        ])
+        .await;
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let provider_result = provider_executor
+            .execute(&fixture.lease, supervised_tool_plan(&fixture))
+            .await
+            .expect("supervised provider call should normalize");
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_supervised_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("supervised result route should validate");
+        let rule_resolver = Arc::new(TestRuleResolver::default());
+        let checkpoint_service = Arc::new(OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            rule_resolver,
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1024, Duration::minutes(5))
+                .expect("checkpoint limits should validate"),
+        ));
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("loop limits should validate"),
+        );
+        assert!(matches!(
+            guard
+                .observe_provider_turn(&provider_result)
+                .expect("provider turn should bind"),
+            AiAgentLoopTurn::ToolCalls { call_count: 1, .. }
+        ));
+        let (rules, usage) = test_rule_checkpoint(&fixture.scope, &[&provider_result], 0);
+        let checkpointed = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &provider_result,
+                &fixture.scope,
+                "supervised-resume-test",
+                &route,
+                &rules,
+                usage,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("provider turn should be protected before approval parking");
+        let approval_service = OrmAiApprovalService::new(
+            fixture.database.clone(),
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowApprovals),
+            Arc::new(fixture.runtime.tool_catalog().clone()),
+            agql_auth::RecentMfaPolicy {
+                maximum_age: Duration::minutes(5),
+                clock_skew: Duration::seconds(30),
+                allowed_amr: Vec::new(),
+                allowed_acr: Vec::new(),
+                match_mode: agql_auth::AssuranceMatchMode::All,
+            },
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+        );
+        let consequential = Arc::new(OrmAiConsequentialToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            approval_service.clone(),
+            Arc::new(PreviewBuilder),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        ));
+        let context = AiApplicationToolCallContext::new(
+            0,
+            0,
+            fixture.scope.clone(),
+            "supervised-resume-test",
+            provider_result.budget_reservation_id().0.to_string(),
+        )
+        .expect("supervised context should validate");
+        let requested = consequential
+            .request_approval(
+                &checkpointed,
+                &provider_result,
+                context,
+                OffsetDateTime::now_utc() + Duration::minutes(5),
+                false,
+            )
+            .await
+            .expect("supervised call should park for approval");
+        let pending = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval should exist");
+        approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: requested.approval_id().0,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: pending.row_version,
+                },
+            )
+            .await
+            .expect("human approval should persist");
+        let claimed = fixture
+            .run_service
+            .claim_next_approved("supervised-resume-worker")
+            .await
+            .expect("approved-wait claim should stay safe")
+            .expect("approved wait should be claimable");
+        let resume = OrmAiSupervisedResumeService::new(
+            fixture.run_service.clone(),
+            checkpoint_service.clone(),
+            consequential,
+        );
+        let outcome = resume
+            .execute_claimed(&claimed)
+            .await
+            .expect("approved mutation and continuation should complete");
+        let protected = outcome
+            .checkpointed()
+            .expect("continuation should be durably protected");
+        assert_eq!(outcome.tool_call_id(), requested.tool_call_id());
+        assert_eq!(protected.provider_turns(), 1);
+        assert_eq!(protected.total_tool_calls(), 1);
+        assert_eq!(protected.rule_usage().provider_calls(), 1);
+        assert_eq!(protected.rule_usage().steps(), 2);
+        assert_eq!(protected.lease().state(), AiRunState::Running);
+        assert_eq!(fixture.mock.request_count(), 1);
+        let checkpoint =
+            AiRunCheckpointRecord::find_by_id(&fixture.database, &protected.checkpoint_id())
+                .await
+                .expect("supervised checkpoint lookup should succeed")
+                .expect("supervised checkpoint should exist");
+        assert_eq!(
+            checkpoint.checkpoint_kind,
+            "supervised_tool_batch_persisted"
+        );
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &requested.tool_call_id().0)
+            .await
+            .expect("supervised tool lookup should succeed")
+            .expect("supervised tool should remain durable");
+        let swapped_checkpoint_id = Uuid::new_v4();
+        let swapped_state = json!({"test": "write-cannot-be-read-only"});
+        let swapped_hash = coordinator_checkpoint_hash(
+            protected.lease().run_id(),
+            protected.lease().attempt_id(),
+            protected.lease().lease_generation(),
+            swapped_checkpoint_id,
+            "tool_batch_persisted",
+            call.provider_kind
+                .as_deref()
+                .expect("provider kind should bind"),
+            call.provider_model
+                .as_deref()
+                .expect("provider model should bind"),
+            call.provider_response_id.as_deref(),
+            call.budget_reservation_id
+                .expect("provider budget should bind"),
+            &swapped_state,
+        )
+        .expect("test checkpoint hash should build");
+        assert!(matches!(
+            fixture
+                .run_service
+                .append_coordinator_checkpoint(
+                    protected.lease(),
+                    PreparedCoordinatorCheckpoint {
+                        id: swapped_checkpoint_id,
+                        checkpoint_kind: "tool_batch_persisted".to_owned(),
+                        provider_kind: call
+                            .provider_kind
+                            .clone()
+                            .expect("provider kind should bind"),
+                        provider_model: call
+                            .provider_model
+                            .clone()
+                            .expect("provider model should bind"),
+                        provider_response_id: call.provider_response_id.clone(),
+                        budget_reservation_id: call
+                            .budget_reservation_id
+                            .expect("provider budget should bind"),
+                        protected_state: swapped_state,
+                        checkpoint_hash: swapped_hash,
+                        completed_tools: vec![PreparedCoordinatorCheckpointTool {
+                            id: call.id,
+                            provider_call_id: call.provider_call_id.clone(),
+                            tool_id: call.tool_id.clone(),
+                            result_egress_manifest_hash: call
+                                .result_egress_manifest_hash
+                                .clone()
+                                .expect("result manifest should bind"),
+                        }],
+                    },
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(protected.lease()).await,
+            Err(AiError::Conflict)
+        ));
+        let run_id = protected.lease().run_id();
+        fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&run_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &run.id,
+                            run.row_version,
+                            AiRunRecordWhereInput::default(),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should expire the supervised checkpoint fixture");
+        let recovery = fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("supervised checkpoint recovery should close conservatively");
+        assert_eq!(recovery.recovery_required, 1);
+        assert_eq!(recovery.checkpoint_requeued, 0);
+        let run = AiRunRecord::find_by_id(&fixture.database, &run_id.0)
+            .await
+            .expect("recovered run lookup should succeed")
+            .expect("recovered run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
     }
 
     #[tokio::test]

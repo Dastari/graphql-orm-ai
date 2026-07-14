@@ -1364,6 +1364,7 @@ impl OrmAiRunService {
                     let valid_kind = match checkpoint.checkpoint_kind.as_str() {
                         "provider_turn_persisted" => checkpoint.completed_tools.is_empty(),
                         "tool_batch_persisted" => !checkpoint.completed_tools.is_empty(),
+                        "supervised_tool_batch_persisted" => checkpoint.completed_tools.len() == 1,
                         _ => false,
                     };
                     if persisted_state(&current)? != AiRunState::Running
@@ -1402,6 +1403,33 @@ impl OrmAiRunService {
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
+                        let authorization_matches = match checkpoint.checkpoint_kind.as_str() {
+                            "tool_batch_persisted" => {
+                                call.risk == "read_only" && call.approval_id.is_none()
+                            }
+                            "supervised_tool_batch_persisted" => {
+                                let Some(approval_id) = call.approval_id else {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                };
+                                let approval = tx
+                                    .find_by_id::<AiApprovalRecord>(&approval_id)
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                                    .ok_or_else(OrmPublicError::not_found)?;
+                                matches!(
+                                    call.risk.as_str(),
+                                    "low_risk_write" | "non_idempotent_write" | "high_impact"
+                                ) && approval.tool_call_id == call.id
+                                    && approval.session_id == lease.session_id.0
+                                    && approval.state == "consumed"
+                                    && approval.maximum_uses == 1
+                                    && approval.consumed_uses == 1
+                                    && approval.consumed_at.is_some()
+                                    && approval.argument_hash == call.argument_hash
+                                    && approval.tool_fingerprint == call.tool_fingerprint
+                            }
+                            _ => false,
+                        };
                         if call.run_id != lease.run_id.0
                             || call.lease_generation != lease.lease_generation
                             || call.provider_call_id != expected.provider_call_id
@@ -1422,11 +1450,15 @@ impl OrmAiRunService {
                             || step.lease_generation != lease.lease_generation
                             || step.state != call.state
                             || step.finished_at.is_none()
+                            || !authorization_matches
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                     }
-                    if checkpoint.checkpoint_kind == "tool_batch_persisted" {
+                    if matches!(
+                        checkpoint.checkpoint_kind.as_str(),
+                        "tool_batch_persisted" | "supervised_tool_batch_persisted"
+                    ) {
                         let expected_ids = checkpoint
                             .completed_tools
                             .iter()
