@@ -4,6 +4,48 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: fenced approved-wait handoff (crate 0.29.0 to 0.30.0; schema 0.27.0 to 0.28.0)
+
+Apply AI schema module `0.28.0` while workers, approval decisions, backups,
+and restore callbacks are closed. Do not run 0.30.0 code against a module
+still registered as 0.27.0. The generated migration adds no table, column,
+index, constraint, or entity and still owns 39 private records. It advances
+the module because existing approval/run records gain strict durable handoff
+semantics. No consumer table, application SQL, or data copy is introduced.
+
+Workers that resume human-approved actions should call
+`OrmAiRunService::claim_next_approved`. The returned `AiApprovedRunClaim`
+contains private, non-forgeable approval/tool IDs and the sole current lease.
+The transaction preserves the existing attempt and lease generation so the
+staged approval, provider usage, and tool call retain their exact bindings,
+but rotates owner, expiry, heartbeat, and row version. It also changes the
+approval from `approved` to `resume_claimed`, moves the run from
+`WaitingApproval` to `WaitingTool`, and appends a redacted audit fact. Exactly
+one concurrent worker succeeds; the old waiting lease becomes stale.
+Expired `approved` rows encountered in a bounded claim scan are changed to
+`expired` with a redacted audit fact before the scan continues, preventing an
+old block of approvals from permanently starving newer eligible work.
+
+`AiApprovalState` adds the pre-1.0 `ResumeClaimed` variant. Approval views may
+return `resume_claimed`. Consumption accepts either the original direct
+`approved` path or the claimed path, always rehydrates and rebuilds the exact
+binding, then atomically clears the internal run marker while moving to
+`Running`. Revocation accepts both unconsumed states. A claim remains neither
+approval consumption nor resolver/rule/egress authority.
+
+This is the durable queue-handoff foundation, not yet the complete top-level
+supervised coordinator. Consumers must not reconstruct provider continuations
+or replay a mutation after a resumed worker crash. Full protected provider-turn
+adoption will build on this proof. Existing 0.29.0 approvals require no data
+migration; finish or reconcile active waits before upgrading so their state is
+not interpreted across versions.
+
+Restore snapshot producers must include pending, approved, and
+`resume_claimed` unconsumed rows in `pending_approval_count`. The pure restore
+planner now classifies both `WaitingApproval` and `WaitingTool` as
+`RecoveryRequired` regardless of the coarse external-effect flag; a restored
+snapshot cannot use the live same-attempt handoff or infer replay authority.
+
 ## Unreleased: rule-bound coordinator checkpoints (crate 0.28.0 to 0.29.0; schema 0.26.0 to 0.27.0)
 
 Apply AI schema module `0.27.0` while workers, provider calls, backups, and

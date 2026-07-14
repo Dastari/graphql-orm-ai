@@ -5,14 +5,23 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.29.0` and the
-AI schema module to `0.27.0`. No table, column, index, constraint, or entity is
-added; the module version changes because protected coordinator checkpoints
-now require strict v2 hierarchical-rule and cumulative-usage bindings, in
-addition to the strict scope-policy, skill, and UI-intent semantics.
+This development line advances the pre-1.0 crate version to `0.30.0` and the
+AI schema module to `0.28.0`. No table, column, index, constraint, or entity is
+added; the module version changes because approved human waits now have an
+explicit one-owner `resume_claimed` approval state and `WaitingTool` run
+handoff, in addition to protected checkpoint v2 and the strict scope-policy,
+skill, and UI-intent semantics.
 
 ### Added
 
+- `OrmAiRunService::claim_next_approved` and the opaque
+  `AiApprovedRunClaim`. Exactly one worker can atomically adopt an approved,
+  unconsumed wait without creating a second provider attempt: approval state,
+  run state, worker owner, expiry, heartbeat, row-version fence, and a redacted
+  immutable audit fact change together. Current principal, rules, preview,
+  approval consumption, resolver authorization, and egress remain mandatory.
+  Expired approved rows in the bounded scan are atomically expired and audited
+  instead of permanently starving newer eligible handoffs.
 - `OrmAiCurrentRuleResolver` and mandatory rule evidence on each read-only
   coordinator plan. The adapter rehydrates the exact lease principal and
   resolves the complete hierarchy twice; the coordinator re-resolves before
@@ -102,6 +111,14 @@ addition to the strict scope-policy, skill, and UI-intent semantics.
 
 ### Security
 
+- Approved-wait handoff preserves the original attempt/generation bindings but
+  replaces owner and row-version proof, immediately fencing the staging
+  worker. `approved` becomes `resume_claimed` and `WaitingApproval` becomes
+  `WaitingTool`, so concurrent or later workers cannot claim the same action.
+  A crash before consumption remains externally unexecuted but closes through
+  conservative waiting-tool recovery; mutation replay is never inferred.
+  Snapshot restore now sends `WaitingApproval` and `WaitingTool` to
+  `RecoveryRequired` even when the coarse external-effect flag says none.
 - Rule-bound planning rejects provider families/capabilities, disclosure
   classification, retention, BYOK use, tool fingerprints/maturity/approval,
   or cumulative budgets outside the exact resolved intersection. These checks

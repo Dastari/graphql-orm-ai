@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
-use crate::{AiBudgetAmounts, AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup};
+use crate::{
+    AiApprovalId, AiBudgetAmounts, AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup,
+    AiToolCallId,
+};
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
 const MAXIMUM_SAFE_CODE_BYTES: usize = 200;
@@ -276,6 +279,43 @@ pub struct AiRunRecoveryReport {
     pub completed: u32,
 }
 
+/// Fenced worker handoff for one human-approved waiting run.
+///
+/// The handoff preserves the original attempt and generation because the
+/// approval, provider usage, and staged tool call are bound to them. It still
+/// fences the former worker by atomically replacing the lease owner, expiry,
+/// heartbeat, and row-version proof. This value is not approval consumption
+/// and grants no resolver, rule, egress, or tool authority.
+#[derive(Clone, Debug)]
+pub struct AiApprovedRunClaim {
+    approval_id: AiApprovalId,
+    tool_call_id: AiToolCallId,
+    lease: AiRunLease,
+}
+
+impl AiApprovedRunClaim {
+    /// Exact approved, unconsumed one-shot request selected by the handoff.
+    pub const fn approval_id(&self) -> AiApprovalId {
+        self.approval_id
+    }
+
+    /// Exact staged consequential tool selected by the handoff.
+    pub const fn tool_call_id(&self) -> AiToolCallId {
+        self.tool_call_id
+    }
+
+    /// New owner/row-version fence in `WaitingTool` while approval is
+    /// revalidated for consumption.
+    pub fn lease(&self) -> &AiRunLease {
+        &self.lease
+    }
+
+    /// Consumes the claim into its exact IDs and waiting lease.
+    pub fn into_parts(self) -> (AiApprovalId, AiToolCallId, AiRunLease) {
+        (self.approval_id, self.tool_call_id, self.lease)
+    }
+}
+
 /// Durable worker queue implemented only through generated `graphql-orm`
 /// repositories and state-machine transactions.
 #[derive(Clone)]
@@ -518,6 +558,44 @@ impl OrmAiRunService {
         for retry in 0..=self.limits.maximum_transaction_retries {
             match self.claim_once(worker_id.to_owned(), now).await {
                 Ok(result) => return result,
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    /// Claims one approved, unconsumed `WaitingApproval` run for immediate
+    /// fresh validation and one-shot consumption.
+    ///
+    /// This is an in-attempt handoff, not a new provider attempt. The existing
+    /// attempt and generation remain exact while the owner and row-version
+    /// proof rotate atomically, fencing the worker that staged the request.
+    /// Expired approved rows encountered in the bounded window are atomically
+    /// marked expired and audited so they cannot permanently block newer
+    /// eligible approvals.
+    /// The caller must rehydrate current principal/rules, rebuild the preview,
+    /// consume the approval, and execute the ordinary resolver; this claim
+    /// authorizes none of those actions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid worker ID, malformed approval/tool/run
+    /// linkage, an invalid durable lease, lease-time overflow, or persistence
+    /// failure.
+    pub async fn claim_next_approved(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<AiApprovedRunClaim>, AiError> {
+        validate_worker_id(worker_id)?;
+        let now = canonical_second(self.clock.now());
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self.claim_approved_once(worker_id.to_owned(), now).await {
+                Ok(result) => return Ok(result),
                 Err(TransactionError::Retryable(_))
                     if retry < self.limits.maximum_transaction_retries =>
                 {
@@ -2243,7 +2321,10 @@ impl OrmAiRunService {
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
-                    if persisted_state(&current)? != AiRunState::WaitingApproval {
+                    if !matches!(
+                        persisted_state(&current)?,
+                        AiRunState::WaitingApproval | AiRunState::WaitingTool
+                    ) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
                     let session = tx
@@ -2281,7 +2362,7 @@ impl OrmAiRunService {
                     if approval.tool_call_id != call.id
                         || approval.session_id != session.id
                         || approval.row_version != consumption.expected_approval_version
-                        || approval.state != "approved"
+                        || !matches!(approval.state.as_str(), "approved" | "resume_claimed")
                         || approval.binding_hash != consumption.binding_hash
                         || approval.maximum_uses != 1
                         || approval.consumed_uses != 0
@@ -2350,11 +2431,12 @@ impl OrmAiRunService {
                         .compare_and_swap::<AiRunRecord>(
                             &current.id,
                             current.row_version,
-                            exact_state(AiRunState::WaitingApproval.as_str()),
+                            exact_state(&current.state),
                             UpdateAiRunRecordInput {
                                 state: Some(AiRunState::Running.as_str().to_owned()),
                                 lease_expires_at: Some(Some(expiry.unix_timestamp())),
                                 lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                error_code: Some(None),
                                 ..Default::default()
                             },
                         )
@@ -2645,6 +2727,174 @@ impl OrmAiRunService {
                             Err(OrmPublicError::new(OrmErrorCode::Conflict))
                         }
                     }
+                })
+            })
+            .await
+    }
+
+    async fn claim_approved_once(
+        &self,
+        worker_id: String,
+        now: OffsetDateTime,
+    ) -> Result<Option<AiApprovedRunClaim>, TransactionError> {
+        let database = self.database.clone();
+        let limits = self.limits;
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let mut approvals = tx
+                        .query::<AiApprovalRecord>()
+                        .filter(AiApprovalRecordWhereInput {
+                            state: Some(StringFilter {
+                                eq: Some("approved".to_owned()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(limits.maximum_candidate_scan as i64)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    approvals.sort_by_key(|approval| (approval.created_at, approval.id));
+
+                    for approval in approvals {
+                        if approval.expires_at <= now.unix_timestamp() {
+                            let expired = tx
+                                .compare_and_swap::<AiApprovalRecord>(
+                                    &approval.id,
+                                    approval.row_version,
+                                    AiApprovalRecordWhereInput {
+                                        state: Some(StringFilter {
+                                            eq: Some("approved".to_owned()),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    UpdateAiApprovalRecordInput {
+                                        state: Some("expired".to_owned()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                                actor_principal_kind: "ai_worker".to_owned(),
+                                actor_subject: worker_id.clone(),
+                                action: "ai.approval.expired".to_owned(),
+                                resource_kind: "ai_approval".to_owned(),
+                                resource_reference: approval.id.to_string(),
+                                outcome: "denied".to_owned(),
+                                reason_code: "approval_expired_before_handoff".to_owned(),
+                                correlation_id: approval.id.to_string(),
+                                causation_id: Some(approval.tool_call_id.to_string()),
+                                policy_version: Some(approval.policy_version),
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            continue;
+                        }
+                        if approval.maximum_uses != 1
+                            || approval.consumed_uses != 0
+                            || approval.consumed_at.is_some()
+                            || approval.decided_at.is_none()
+                            || approval.approver_subject.is_none()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let call = tx
+                            .find_by_id::<AiToolCallRecord>(&approval.tool_call_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let run = tx
+                            .find_by_id::<AiRunRecord>(&call.run_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if approval.session_id != run.session_id
+                            || call.approval_id != Some(approval.id)
+                            || call.state != "waiting_approval"
+                            || call.completed_at.is_some()
+                            || call.protected_result.is_some()
+                            || call.risk == "read_only"
+                            || persisted_state(&run)? != AiRunState::WaitingApproval
+                            || run.attempt_id.is_none()
+                            || run.lease_generation <= 0
+                            || call.lease_generation != run.lease_generation
+                            || run
+                                .lease_owner
+                                .as_deref()
+                                .is_none_or(|owner| validate_worker_id(owner).is_err())
+                            || run.lease_expires_at.is_none()
+                            || run.error_code.is_some()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let expiry = now
+                            .checked_add(limits.lease_ttl)
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        let approval_update = tx
+                            .compare_and_swap::<AiApprovalRecord>(
+                                &approval.id,
+                                approval.row_version,
+                                AiApprovalRecordWhereInput::default(),
+                                UpdateAiApprovalRecordInput {
+                                    state: Some("resume_claimed".to_owned()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(approval_update, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let outcome = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &run.id,
+                                run.row_version,
+                                exact_state(AiRunState::WaitingApproval.as_str()),
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::WaitingTool.as_str().to_owned()),
+                                    lease_owner: Some(Some(worker_id.clone())),
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    error_code: Some(Some("approval_resume_claimed".to_owned())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated = match outcome {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                            actor_principal_kind: "ai_worker".to_owned(),
+                            actor_subject: worker_id.clone(),
+                            action: "ai.run.approval_resume_claimed".to_owned(),
+                            resource_kind: "ai_run".to_owned(),
+                            resource_reference: run.id.to_string(),
+                            outcome: "allowed".to_owned(),
+                            reason_code: "approved_wait_handoff".to_owned(),
+                            correlation_id: approval.id.to_string(),
+                            causation_id: Some(call.id.to_string()),
+                            policy_version: Some(approval.policy_version),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                        return Ok(Some(AiApprovedRunClaim {
+                            approval_id: AiApprovalId(approval.id),
+                            tool_call_id: AiToolCallId(call.id),
+                            lease: lease_from_record(&updated)?,
+                        }));
+                    }
+                    Ok(None)
                 })
             })
             .await

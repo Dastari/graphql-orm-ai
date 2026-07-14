@@ -606,8 +606,10 @@ impl OrmAiApprovalService {
                 &record.protected_action_preview,
             )
             .await?;
-        let state = if matches!(record.state.as_str(), "pending" | "approved")
-            && record.expires_at <= self.clock.now().unix_timestamp()
+        let state = if matches!(
+            record.state.as_str(),
+            "pending" | "approved" | "resume_claimed"
+        ) && record.expires_at <= self.clock.now().unix_timestamp()
         {
             "expired".to_owned()
         } else {
@@ -635,7 +637,7 @@ impl OrmAiApprovalService {
         id: Uuid,
         expected_version: i64,
         action: AiApprovalAction,
-        expected_state: &'static str,
+        expected_states: &'static [&'static str],
         next_state: &'static str,
     ) -> Result<AiApprovalView, AiError> {
         if expected_version < 0 {
@@ -654,7 +656,7 @@ impl OrmAiApprovalService {
         }
         let now = canonical_second(self.clock.now());
         if current.row_version != expected_version
-            || current.state != expected_state
+            || !expected_states.contains(&current.state.as_str())
             || current.expires_at <= now.unix_timestamp()
         {
             return Err(AiError::Conflict);
@@ -677,7 +679,7 @@ impl OrmAiApprovalService {
                 }),
             )
             .await?;
-        let record_decision = expected_state == "pending";
+        let record_decision = expected_states.contains(&"pending");
         let event_type = if next_state == "revoked" {
             "approval_revoked"
         } else {
@@ -693,7 +695,7 @@ impl OrmAiApprovalService {
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
                     if current.row_version != expected_version
-                        || current.state != expected_state
+                        || !expected_states.contains(&current.state.as_str())
                         || current.expires_at <= now.unix_timestamp()
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -851,7 +853,7 @@ impl AiApprovalService for OrmAiApprovalService {
             input.id,
             input.expected_version,
             AiApprovalAction::Decide,
-            "pending",
+            &["pending"],
             next_state,
         )
         .await
@@ -867,7 +869,7 @@ impl AiApprovalService for OrmAiApprovalService {
             input.id,
             input.expected_version,
             AiApprovalAction::Revoke,
-            "approved",
+            &["approved", "resume_claimed"],
             "revoked",
         )
         .await
@@ -950,6 +952,7 @@ fn parse_state(state: &str) -> Result<AiApprovalState, AiError> {
     match state {
         "pending" => Ok(AiApprovalState::Pending),
         "approved" => Ok(AiApprovalState::Approved),
+        "resume_claimed" => Ok(AiApprovalState::ResumeClaimed),
         "denied" => Ok(AiApprovalState::Denied),
         "expired" => Ok(AiApprovalState::Expired),
         "revoked" => Ok(AiApprovalState::Revoked),
@@ -1107,6 +1110,7 @@ mod tests {
         database: Database<SqliteBackend>,
         run_service: OrmAiRunService,
         approval_service: OrmAiApprovalService,
+        clock: Arc<FixedClock>,
         principal: AuthPrincipal,
         scope: AiScope,
         now: OffsetDateTime,
@@ -1228,12 +1232,13 @@ mod tests {
             },
             Arc::new(Protection(scope.clone())),
             Arc::new(crate::DatabaseManagedContentProtector),
-            clock,
+            clock.clone(),
         );
         Fixture {
             database,
             run_service,
             approval_service,
+            clock,
             principal,
             scope,
             now,
@@ -1306,8 +1311,8 @@ mod tests {
                 &lease,
                 PreparedToolCallStart {
                     id: tool_call_id.0,
-                    provider_call_key: "approval-provider-call".to_owned(),
-                    provider_call_id: "provider-call-1".to_owned(),
+                    provider_call_key: format!("approval-provider-call-{}", tool_call_id.0),
+                    provider_call_id: format!("provider-call-{}", tool_call_id.0),
                     provider_kind: "mock".to_owned(),
                     provider_model: "approval-test".to_owned(),
                     provider_response_id: Some("approval-response-1".to_owned()),
@@ -1374,6 +1379,40 @@ mod tests {
     #[tokio::test]
     async fn approval_is_preview_bound_recent_mfa_gated_and_consumed_once() {
         let fixture = fixture().await;
+        let (stale_running, stale_tool_call_id) = seed_running_tool(&fixture).await;
+        let (stale_binding, stale_preview) =
+            approval_binding(&fixture, &stale_running, stale_tool_call_id);
+        let stale_requested = fixture
+            .approval_service
+            .request_approval(
+                &stale_running,
+                stale_binding,
+                stale_preview,
+                fixture.now + Duration::seconds(1),
+                true,
+            )
+            .await
+            .expect("stale approval request should park its run");
+        let stale_view = fixture
+            .approval_service
+            .approval(&fixture.principal, stale_requested.approval_id())
+            .await
+            .expect("stale approval read should succeed")
+            .expect("stale approval should remain visible");
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: stale_view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: stale_view.row_version,
+                },
+            )
+            .await
+            .expect("stale approval should initially be approved");
+        fixture.clock.advance_seconds(2);
+
         let (running, tool_call_id) = seed_running_tool(&fixture).await;
         let (binding, preview) = approval_binding(&fixture, &running, tool_call_id);
         let requested = fixture
@@ -1417,14 +1456,97 @@ mod tests {
             .expect("recent-MFA approval should succeed");
         assert_eq!(approved.state, "approved");
 
+        let (first_claim, second_claim) = tokio::join!(
+            fixture
+                .run_service
+                .claim_next_approved("approval-resume-worker-a"),
+            fixture
+                .run_service
+                .claim_next_approved("approval-resume-worker-b")
+        );
+        let mut claims = Vec::new();
+        for claim in [first_claim, second_claim] {
+            if let Some(claim) = claim.expect("concurrent approved-wait scan should stay safe") {
+                claims.push(claim);
+            }
+        }
+        assert_eq!(claims.len(), 1);
+        let resumed = claims.pop().expect("one worker should own the handoff");
+        assert_eq!(resumed.approval_id(), requested.approval_id());
+        assert_eq!(resumed.tool_call_id(), tool_call_id);
+        assert_eq!(resumed.lease().attempt_id(), requested.lease().attempt_id());
+        assert_eq!(
+            resumed.lease().lease_generation(),
+            requested.lease().lease_generation()
+        );
+        assert!(matches!(
+            resumed.lease().worker_id(),
+            "approval-resume-worker-a" | "approval-resume-worker-b"
+        ));
+        assert_eq!(resumed.lease().state(), crate::AiRunState::WaitingTool);
+        let claimed_approval =
+            AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+                .await
+                .expect("claimed approval lookup should succeed")
+                .expect("claimed approval should remain durable");
+        assert_eq!(claimed_approval.state, "resume_claimed");
+        let handoff_audits = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAuditEventRecord>()
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("handoff audit lookup should succeed");
+        assert_eq!(
+            handoff_audits
+                .iter()
+                .filter(|audit| audit.action == "ai.run.approval_resume_claimed")
+                .count(),
+            1
+        );
+        let expired =
+            AiApprovalRecord::find_by_id(&fixture.database, &stale_requested.approval_id().0)
+                .await
+                .expect("expired approval lookup should succeed")
+                .expect("expired approval should remain durable");
+        assert_eq!(expired.state, "expired");
+        assert_eq!(
+            handoff_audits
+                .iter()
+                .filter(|audit| audit.action == "ai.approval.expired")
+                .count(),
+            1
+        );
+        assert!(
+            fixture
+                .run_service
+                .claim_next_approved("approval-racing-worker")
+                .await
+                .expect("a second approved-wait scan should stay safe")
+                .is_none()
+        );
+        assert!(matches!(
+            fixture
+                .approval_service
+                .consume_approval(
+                    requested.lease(),
+                    requested.approval_id(),
+                    &binding,
+                    &preview,
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+
         let consumed = fixture
             .approval_service
-            .consume_approval(
-                requested.lease(),
-                requested.approval_id(),
-                &binding,
-                &preview,
-            )
+            .consume_approval(resumed.lease(), requested.approval_id(), &binding, &preview)
             .await
             .expect("exact approved binding should consume once");
         assert_eq!(consumed.approval().approval_id(), requested.approval_id());

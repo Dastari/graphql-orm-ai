@@ -1313,7 +1313,7 @@ pub(crate) struct AiApprovalRecord {
     pub protected_action_preview: serde_json::Value,
     /// Canonical action-preview hash.
     pub action_preview_hash: String,
-    /// Pending/approved/denied/expired/revoked state.
+    /// Pending/approved/resume-claimed/denied/expired/revoked/consumed state.
     #[filterable(type = "string")]
     pub state: String,
     /// Recent-MFA requirement.
@@ -1794,7 +1794,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.27.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.28.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

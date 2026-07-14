@@ -16,7 +16,8 @@ pub enum AiRunState {
     Running,
     /// Waiting for an argument-bound approval.
     WaitingApproval,
-    /// Waiting for an application/internal tool result.
+    /// Waiting for an application/internal tool result or for one claimed
+    /// approval to be freshly consumed.
     WaitingTool,
     /// Waiting for the principal to reauthenticate.
     WaitingReauth,
@@ -92,6 +93,7 @@ impl AiRunState {
             Self::WaitingApproval => matches!(
                 next,
                 Self::Running
+                    | Self::WaitingTool
                     | Self::WaitingReauth
                     | Self::Cancelled
                     | Self::Failed

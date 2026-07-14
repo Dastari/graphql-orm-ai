@@ -159,6 +159,9 @@ pub enum AiApprovalState {
     Pending,
     /// Approved for one exact future consumption.
     Approved,
+    /// Claimed by one fenced worker for immediate fresh validation and
+    /// one-shot consumption; the action has not executed.
+    ResumeClaimed,
     /// Explicitly denied.
     Denied,
     /// Binding or time window is no longer current.
@@ -196,14 +199,16 @@ impl AiApprovalGrant {
     /// # Errors
     ///
     /// Returns [`AiError::Forbidden`] for a stale, expired, mismatched,
-    /// or non-approved grant.
+    /// or non-consumable grant state.
     pub fn authorize(
         &self,
         current_binding: &AiApprovalBinding,
         now: OffsetDateTime,
     ) -> Result<AuthorizedAiApproval, AiError> {
-        if self.state != AiApprovalState::Approved
-            || now < self.approved_at
+        if !matches!(
+            self.state,
+            AiApprovalState::Approved | AiApprovalState::ResumeClaimed
+        ) || now < self.approved_at
             || now >= self.expires_at
             || self.binding_hash != current_binding.stable_hash()
         {
@@ -312,7 +317,7 @@ pub struct AiApprovalView {
     pub session_id: Uuid,
     /// Server-generated canonical action preview.
     pub canonical_preview: async_graphql::Json<serde_json::Value>,
-    /// Pending/approved/denied/expired/revoked/consumed state.
+    /// Pending/approved/`resume_claimed`/denied/expired/revoked/consumed state.
     pub state: String,
     /// Whether approval required recent MFA.
     pub recent_mfa_required: bool,

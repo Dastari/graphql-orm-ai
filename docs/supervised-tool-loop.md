@@ -82,6 +82,21 @@ service:
    authorizes and immutably audits the exact provider disclosure, then protects
    and fences the result/event/step.
 
+For a different worker or process, use
+`OrmAiRunService::claim_next_approved`. One state-machine transaction changes
+`approved` to `resume_claimed`, moves `WaitingApproval` to `WaitingTool`,
+replaces the owner/expiry/heartbeat/row-version proof, and appends a redacted
+audit fact. The original attempt and generation remain unchanged because the
+staged approval, provider budget, and tool rows bind them; replacing owner and
+row version immediately fences the staging worker. Two concurrent workers
+cannot both receive an `AiApprovedRunClaim`. The returned claim is still only
+queue ownership: all steps above remain mandatory. Snapshot restore never
+uses this live handoff; restored `WaitingApproval`/`WaitingTool` runs require
+reconciliation even if no external effect was recorded.
+Expired approved rows in a bounded handoff window are atomically expired and
+audited before scanning continues, so old waits cannot permanently starve a
+newer eligible handoff.
+
 `AiRuntime::execute_tool` rejects all approval-required descriptors, so callers
 cannot bypass this lifecycle through the ordinary tool entry point.
 
@@ -100,9 +115,10 @@ the persisted outcome. A recovery-required outcome has no continuing lease.
 
 ## Remaining orchestration gate
 
-The generic service is suitable for a host-owned supervised workflow, but the
-crate does not yet provide a top-level coordinator that heartbeats a long human
-approval wait and resumes an exact provider continuation after a process
-restart. The `AiReadOnlyAgentCoordinator` remains read-only. Deployments must
-not route supervised descriptors through it or infer replay authority from an
-old approval/tool row.
+The generic service and restart-safe approved-wait claim are suitable for a
+host-owned supervised workflow, but the crate does not yet provide the
+top-level coordinator that reopens the protected provider turn and resumes its
+exact continuation after the mutation result. The `AiReadOnlyAgentCoordinator`
+remains read-only. Deployments must not route supervised descriptors through
+it, reconstruct provider state from an approval/tool row, or infer mutation
+replay authority after a resumed-worker crash.

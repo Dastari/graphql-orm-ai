@@ -33,6 +33,7 @@ fn restore_never_replays_uncertain_external_effect() {
     let reconciler = AiRestoreReconciler::new(fingerprint);
     let uncertain_run_id = AiRunId::new();
     let safe_run_id = AiRunId::new();
+    let approval_wait_run_id = AiRunId::new();
     let plan = reconciler.plan(&AiRestoreSnapshotFacts {
         module_fingerprint: fingerprint.to_owned(),
         missing_key_versions: vec![],
@@ -50,6 +51,13 @@ fn restore_never_replays_uncertain_external_effect() {
                 external_effect: AiExternalEffectState::ProvenIdempotent,
                 has_provider_continuation: false,
                 has_provider_file: true,
+            },
+            AiRestoredRun {
+                run_id: approval_wait_run_id,
+                state: AiRunState::WaitingApproval,
+                external_effect: AiExternalEffectState::None,
+                has_provider_continuation: true,
+                has_provider_file: false,
             },
         ],
         pending_approval_count: 2,
@@ -89,6 +97,16 @@ fn restore_never_replays_uncertain_external_effect() {
         AiRestoredRunDisposition::RequeueWithNewAttempt
     );
     assert!(safe.reverify_provider_file);
+    let approval_wait = plan
+        .run_actions
+        .iter()
+        .find(|action| action.run_id == approval_wait_run_id)
+        .expect("approval wait action should exist");
+    assert_eq!(
+        approval_wait.disposition,
+        AiRestoredRunDisposition::RecoveryRequired
+    );
+    assert!(approval_wait.reverify_provider_continuation);
     assert_eq!(plan.approvals_to_revalidate, 2);
     assert_eq!(plan.consents_to_revalidate, 3);
     assert_eq!(plan.fatal_issue_count(), 0);

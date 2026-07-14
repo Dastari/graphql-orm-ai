@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.27.0`) and 39 private records
+- AI schema-module identity (currently version `0.28.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -292,6 +292,11 @@ production-ready behavior.
   exact fingerprint and cumulative provider/step/time/token/cost/tool/image
   usage. Adoption rejects changed lineages, exceeded budgets, and legacy
   checkpoints without weakening ordinary budget/egress/resolver authority.
+- Restart-safe approved-wait worker handoff through
+  `OrmAiRunService::claim_next_approved`: approval/run state and the current
+  owner/row-version fence rotate atomically without changing the staged
+  attempt/generation. Concurrent claims are tested and the claim grants no
+  approval consumption or resolver authority.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -358,8 +363,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add an approval-wait coordinator that preserves the same rule/fence/current-
-   principal guarantees without keeping a worker lease alive indefinitely.
+2. Build protected supervised provider-turn adoption and the top-level
+   approval-wait coordinator on the one-owner claim, preserving the same
+   rule/fence/current-principal guarantees through exact continuation.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

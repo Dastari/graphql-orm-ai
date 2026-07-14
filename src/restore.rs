@@ -43,7 +43,8 @@ pub struct AiRestoreSnapshotFacts {
     pub missing_key_versions: Vec<String>,
     /// Runs requiring reconciliation.
     pub runs: Vec<AiRestoredRun>,
-    /// Number of pending approvals to expire/revalidate.
+    /// Number of pending, approved, or resume-claimed unconsumed approvals to
+    /// expire/revalidate.
     pub pending_approval_count: u64,
     /// Number of pending egress consents to expire/revalidate.
     pub pending_egress_consent_count: u64,
@@ -301,6 +302,12 @@ fn restored_run_disposition(run: &AiRestoredRun) -> AiRestoredRunDisposition {
         return AiRestoredRunDisposition::PreserveTerminal;
     }
     if run.state == AiRunState::RecoveryRequired {
+        return AiRestoredRunDisposition::RecoveryRequired;
+    }
+    if matches!(
+        run.state,
+        AiRunState::WaitingApproval | AiRunState::WaitingTool
+    ) {
         return AiRestoredRunDisposition::RecoveryRequired;
     }
     match run.external_effect {

@@ -210,8 +210,8 @@ pub mod prelude {
     pub use crate::{
         AiAdoptedReadOnlyToolBatch, AiAgentCheckpointAdopter, AiAgentCheckpointWriter,
         AiAgentRuleResolver, AiApplicationToolCallLimits, AiApprovalServiceLimits,
-        AiAttachmentCleanupLimits, AiAttachmentServiceLimits, AiBudgetServiceLimits,
-        AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
+        AiApprovedRunClaim, AiAttachmentCleanupLimits, AiAttachmentServiceLimits,
+        AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder, AiConsequentialToolCallOutcome,
         AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits, AiInboxPruningLimits,
         AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
         AiProposalServiceLimits, AiProviderAttachmentResolutionLimits, AiProviderCallExecutor,

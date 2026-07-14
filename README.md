@@ -95,6 +95,11 @@ below are still being implemented.
   are CAS-bound and optional-recent-MFA-gated; exact consumption rehydrates the
   original actor, advances the run fence, and still grants no resolver
   authority.
+- A one-owner approved-wait handoff for restart-safe workers. The original
+  attempt/generation remains bound to the staged action while approval/run
+  state, worker owner, expiry, row-version fence, and redacted audit rotate
+  atomically; concurrent resumers cannot receive the same action. Protected
+  full-turn supervised continuation remains a separate unfinished gate.
 - A supervised application-mutation service that accepts only explicitly
   enabled exact `SupervisedWrite` descriptors, builds current server-owned
   previews, consumes approval once, recomputes host policy before ordinary
@@ -280,7 +285,9 @@ authoritative token settlement,
 exact approval binding, proposal schemas, fenced state transitions, and restore
 planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
-implemented through authenticated, optionally PascalCase GraphQL roots.
+implemented through authenticated, optionally PascalCase GraphQL roots. An
+approved wait can be handed to exactly one new worker under a rotated
+owner/row-version fence without changing its action-bound attempt/generation.
 Protected immutable skill publication/resolution and exact schema-fingerprinted
 logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.

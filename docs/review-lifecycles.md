@@ -64,10 +64,14 @@ resource state. Model-authored prose is not a preview. The matching
 `OrmAiApprovalService::request_approval` validates and protects that envelope,
 then atomically binds the approval to the existing consequential tool call,
 parks the current run in `WaitingApproval`, appends a protected event, and
-returns a renewed waiting lease. The caller must keep that lease current. If it
-expires, ordinary recovery classifies the waiting attempt as
-`RecoveryRequired`; the runtime does not reconstruct authority from an old
-approval row.
+returns a renewed waiting lease. The staging worker must stop after parking; it
+does not heartbeat through a human wait. A different process can use
+`OrmAiRunService::claim_next_approved` after approval. That atomic handoff
+changes the approval to `resume_claimed`, moves the run to `WaitingTool`, and
+rotates owner/row-version fencing without changing the action-bound
+attempt/generation. It grants no consumption, resolver, rule, or egress
+authority. An unconsumed resumed lease that expires is conservatively
+`RecoveryRequired`; the runtime never reconstructs mutation replay authority.
 
 ## Human decision
 
