@@ -24,6 +24,11 @@ has a versioned OpenAI-compatible capability and retention meaning.
   structured-output, and retained-continuation capabilities; other provider
   kinds reject that nested contract. The redacted view can construct the safe
   transport configuration only when the profile is enabled and complete.
+- A PostgreSQL parity integration test that creates and owns its disposable
+  Docker container, random credentials, unique database, and loopback port.
+  It applies the generated AI module and exercises atomic session/message/run,
+  keyset, and stale-fence behavior entirely through `graphql-orm`, then verifies
+  the ownership label before cleanup. CI never accepts a database URL.
 
 - A feature-gated native xAI/Grok Responses/SSE adapter fixed to the official
   HTTPS endpoint. It resolves Bearer credentials immediately before transport,

@@ -4,6 +4,20 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: owned PostgreSQL parity harness (crate 0.25.0; schema 0.23.0)
+
+CI now runs the PostgreSQL parity test through a container created by the test
+itself on the local Docker socket. The harness generates its own user,
+password, database, container identity, ownership label, and Docker-assigned
+IPv4 loopback port. It never reads or accepts a database URL and verifies its
+ownership label before removing the container. Local runs skip only when the
+local Docker socket is unavailable; CI fails closed instead.
+
+This changes test and release-gate behavior only. It adds no public Rust API,
+GraphQL SDL, entity, index, constraint, persistent semantic, authorization,
+backup, or restore change. `AI_SCHEMA_MODULE_VERSION` remains `0.23.0`; no
+database or consumer-data migration is required.
+
 ## Unreleased: profiled OpenAI-compatible adapter (crate 0.24.0 to 0.25.0; schema 0.22.0 to 0.23.0)
 
 Apply AI schema module `0.23.0` while configuration/provider workers, backups,

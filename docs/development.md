@@ -25,6 +25,19 @@ cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql
 ```
 
+Run PostgreSQL behavioral parity only through the self-owning harness:
+
+```bash
+cargo test --no-default-features --features postgres \
+  --test postgres_parity -- --test-threads=1
+```
+
+The test forces the local Docker socket, generates a container identity,
+ownership label, credentials, database, and loopback port, and accepts no URL
+from the environment or command line. It verifies the label again before
+cleanup. CI treats an unavailable Docker socket as failure; a local developer
+run reports a skip.
+
 Do not run Cargo `--all-features`: the persistence backends are intentionally
 mutually exclusive. Provider feature matrices must select exactly one backend.
 
@@ -33,7 +46,8 @@ mutually exclusive. Provider feature matrices must select exactly one backend.
 Default tests use in-memory SQLite. PostgreSQL and MSSQL integration tests are
 permitted only through a harness that creates and owns a disposable Docker
 container, generated credentials, unique database, and cleanup. A generic
-database URL is never accepted. No current check needs a PostgreSQL server.
+database URL is never accepted. The PostgreSQL parity test is the concrete
+implementation of that rule; no MSSQL behavioral harness exists yet.
 
 ## Rustdoc
 

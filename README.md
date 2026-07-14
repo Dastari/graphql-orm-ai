@@ -168,7 +168,7 @@ Exactly one persistence backend should be selected:
 | Feature | Default | Status |
 | --- | --- | --- |
 | `sqlite` | yes | ORM persistence and in-memory automated tests |
-| `postgres` | no | ORM persistence, compile-checked without a database |
+| `postgres` | no | ORM persistence plus test-owned disposable-Docker parity |
 | `mssql` | no | Schema/compile support pending ORM write parity |
 | `provider-openai` | no | Native OpenAI Responses/SSE adapter |
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
@@ -266,9 +266,8 @@ per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,
-generated resolver disclosure metadata,
-production OS/container local-harness launchers/ACP framing, and Docker-owned
-PostgreSQL parity testing. Details live in
+generated resolver disclosure metadata, and production OS/container local-
+harness launchers/ACP framing. Details live in
 [implementation status](docs/implementation-status.md).
 
 See [session retention](docs/session-retention.md) for the bounded deletion and
@@ -322,6 +321,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-anthrop
 cargo test --features graphql-case-pascal --test graphql_naming
 cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql
+# Creates and cleans only its own labeled container; never accepts a DB URL.
+cargo test --no-default-features --features postgres --test postgres_parity -- --test-threads=1
 ```
 
 The ignored live OpenAI smoke test sends only synthetic text and is never part

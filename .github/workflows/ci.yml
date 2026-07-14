@@ -38,6 +38,32 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc --features graphql-case-pascal --no-deps
 
+  postgres-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: graphql-orm-ai
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: graphql-orm-ai
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/graphql-orm
+          ref: 1e145a124e9e3f1b0ffd70165289170b627ecb73
+          path: graphql-orm
+      - uses: actions/checkout@v5
+        with:
+          repository: Dastari/agql-auth
+          ref: c92dcb441237bbe308499b26525945f60ffa394a
+          path: agql-auth
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ORM parity against a test-owned disposable PostgreSQL container
+        run: cargo test --no-default-features --features postgres --test postgres_parity -- --test-threads=1
+
   release-policy:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

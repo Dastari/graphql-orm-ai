@@ -25,6 +25,11 @@ production-ready behavior.
 - Private repository generation for SQLite/PostgreSQL AI records without
   composing or exporting generic internal CRUD roots; MSSQL remains
   schema-only until write parity exists.
+- Test-owned PostgreSQL 17 parity through a random, ownership-labeled
+  disposable Docker container and unique database. The harness accepts no
+  database URL, binds only a Docker-assigned IPv4 loopback port, applies the
+  generated module, exercises atomic session/message/run and keyset behavior,
+  proves stale-fence rejection, and verifies ownership again before cleanup.
 - Provider-neutral capability/request/event/stream interfaces with validated
   function schemas and separately authorized built-in tools.
 - Deterministic mock provider and native feature-gated OpenAI Responses/SSE
@@ -268,8 +273,9 @@ production-ready behavior.
 
 ## Not yet production-ready
 
-- Applied host migrations and production PostgreSQL parity testing. PostgreSQL
-  remains compile-checked only; no local or production PostgreSQL was touched.
+- Consumer-owned migration validation and production deployment acceptance.
+  The crate's disposable PostgreSQL parity harness is implemented, but it does
+  not substitute for a consumer's schema composition/restore rehearsal.
 - Complete deleting-session, raw-provider/tool payload, audit, attachment/blob,
   and provider-persistent-file retention workflows. Principal-inbox pruning
   and bounded per-session provisional-delta/message-content pruning are
@@ -324,10 +330,10 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add Docker-owned PostgreSQL parity tests only through a harness that proves
-   it created and owns the exact disposable database handle.
-2. Continue the bounded deleting-session/raw-payload/audit retention workers
+1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
+2. Add skill/rule publication and typed UI-intent contracts without allowing
+   untrusted instructions to widen tool, egress, or budget policy.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image
@@ -348,6 +354,8 @@ intentional.
   `graphql-case-pascal`.
 - PascalCase SDL contract test passed with no camelCase aliases.
 - `cargo check --no-default-features --features postgres`: passed, compile-only.
+- Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
+  ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
