@@ -13,6 +13,7 @@ use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, TransactionError, TransactionMode,
 };
 use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
 use uuid::Uuid;
@@ -22,10 +23,10 @@ use crate::{
     AiBudgetAmounts, AiBudgetPolicyView, AiConfigurationAccessPolicy, AiConfigurationAction,
     AiConfigurationService, AiContentProtectionMode, AiContentProtectionPolicy,
     AiContentProtectionPolicyResolver, AiContentProtectionPolicyView, AiError,
-    AiProviderEndpointPolicy, AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView,
-    AiScope, AiSecretStore, RemoveAiProviderCredentialInput, SecretRef,
-    SetAiContentProtectionPolicyInput, SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput,
-    UpsertAiProviderProfileInput,
+    AiOpenAiCompatibleProfileInput, AiOpenAiCompatibleProfileView, AiProviderEndpointPolicy,
+    AiProviderKindInput, AiProviderProfileView, AiRetentionPolicyView, AiScope, AiSecretStore,
+    RemoveAiProviderCredentialInput, SecretRef, SetAiContentProtectionPolicyInput,
+    SetAiRetentionPolicyInput, UpsertAiBudgetPolicyInput, UpsertAiProviderProfileInput,
 };
 
 /// Deployment hard bounds for GraphQL-managed budget policies.
@@ -211,7 +212,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                 "provider profile scope exceeds the bounded limit".to_owned(),
             ));
         }
-        Ok(rows.iter().map(provider_view).collect())
+        rows.iter().map(provider_view).collect()
     }
 
     async fn content_protection_policy(
@@ -313,6 +314,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
             input.base_url,
             self.endpoint_policy.as_ref(),
         )?;
+        let data_policy = provider_data_policy(input.provider_kind, input.openai_compatible)?;
         let actor_kind = principal_kind(principal);
         let actor_subject = principal.subject().to_owned();
         let scope_hash = scope_key(&scope);
@@ -335,7 +337,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 base_url,
                                 credential_reference: None,
                                 enabled: input.enabled,
-                                data_policy: json!({}),
+                                data_policy,
                                 limits: json!({}),
                             })
                             .await
@@ -363,6 +365,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                         provider_kind: Some(provider_kind),
                                         display_name: Some(display_name),
                                         base_url: Some(base_url),
+                                        data_policy: Some(data_policy),
                                         enabled: Some(input.enabled),
                                         ..Default::default()
                                     },
@@ -400,7 +403,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
             })
             .await
             .map_err(map_transaction)?;
-        Ok(provider_view(&profile))
+        provider_view(&profile)
     }
 
     async fn set_provider_credential(
@@ -519,7 +522,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
         if let Some(previous) = previous_reference.as_ref() {
             self.complete_cleanup(cleanup_id, previous).await;
         }
-        Ok(provider_view(&profile))
+        provider_view(&profile)
     }
 
     async fn remove_provider_credential(
@@ -613,7 +616,7 @@ impl AiConfigurationService for OrmAiConfigurationService {
         if let Some(previous) = previous_reference.as_ref() {
             self.complete_cleanup(cleanup_id, previous).await;
         }
-        Ok(provider_view(&profile))
+        provider_view(&profile)
     }
 
     async fn set_content_protection_policy(
@@ -1132,8 +1135,112 @@ async fn insert_audit(
     Ok(())
 }
 
-fn provider_view(record: &AiProviderProfileRecord) -> AiProviderProfileView {
-    AiProviderProfileView {
+const OPENAI_COMPATIBLE_DATA_POLICY_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredProviderDataPolicy {
+    openai_compatible: StoredOpenAiCompatiblePolicy,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredOpenAiCompatiblePolicy {
+    version: u32,
+    retention: String,
+    custom_tools: bool,
+    parallel_tool_calls: bool,
+    structured_output: bool,
+    provider_retained_continuation: bool,
+}
+
+fn provider_data_policy(
+    provider_kind: AiProviderKindInput,
+    compatible: Option<AiOpenAiCompatibleProfileInput>,
+) -> Result<serde_json::Value, AiError> {
+    match (provider_kind, compatible) {
+        (AiProviderKindInput::OpenAiCompatible, Some(profile)) => {
+            validate_compatible_profile(
+                &profile.retention,
+                profile.custom_tools,
+                profile.parallel_tool_calls,
+            )
+            .map_err(AiError::InvalidInput)?;
+            serde_json::to_value(StoredProviderDataPolicy {
+                openai_compatible: StoredOpenAiCompatiblePolicy {
+                    version: OPENAI_COMPATIBLE_DATA_POLICY_VERSION,
+                    retention: profile.retention,
+                    custom_tools: profile.custom_tools,
+                    parallel_tool_calls: profile.parallel_tool_calls,
+                    structured_output: profile.structured_output,
+                    provider_retained_continuation: profile.provider_retained_continuation,
+                },
+            })
+            .map_err(|_| AiError::PersistenceFailed)
+        }
+        (AiProviderKindInput::OpenAiCompatible, None) => Err(AiError::InvalidInput(
+            "OpenAI-compatible profiles require a reviewed capability and retention contract"
+                .to_owned(),
+        )),
+        (_, Some(_)) => Err(AiError::InvalidInput(
+            "OpenAI-compatible configuration is invalid for this provider kind".to_owned(),
+        )),
+        (_, None) => Ok(json!({})),
+    }
+}
+
+fn provider_view(record: &AiProviderProfileRecord) -> Result<AiProviderProfileView, AiError> {
+    let openai_compatible =
+        if record.provider_kind == AiProviderKindInput::OpenAiCompatible.as_str() {
+            if record
+                .data_policy
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+            {
+                // Profiles created before the typed contract was introduced remain
+                // visible but cannot construct the compatible transport adapter.
+                None
+            } else {
+                let stored: StoredProviderDataPolicy =
+                    serde_json::from_value(record.data_policy.clone()).map_err(|_| {
+                        AiError::InvalidConfiguration(
+                            "invalid OpenAI-compatible provider data policy".to_owned(),
+                        )
+                    })?;
+                if stored.openai_compatible.version != OPENAI_COMPATIBLE_DATA_POLICY_VERSION {
+                    return Err(AiError::InvalidConfiguration(
+                        "unsupported OpenAI-compatible provider data-policy version".to_owned(),
+                    ));
+                }
+                validate_compatible_profile(
+                    &stored.openai_compatible.retention,
+                    stored.openai_compatible.custom_tools,
+                    stored.openai_compatible.parallel_tool_calls,
+                )
+                .map_err(AiError::InvalidConfiguration)?;
+                Some(AiOpenAiCompatibleProfileView {
+                    retention: stored.openai_compatible.retention,
+                    custom_tools: stored.openai_compatible.custom_tools,
+                    parallel_tool_calls: stored.openai_compatible.parallel_tool_calls,
+                    structured_output: stored.openai_compatible.structured_output,
+                    provider_retained_continuation: stored
+                        .openai_compatible
+                        .provider_retained_continuation,
+                })
+            }
+        } else {
+            if !record
+                .data_policy
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+            {
+                return Err(AiError::InvalidConfiguration(
+                    "unexpected provider data policy".to_owned(),
+                ));
+            }
+            None
+        };
+    Ok(AiProviderProfileView {
         id: record.id,
         scope_kind: record.scope_kind.clone(),
         scope_id: record.scope_id.clone(),
@@ -1141,11 +1248,33 @@ fn provider_view(record: &AiProviderProfileRecord) -> AiProviderProfileView {
         provider_kind: record.provider_kind.clone(),
         display_name: record.display_name.clone(),
         base_url: record.base_url.clone(),
+        openai_compatible,
         credential_configured: record.credential_reference.is_some(),
         enabled: record.enabled,
         row_version: record.row_version,
         updated_at: record.updated_at,
+    })
+}
+
+fn validate_compatible_profile(
+    retention: &str,
+    custom_tools: bool,
+    parallel_tool_calls: bool,
+) -> Result<(), String> {
+    if retention.is_empty()
+        || retention.len() > 200
+        || !retention
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("invalid OpenAI-compatible retention label".to_owned());
     }
+    if parallel_tool_calls && !custom_tools {
+        return Err(
+            "parallel OpenAI-compatible tool calls require custom-tool capability".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn content_policy_view(record: &AiContentProtectionPolicyRecord) -> AiContentProtectionPolicyView {

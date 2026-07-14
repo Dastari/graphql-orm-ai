@@ -25,6 +25,9 @@ adapter with a fixed official endpoint and secret-store credential reference.
 endpoint and zero-data-retention verification enabled by default.
 `provider-ollama` enables the native Ollama `/api/chat` adapter; it needs an
 explicit deployment endpoint policy even for loopback.
+`provider-openai-compatible` enables the deliberately narrow Responses/SSE
+adapter for endpoints with an exact GraphQL-managed capability and retention
+profile plus deployment endpoint authorization.
 `local-harness` enables the installed JSON-lines v2 text/structured/stateless-
 tool protocol and provider wrapper; it still requires a deployment-owned
 sandbox launcher.
@@ -101,6 +104,17 @@ permit xAI's ordinary retention. Response-ID tool continuation also requires
 `store_responses`, an exact per-call retention proof, and ZDR verification to
 be disabled; stateless encrypted-reasoning replay remains closed. See the
 [xAI guide](xai.md).
+
+For an OpenAI-compatible Responses endpoint, create or update an
+`OpenAiCompatible` provider profile through the authenticated configuration
+mutation. Declare only reviewed capabilities and use a specific retention
+label understood by egress policy. Obtain its secret reference through the
+trusted configuration boundary, call
+`OpenAiCompatibleProviderConfig::from_profile`, and construct the provider
+with the same deployment endpoint policy and secret store. The endpoint is
+immutable after construction; each request must reproduce its exact profile,
+destination, and retention in the egress proof. See the
+[OpenAI-compatible guide](openai-compatible.md).
 
 For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
 `AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,

@@ -54,7 +54,8 @@ below are still being implemented.
   OpenAI/xAI Responses/SSE and Anthropic Messages/SSE adapters, and a native
   Ollama `/api/chat` adapter. Anthropic and Ollama support exact stateless
   application-tool loops; xAI supports strict custom tools through explicitly
-  retained response IDs. Profiled OpenAI-compatible adapters remain reserved.
+  retained response IDs. OpenAI-compatible Responses endpoints use an exact
+  GraphQL-managed capability/retention profile and deployment-authorized URL.
 - An opt-in installed local-harness boundary with deployment-frozen logical
   model registrations, fixed executable/digest/sandbox/resource contracts, a
   bounded JSON-lines v2 provider driver, optional stateless application-tool
@@ -173,7 +174,7 @@ Exactly one persistence backend should be selected:
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
 | `provider-xai` | no | Native xAI Responses/SSE: text/JSON, structured output, strict parallel application tools |
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
-| `provider-openai-compatible` | no | Reserved; requires explicit endpoint profiles |
+| `provider-openai-compatible` | no | Profiled Responses/SSE: text/JSON and opt-in strict tools, structured output, retained continuation |
 | `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
@@ -263,9 +264,9 @@ pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
-stores/keyrings, other provider adapters,
+stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,
-generated resolver disclosure metadata, OpenAI-compatible and
+generated resolver disclosure metadata,
 production OS/container local-harness launchers/ACP framing, and Docker-owned
 PostgreSQL parity testing. Details live in
 [implementation status](docs/implementation-status.md).
@@ -287,10 +288,16 @@ the provider's zero-data-retention attestation by default. Its opt-out,
 retained-continuation, and deliberately narrow tool surface are documented in
 the [xAI guide](docs/xai.md).
 
+The OpenAI-compatible Responses adapter accepts only a GraphQL-managed,
+versioned capability and retention profile plus an endpoint authorized by the
+deployment SSRF/network policy. Its deliberately narrow compatibility surface
+and exact egress bindings are documented in the
+[OpenAI-compatible guide](docs/openai-compatible.md).
+
 Local execution is a first-class path. The native Ollama adapter is
 implemented; its exact supported and deliberately gated behaviors are in the
-[Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers will use a
-separately profiled provider adapter. The installed-harness JSON-lines
+[Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers use the
+separately profiled Responses adapter. The installed-harness JSON-lines
 foundation is also implemented with no shell, fixed command and arguments, no
 inherited environment or network authority, sandbox/resource contracts,
 stateless application-tool framing, and a trusted launcher seam. GraphQL may
@@ -309,9 +316,9 @@ forbidden. Consumer-application integration tests belong to those consumers.
 
 ```bash
 cargo fmt --check
-cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness
-cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness --no-deps
+cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness
+cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness --no-deps
 cargo test --features graphql-case-pascal --test graphql_naming
 cargo check --no-default-features --features postgres
 cargo check --no-default-features --features mssql

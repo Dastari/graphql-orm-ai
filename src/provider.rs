@@ -1017,7 +1017,11 @@ impl ProviderRequestContext {
         Ok(())
     }
 
-    #[cfg(any(feature = "provider-openai", feature = "provider-xai"))]
+    #[cfg(any(
+        feature = "provider-openai",
+        feature = "provider-xai",
+        feature = "provider-openai-compatible"
+    ))]
     pub(crate) fn permits_retained_response(
         &self,
         provider_kind: &ProviderKind,
@@ -1035,6 +1039,33 @@ impl ProviderRequestContext {
             }
         }
         matched
+    }
+
+    #[cfg(feature = "provider-openai-compatible")]
+    pub(crate) fn permits_profile_destination_retention(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+        profile_id: &str,
+        destination: &str,
+        retention: &str,
+    ) -> bool {
+        let mut inference_matched = false;
+        for transfer in &self.transfers {
+            if transfer.manifest.provider_kind == provider_kind.as_str()
+                && transfer.manifest.model == request.model
+            {
+                if transfer.manifest.provider_profile_id != profile_id
+                    || transfer.manifest.destination != destination
+                    || transfer.manifest.retention != retention
+                {
+                    return false;
+                }
+                inference_matched |=
+                    transfer.manifest.capability == AiEgressCapability::ModelInference;
+            }
+        }
+        inference_matched
     }
 
     fn require_capability(

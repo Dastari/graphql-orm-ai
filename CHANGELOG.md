@@ -5,11 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.24.0`. The AI
-schema module remains `0.22.0` because this provider-only change adds no
-persistent entity or semantic change.
+This development line advances the pre-1.0 crate version to `0.25.0` and the
+AI schema module to `0.23.0`. No table, column, index, constraint, or entity is
+added; the module version changes because provider-profile `data_policy` now
+has a versioned OpenAI-compatible capability and retention meaning.
 
 ### Added
+
+- A feature-gated, explicitly profiled OpenAI-compatible Responses/SSE
+  adapter. Construction fixes one normalized endpoint, provider-profile ID,
+  retention declaration, secret reference, timeout, and reviewed capability
+  set. Every transfer must reproduce the exact profile, destination, model,
+  and retention binding. Redirects, runtime/model-selected URLs, capability
+  probing, attachments, built-ins, and undeclared tools/structured output or
+  retained continuation fail closed.
+- Typed GraphQL-managed OpenAI-compatible provider configuration. A compatible
+  profile must declare its retention label and exact tool, parallel-tool,
+  structured-output, and retained-continuation capabilities; other provider
+  kinds reject that nested contract. The redacted view can construct the safe
+  transport configuration only when the profile is enabled and complete.
 
 - A feature-gated native xAI/Grok Responses/SSE adapter fixed to the official
   HTTPS endpoint. It resolves Bearer credentials immediately before transport,
@@ -33,6 +47,12 @@ persistent entity or semantic change.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- Compatible endpoints remain behind the deployment-owned endpoint policy;
+  URL syntax validation and redirect denial do not claim DNS-rebinding or
+  network-isolation protection. Legacy compatible rows without the new typed
+  contract remain visible but cannot construct a compatible adapter until an
+  authorized administrator re-saves them with a reviewed contract.
 
 - Responses adapters now require an SSE content type and normalize a built-in
   result only when the exact built-in kind was present in the server-authored

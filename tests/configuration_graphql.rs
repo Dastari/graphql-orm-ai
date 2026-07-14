@@ -71,6 +71,7 @@ impl ConfigurationService {
             provider_kind: "openai".to_owned(),
             display_name: "OpenAI".to_owned(),
             base_url: None,
+            openai_compatible: None,
             credential_configured: true,
             enabled: true,
             row_version: 2,
@@ -259,6 +260,12 @@ async fn credential_mutation_returns_only_redacted_state() {
         assert!(schema.sdl().contains("upsertAiBudgetPolicy(input:"));
         assert!(schema.sdl().contains("aiPricingPolicies(scope:"));
         assert!(schema.sdl().contains("createAiPricingPolicy(input:"));
+        assert!(
+            schema
+                .sdl()
+                .contains("openaiCompatible: AiOpenAiCompatibleProfileInput")
+        );
+        assert!(schema.sdl().contains("parallelToolCalls: Boolean!"));
     }
     #[cfg(feature = "graphql-case-pascal")]
     {
@@ -268,6 +275,12 @@ async fn credential_mutation_returns_only_redacted_state() {
         assert!(schema.sdl().contains("UpsertAiBudgetPolicy(Input:"));
         assert!(schema.sdl().contains("AiPricingPolicies(Scope:"));
         assert!(schema.sdl().contains("CreateAiPricingPolicy(Input:"));
+        assert!(
+            schema
+                .sdl()
+                .contains("OpenaiCompatible: AiOpenAiCompatibleProfileInput")
+        );
+        assert!(schema.sdl().contains("ParallelToolCalls: Boolean!"));
     }
 }
 

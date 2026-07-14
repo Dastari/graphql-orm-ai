@@ -19,6 +19,7 @@ use crate::{
 
 #[cfg(feature = "provider-openai")]
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+#[cfg(feature = "provider-xai")]
 const XAI_RESPONSES_ENDPOINT: &str = "https://api.x.ai/v1/responses";
 const MAXIMUM_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_RESPONSES_STREAM_EVENTS: usize = 65_536;
@@ -30,6 +31,15 @@ const MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
 enum ResponsesFlavor {
     OpenAi,
     XAi,
+    Compatible,
+}
+
+#[cfg(feature = "provider-openai-compatible")]
+#[derive(Clone, Debug)]
+pub(super) struct CompatibleRouteBinding {
+    pub(super) profile_id: String,
+    pub(super) destination: String,
+    pub(super) retention: String,
 }
 
 /// Native OpenAI adapter configuration. Credential plaintext is never stored
@@ -72,6 +82,9 @@ pub struct OpenAiProvider {
     flavor: ResponsesFlavor,
     provider_kind: ProviderKind,
     require_xai_zero_data_retention: bool,
+    capabilities: ProviderCapabilities,
+    #[cfg(feature = "provider-openai-compatible")]
+    compatible_binding: Option<CompatibleRouteBinding>,
 }
 
 impl std::fmt::Debug for OpenAiProvider {
@@ -103,6 +116,9 @@ impl OpenAiProvider {
             OPENAI_RESPONSES_ENDPOINT.to_owned(),
             ResponsesFlavor::OpenAi,
             false,
+            None,
+            #[cfg(feature = "provider-openai-compatible")]
+            None,
         )
     }
 
@@ -112,6 +128,10 @@ impl OpenAiProvider {
         endpoint: String,
         flavor: ResponsesFlavor,
         require_xai_zero_data_retention: bool,
+        compatible_capabilities: Option<ProviderCapabilities>,
+        #[cfg(feature = "provider-openai-compatible")] compatible_binding: Option<
+            CompatibleRouteBinding,
+        >,
     ) -> Result<Self, ProviderError> {
         validate_optional_header(config.organization.as_deref())?;
         validate_optional_header(config.project.as_deref())?;
@@ -120,6 +140,21 @@ impl OpenAiProvider {
         {
             return Err(ProviderError::InvalidConfiguration(
                 "xAI does not accept OpenAI organization/project headers".to_owned(),
+            ));
+        }
+        if flavor == ResponsesFlavor::Compatible
+            && (config.organization.is_some()
+                || config.project.is_some()
+                || compatible_capabilities.is_none())
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI-compatible profile is incomplete".to_owned(),
+            ));
+        }
+        #[cfg(feature = "provider-openai-compatible")]
+        if flavor == ResponsesFlavor::Compatible && compatible_binding.is_none() {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI-compatible route binding is incomplete".to_owned(),
             ));
         }
         if flavor == ResponsesFlavor::XAi
@@ -145,20 +180,52 @@ impl OpenAiProvider {
                     "OpenAI HTTP client could not be constructed".to_owned(),
                 )
             })?;
+        let provider_kind = match flavor {
+            ResponsesFlavor::OpenAi => ProviderKind::OpenAi,
+            ResponsesFlavor::XAi => ProviderKind::Xai,
+            ResponsesFlavor::Compatible => ProviderKind::OpenAiCompatible,
+        };
+        let capabilities = compatible_capabilities.unwrap_or_else(|| {
+            let mut capabilities = ProviderCapabilities {
+                streaming: true,
+                custom_tools: true,
+                parallel_tool_calls: flavor == ResponsesFlavor::XAi,
+                structured_output: true,
+                provider_retained_continuation: config.store_responses,
+                ..ProviderCapabilities::default()
+            };
+            if flavor == ResponsesFlavor::OpenAi {
+                capabilities.image_input = true;
+                capabilities.file_input = true;
+                capabilities.web_search = true;
+                capabilities.file_search = true;
+                capabilities.code_execution = true;
+                capabilities.image_generation = true;
+            }
+            capabilities
+        });
+        if !capabilities.streaming
+            || capabilities.provider_retained_continuation != config.store_responses
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "Responses capabilities do not match transport configuration".to_owned(),
+            ));
+        }
         Ok(Self {
             config,
             secrets,
             client,
             endpoint,
             flavor,
-            provider_kind: match flavor {
-                ResponsesFlavor::OpenAi => ProviderKind::OpenAi,
-                ResponsesFlavor::XAi => ProviderKind::Xai,
-            },
+            provider_kind,
             require_xai_zero_data_retention,
+            capabilities,
+            #[cfg(feature = "provider-openai-compatible")]
+            compatible_binding,
         })
     }
 
+    #[cfg(feature = "provider-xai")]
     pub(super) fn new_xai(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -170,6 +237,28 @@ impl OpenAiProvider {
             XAI_RESPONSES_ENDPOINT.to_owned(),
             ResponsesFlavor::XAi,
             require_zero_data_retention,
+            None,
+            #[cfg(feature = "provider-openai-compatible")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "provider-openai-compatible")]
+    pub(super) fn new_compatible(
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        endpoint: String,
+        capabilities: ProviderCapabilities,
+        binding: CompatibleRouteBinding,
+    ) -> Result<Self, ProviderError> {
+        Self::build(
+            config,
+            secrets,
+            endpoint,
+            ResponsesFlavor::Compatible,
+            false,
+            Some(capabilities),
+            Some(binding),
         )
     }
 
@@ -184,10 +273,19 @@ impl OpenAiProvider {
                 "test endpoint must use IPv4 loopback".to_owned(),
             ));
         }
-        Self::build(config, secrets, endpoint, ResponsesFlavor::OpenAi, false)
+        Self::build(
+            config,
+            secrets,
+            endpoint,
+            ResponsesFlavor::OpenAi,
+            false,
+            None,
+            #[cfg(feature = "provider-openai-compatible")]
+            None,
+        )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "provider-xai"))]
     pub(super) fn for_xai_loopback_test(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -205,12 +303,15 @@ impl OpenAiProvider {
             endpoint,
             ResponsesFlavor::XAi,
             require_zero_data_retention,
+            None,
+            #[cfg(feature = "provider-openai-compatible")]
+            None,
         )
     }
 
     fn request_headers(&self) -> Result<HeaderMap, ProviderError> {
         let mut headers = HeaderMap::new();
-        if self.flavor == ResponsesFlavor::XAi {
+        if self.flavor != ResponsesFlavor::OpenAi {
             return Ok(headers);
         }
         insert_optional_header(
@@ -235,7 +336,7 @@ impl OpenAiProvider {
             return Err(ProviderError::Unsupported);
         }
         if request.input.is_empty()
-            || (self.flavor == ResponsesFlavor::XAi
+            || (self.flavor != ResponsesFlavor::OpenAi
                 && (request.maximum_output_tokens.is_none()
                     || !request.builtin_tools.is_empty()
                     || request.tools.iter().any(|tool| !tool.strict)
@@ -245,6 +346,12 @@ impl OpenAiProvider {
                         .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))))
         {
             return Err(ProviderError::InvalidRequest);
+        }
+        if self.flavor == ResponsesFlavor::Compatible
+            && ((!request.tools.is_empty() && !self.capabilities.custom_tools)
+                || (request.output_schema.is_some() && !self.capabilities.structured_output))
+        {
+            return Err(ProviderError::Unsupported);
         }
         let mut content = Vec::with_capacity(request.input.len());
         let mut tool_outputs = Vec::new();
@@ -319,7 +426,7 @@ impl OpenAiProvider {
                 "description": tool.description,
                 "parameters": tool.parameters
             });
-            if self.flavor == ResponsesFlavor::OpenAi {
+            if self.flavor != ResponsesFlavor::XAi {
                 definition["strict"] = Value::Bool(tool.strict);
             }
             tools.push(definition);
@@ -339,7 +446,7 @@ impl OpenAiProvider {
             "stream": true,
             "store": self.config.store_responses,
             "tools": tools,
-            "parallel_tool_calls": self.flavor == ResponsesFlavor::XAi
+            "parallel_tool_calls": self.capabilities.parallel_tool_calls
         });
         if let Some(ModelContinuation::ProviderResponse { response_id }) = &request.continuation {
             if !self.config.store_responses {
@@ -374,23 +481,7 @@ impl AiProvider for OpenAiProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        let mut capabilities = ProviderCapabilities {
-            streaming: true,
-            custom_tools: true,
-            parallel_tool_calls: self.flavor == ResponsesFlavor::XAi,
-            structured_output: true,
-            provider_retained_continuation: self.config.store_responses,
-            ..ProviderCapabilities::default()
-        };
-        if self.flavor == ResponsesFlavor::OpenAi {
-            capabilities.image_input = true;
-            capabilities.file_input = true;
-            capabilities.web_search = true;
-            capabilities.file_search = true;
-            capabilities.code_execution = true;
-            capabilities.image_generation = true;
-        }
-        capabilities
+        self.capabilities.clone()
     }
 
     async fn stream(
@@ -399,7 +490,20 @@ impl AiProvider for OpenAiProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&self.provider_kind, &request)?;
-        if self.config.store_responses
+        #[cfg(feature = "provider-openai-compatible")]
+        if let Some(binding) = &self.compatible_binding
+            && !context.permits_profile_destination_retention(
+                &self.provider_kind,
+                &request,
+                &binding.profile_id,
+                &binding.destination,
+                &binding.retention,
+            )
+        {
+            return Err(ProviderError::EgressDenied);
+        }
+        if self.flavor != ResponsesFlavor::Compatible
+            && self.config.store_responses
             && !context.permits_retained_response(&self.provider_kind, &request)
         {
             return Err(ProviderError::EgressDenied);

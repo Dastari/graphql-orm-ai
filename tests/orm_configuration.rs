@@ -34,7 +34,10 @@ struct LocalEndpointPolicy;
 
 impl AiProviderEndpointPolicy for LocalEndpointPolicy {
     fn authorize_endpoint(&self, provider_kind: AiProviderKindInput, normalized_url: &str) -> bool {
-        provider_kind == AiProviderKindInput::Ollama && normalized_url == "http://127.0.0.1:11434/"
+        (provider_kind == AiProviderKindInput::Ollama
+            && normalized_url == "http://127.0.0.1:11434/")
+            || (provider_kind == AiProviderKindInput::OpenAiCompatible
+                && normalized_url == "https://compatible.example/v1/responses")
     }
 }
 
@@ -200,6 +203,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
                     provider_kind: AiProviderKindInput::OpenAi,
                     display_name: "OpenAI".to_owned(),
                     base_url: None,
+                    openai_compatible: None,
                     enabled: true,
                     expected_version: None,
                 },
@@ -217,6 +221,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
                 provider_kind: AiProviderKindInput::OpenAi,
                 display_name: "OpenAI".to_owned(),
                 base_url: None,
+                openai_compatible: None,
                 enabled: true,
                 expected_version: None,
             },
@@ -235,6 +240,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
                     provider_kind: AiProviderKindInput::OpenAi,
                     display_name: "stale".to_owned(),
                     base_url: None,
+                    openai_compatible: None,
                     enabled: true,
                     expected_version: Some(99),
                 },
@@ -265,6 +271,7 @@ async fn profile_and_credential_mutations_require_recent_mfa_and_cas() {
                     provider_kind: AiProviderKindInput::LocalHarness,
                     display_name: "must not retain a credential".to_owned(),
                     base_url: None,
+                    openai_compatible: None,
                     enabled: true,
                     expected_version: Some(1),
                 },
@@ -319,6 +326,7 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
                     provider_kind: AiProviderKindInput::OpenAiCompatible,
                     display_name: "unsafe".to_owned(),
                     base_url: Some("http://169.254.169.254/latest?token=x".to_owned()),
+                    openai_compatible: None,
                     enabled: true,
                     expected_version: None,
                 },
@@ -335,6 +343,7 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
                 provider_kind: AiProviderKindInput::LocalHarness,
                 display_name: "Reviewed installed harness".to_owned(),
                 base_url: None,
+                openai_compatible: None,
                 enabled: true,
                 expected_version: None,
             },
@@ -364,6 +373,7 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
                     provider_kind: AiProviderKindInput::LocalHarness,
                     display_name: "unsafe endpoint".to_owned(),
                     base_url: Some("http://127.0.0.1:9999".to_owned()),
+                    openai_compatible: None,
                     enabled: true,
                     expected_version: Some(0),
                 },
@@ -380,6 +390,7 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
                 provider_kind: AiProviderKindInput::Ollama,
                 display_name: "Local Ollama".to_owned(),
                 base_url: Some("http://127.0.0.1:11434".to_owned()),
+                openai_compatible: None,
                 enabled: true,
                 expected_version: None,
             },
@@ -423,6 +434,93 @@ async fn endpoint_policy_and_content_protection_readiness_fail_closed() {
         .await
         .expect("pending policy remains inspectable");
     assert!(!resolved.ready);
+}
+
+#[tokio::test]
+async fn compatible_profiles_require_and_round_trip_a_typed_contract() {
+    let (service, _secrets, now) = service().await;
+    let principal = recent_principal(now);
+    let compatible = service
+        .upsert_provider_profile(
+            &principal,
+            UpsertAiProviderProfileInput {
+                id: None,
+                scope: scope_input(),
+                provider_kind: AiProviderKindInput::OpenAiCompatible,
+                display_name: "Reviewed compatible endpoint".to_owned(),
+                base_url: Some("https://compatible.example/v1/responses".to_owned()),
+                openai_compatible: Some(AiOpenAiCompatibleProfileInput {
+                    retention: "processor-zdr-v1".to_owned(),
+                    custom_tools: true,
+                    parallel_tool_calls: true,
+                    structured_output: true,
+                    provider_retained_continuation: false,
+                }),
+                enabled: true,
+                expected_version: None,
+            },
+        )
+        .await
+        .expect("typed compatible profile should be persisted");
+    let contract = compatible
+        .openai_compatible
+        .as_ref()
+        .expect("compatible contract should be visible");
+    assert_eq!(contract.retention, "processor-zdr-v1");
+    assert!(contract.custom_tools);
+    assert!(contract.parallel_tool_calls);
+    assert!(contract.structured_output);
+    assert!(!contract.provider_retained_continuation);
+
+    let listed = service
+        .provider_profiles(&principal, scope())
+        .await
+        .expect("compatible profile should round trip");
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].openai_compatible.is_some());
+
+    assert!(matches!(
+        service
+            .upsert_provider_profile(
+                &principal,
+                UpsertAiProviderProfileInput {
+                    id: None,
+                    scope: scope_input(),
+                    provider_kind: AiProviderKindInput::OpenAiCompatible,
+                    display_name: "Missing contract".to_owned(),
+                    base_url: Some("https://compatible.example/v1/responses".to_owned()),
+                    openai_compatible: None,
+                    enabled: false,
+                    expected_version: None,
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        service
+            .upsert_provider_profile(
+                &principal,
+                UpsertAiProviderProfileInput {
+                    id: None,
+                    scope: scope_input(),
+                    provider_kind: AiProviderKindInput::OpenAi,
+                    display_name: "Native mismatch".to_owned(),
+                    base_url: None,
+                    openai_compatible: Some(AiOpenAiCompatibleProfileInput {
+                        retention: "processor-zdr-v1".to_owned(),
+                        custom_tools: false,
+                        parallel_tool_calls: false,
+                        structured_output: false,
+                        provider_retained_continuation: false,
+                    }),
+                    enabled: false,
+                    expected_version: None,
+                },
+            )
+            .await,
+        Err(AiError::InvalidInput(_))
+    ));
 }
 
 #[tokio::test]

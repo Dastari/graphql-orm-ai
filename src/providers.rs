@@ -5,8 +5,15 @@ mod mock;
 #[cfg(feature = "provider-anthropic")]
 mod anthropic;
 
-#[cfg(any(feature = "provider-openai", feature = "provider-xai"))]
+#[cfg(any(
+    feature = "provider-openai",
+    feature = "provider-xai",
+    feature = "provider-openai-compatible"
+))]
 mod openai;
+
+#[cfg(feature = "provider-openai-compatible")]
+mod openai_compatible;
 
 #[cfg(feature = "provider-xai")]
 mod xai;
@@ -21,6 +28,11 @@ pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
 
 #[cfg(feature = "provider-openai")]
 pub use openai::{OpenAiProvider, OpenAiProviderConfig};
+
+#[cfg(feature = "provider-openai-compatible")]
+pub use openai_compatible::{
+    OpenAiCompatibleCapabilities, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
+};
 
 #[cfg(feature = "provider-xai")]
 pub use xai::{XAiProvider, XAiProviderConfig};

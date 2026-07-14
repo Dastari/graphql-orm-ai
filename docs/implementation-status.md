@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.22.0`) and 39 private records
+- AI schema-module identity (currently version `0.23.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -47,6 +47,13 @@ production-ready behavior.
   and retained response-ID continuation require explicit configuration and
   egress authorization; attachments, xAI server tools, encrypted reasoning
   replay, and arbitrary endpoints remain closed.
+- Feature-gated OpenAI-compatible Responses/SSE adapter with one immutable,
+  deployment-authorized endpoint and an exact GraphQL-managed, versioned
+  capability/retention contract. It supports bounded text/JSON and only the
+  explicitly declared strict tools, parallel calls, structured output, and
+  retained response-ID continuation. Profile/destination/model/retention are
+  re-bound to every egress proof; redirects, capability probing, attachments,
+  built-ins, and runtime/model-selected URLs remain closed.
 - Native feature-gated Ollama `/api/chat` adapter with deployment-authorized
   fixed root endpoint, redirects disabled, bounded NDJSON normalization,
   exact PNG/JPEG/WebP image reopening, JSON-schema output, registered custom
@@ -284,7 +291,6 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- Provider HTTP adapters for explicitly profiled OpenAI-compatible endpoints.
 - OpenAI background/webhooks, provider-persistent file upload/search/deletion,
   richer provider file-type preflight, and full built-in result normalization.
   Exact inline image/file input is implemented and remains independently gated
@@ -308,9 +314,9 @@ production-ready behavior.
   transports. The generic exact-binding adapter is implemented; credential
   format, fixed destination mapping, network isolation, and application audit
   integration intentionally remain host-owned.
-- OpenAI-compatible local provider profiles, a production OS/container
-  implementation of the trusted local-harness launcher, and optional ACP
-  framing. Ollama custom tools and JSON-lines v2 harness tools now use the
+- A production OS/container implementation of the trusted local-harness
+  launcher and optional ACP framing. Ollama custom tools and JSON-lines v2
+  harness tools now use the
   bounded stateless contract; no model may choose command, arguments, working
   directory, environment, mount, or network authority.
 - Any consumer integration testing or migration. That work is explicitly left
@@ -318,10 +324,10 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add an explicitly profiled OpenAI-compatible adapter with immutable
-   endpoint/trust/capability declarations and no model-selected URL.
-2. Add Docker-owned PostgreSQL parity tests only through a harness that proves
+1. Add Docker-owned PostgreSQL parity tests only through a harness that proves
    it created and owns the exact disposable database handle.
+2. Continue the bounded deleting-session/raw-payload/audit retention workers
+   without exposing private ORM records or accepting generic database URLs.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image
@@ -331,14 +337,14 @@ intentional.
 
 ## Current verification
 
-- `cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness`:
-  full SQLite, OpenAI/Anthropic/xAI mocks, and native Ollama loopback-mock
+- `cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness`:
+  full SQLite, OpenAI/Anthropic/xAI/compatible mocks, and native Ollama loopback-mock
   coverage passed; one explicit live-provider test remained ignored.
   Deterministic installed-harness process conformance and generated private-ORM
   doctests were included; the latter remained intentionally ignored.
-- `cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,local-harness -- -D warnings`:
+- `cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings`:
   passed.
-- Warnings-denied Rustdoc passed for all four native provider adapters and
+- Warnings-denied Rustdoc passed for all native and profiled provider adapters and
   `graphql-case-pascal`.
 - PascalCase SDL contract test passed with no camelCase aliases.
 - `cargo check --no-default-features --features postgres`: passed, compile-only.

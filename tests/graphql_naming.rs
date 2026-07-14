@@ -28,6 +28,8 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("aiInboxEvents("));
         assert!(sdl.contains("aiUsage(scope:"));
         assert!(configuration_sdl.contains("LOCAL_HARNESS"));
+        assert!(configuration_sdl.contains("openaiCompatible: AiOpenAiCompatibleProfileInput"));
+        assert!(configuration_sdl.contains("providerRetainedContinuation: Boolean!"));
         assert!(!sdl.contains("AiSessions("));
     }
 
@@ -42,6 +44,8 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(sdl.contains("AiInboxEvents("));
         assert!(sdl.contains("AiUsage(Scope:"));
         assert!(configuration_sdl.contains("LocalHarness"));
+        assert!(configuration_sdl.contains("OpenaiCompatible: AiOpenAiCompatibleProfileInput"));
+        assert!(configuration_sdl.contains("ProviderRetainedContinuation: Boolean!"));
         assert!(!configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("aiSessions("));
     }

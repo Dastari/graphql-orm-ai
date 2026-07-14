@@ -112,8 +112,11 @@ pub struct AiProviderProfileView {
     pub provider_kind: String,
     /// Administrative display name.
     pub display_name: String,
-    /// Redacted endpoint; native providers may omit it.
+    /// Reviewed endpoint; native providers omit it. This is administrative
+    /// configuration and must not be exposed to untrusted model input.
     pub base_url: Option<String>,
+    /// Reviewed OpenAI-compatible capability/retention profile when configured.
+    pub openai_compatible: Option<AiOpenAiCompatibleProfileView>,
     /// Whether a credential reference is configured.
     pub credential_configured: bool,
     /// Whether routing may select this profile.
@@ -122,6 +125,22 @@ pub struct AiProviderProfileView {
     pub row_version: i64,
     /// Update time in Unix seconds.
     pub updated_at: i64,
+}
+
+/// Redacted reviewed contract for an OpenAI-compatible provider profile.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiOpenAiCompatibleProfileView {
+    /// Exact retention label required in every egress manifest.
+    pub retention: String,
+    /// Whether strict custom application tools are supported.
+    pub custom_tools: bool,
+    /// Whether parallel custom tool calls are supported.
+    pub parallel_tool_calls: bool,
+    /// Whether JSON-schema structured output is supported.
+    pub structured_output: bool,
+    /// Whether provider-retained response-ID continuation is supported.
+    pub provider_retained_continuation: bool,
 }
 
 /// Redacted scope content-protection state.
@@ -259,10 +278,28 @@ pub struct UpsertAiProviderProfileInput {
     pub display_name: String,
     /// Endpoint for explicitly configurable providers.
     pub base_url: Option<String>,
+    /// Required reviewed contract only for `OpenAiCompatible` profiles.
+    pub openai_compatible: Option<AiOpenAiCompatibleProfileInput>,
     /// Enable routing after all other policy gates pass.
     pub enabled: bool,
     /// Expected CAS version for an update.
     pub expected_version: Option<i64>,
+}
+
+/// Reviewed GraphQL configuration for an OpenAI-compatible profile.
+#[derive(InputObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiOpenAiCompatibleProfileInput {
+    /// Exact provider retention label used by egress policy.
+    pub retention: String,
+    /// Permit strict custom application tools.
+    pub custom_tools: bool,
+    /// Permit parallel custom tool calls.
+    pub parallel_tool_calls: bool,
+    /// Permit JSON-schema structured output.
+    pub structured_output: bool,
+    /// Permit provider-retained response-ID continuation.
+    pub provider_retained_continuation: bool,
 }
 
 /// Credential rotation input. This type deliberately does not derive `Debug`,

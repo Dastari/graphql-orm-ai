@@ -4,6 +4,47 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: profiled OpenAI-compatible adapter (crate 0.24.0 to 0.25.0; schema 0.22.0 to 0.23.0)
+
+Apply AI schema module `0.23.0` while configuration/provider workers, backups,
+and restore callbacks are closed. Do not run 0.25.0 code against a module still
+registered as 0.22.0. The generated migration adds no table, column, index,
+constraint, or entity and still owns 39 private records. The module advances
+because `AiProviderProfileRecord.data_policy` now stores a strict version-1
+OpenAI-compatible capability and retention contract.
+
+The GraphQL `UpsertAiProviderProfileInput` SDL adds nullable
+`openaiCompatible`/`OpenaiCompatible` input according to the selected naming
+feature, and `AiProviderProfileView` adds the corresponding redacted view.
+Creating or updating an `OpenAiCompatible` profile requires this nested value;
+all other provider kinds reject it. The retention label is bounded and the
+parallel-tool flag requires custom tools. Updating a profile remains
+recent-MFA-, host-policy-, endpoint-policy-, CAS-, and audit-gated.
+
+Existing compatible profiles whose `data_policy` is the legacy empty object
+remain readable with no compatible contract, but they cannot construct the new
+adapter. Re-save each intended profile through the authenticated GraphQL
+mutation with an explicitly reviewed endpoint, retention label, and minimal
+capability set before enabling routing. Unexpected or malformed nonempty
+policy data fails closed. Existing native-provider profiles need no rewrite.
+No consumer-owned or chat data is migrated.
+
+Enable `provider-openai-compatible` to export
+`OpenAiCompatibleProviderConfig`, `OpenAiCompatibleCapabilities`, and
+`OpenAiCompatibleProvider`. The adapter expects a Responses-compatible SSE
+endpoint—not the older Chat Completions surface—and never discovers
+capabilities. Build from the redacted profile plus its separately loaded
+`SecretRef`, then pass the same deployment endpoint policy and secret store to
+the provider constructor. Every call needs exact egress and atomic budget
+proofs matching the profile ID, normalized destination, provider/model, and
+retention declaration.
+
+This is a pre-1.0 additive Rust API/Cargo-feature change and an additive
+GraphQL SDL plus persistent semantic change. It changes provider routing,
+configuration, egress, retention, and restore validation contracts. No
+database-row or consumer-data rewrite is required beyond the administrator
+re-save needed to activate a legacy compatible profile.
+
 ## Unreleased: native xAI adapter (crate 0.23.0 to 0.24.0)
 
 Enable `provider-xai` to activate the native xAI Responses/SSE adapter and its
