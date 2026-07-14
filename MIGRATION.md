@@ -4,6 +4,59 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: protected skills and typed UI intents (crate 0.25.0 to 0.26.0; schema 0.23.0 to 0.24.0)
+
+Apply AI schema module `0.24.0` while AI workers, backups, and restore callbacks
+are closed. Do not run 0.26.0 code against a module still registered as
+0.23.0. The generated migration adds no table, column, index, constraint, or
+entity and still owns 39 private records. It advances the module because the
+existing skill/version fields now have strict v1 protected-instruction,
+policy, checksum, provenance, and restore semantics. Skill scope fields also
+participate in generated exact-scope filters, and skill-version IDs are
+assigned by the catalog before protection so their row identity can be bound
+into the protected envelope. Neither change introduces application-written
+SQL.
+
+The new separately composable GraphQL SDL exports `AiSkillQueryRoot` and
+`AiSkillMutationRoot` with bounded redacted list, safe metadata upsert,
+immutable version publication, and enable/disable operations. Names follow the
+selected camelCase or PascalCase feature with no aliases. Install exactly one
+`Arc<dyn AiSkillCatalogService>` in schema data. The concrete ORM service also
+requires an `AiSkillAccessPolicy`, current `AuthPrincipal`, ready exact-scope
+content-protection resolver/protector, recent-MFA policy, and trusted clock.
+
+The service was not publicly available before 0.26.0 and private generated
+skill CRUD roots have never been exported, so a normal 0.25.0 deployment has no
+catalog-created skill rows and needs no row rewrite. If an early deployment
+privately pre-seeded these tables, treat those rows as unsupported legacy data:
+keep the runtime closed, inventory them through the deployment's controlled
+backup/migration process, and publish a replacement current version through
+the authenticated skill GraphQL mutation using the known skill ID and CAS
+version. Do not repair policy JSON with application raw SQL. Unknown fields,
+legacy empty objects, malformed protected content, or a legacy current version
+fail closed until replaced. Consumer-owned data is unaffected.
+
+New public Rust APIs include the skill inputs/views/service/access policy and
+ORM service, plus `AiUiIntentTypeId`, `AiUiIntentTypeDescriptor`, exact
+bindings, draft/validated values, and `AiUiIntentCatalog`. UI-intent schemas
+must explicitly declare JSON Schema 2020-12. A skill stores the descriptor
+fingerprint, not only its logical name. Consumers must re-register the exact
+descriptor on startup and validate model drafts with `validate_bound` before
+delivery. A validated intent remains a suggestion: the consumer must recheck
+current resource authorization and map the logical type to frontend behavior.
+No route or navigation is performed by this crate.
+
+Restore snapshot producers must populate the new
+`AiRestoreSnapshotFacts::invalid_skill_catalog_count`. Count any malformed
+skill/current-version relationship, protected envelope, strict policy object,
+provenance, or checksum. Any nonzero value produces fatal
+`AI_RESTORE_SKILL_CATALOG_INVALID` evidence and must keep the runtime closed.
+
+This is a pre-1.0 additive Rust API and GraphQL SDL change plus a persistent
+semantic, authorization, content-protection, audit, backup, and restore
+contract change. No database DDL or consumer-data migration is required for
+deployments that did not privately pre-seed skill rows.
+
 ## Unreleased: owned PostgreSQL parity harness (crate 0.25.0; schema 0.23.0)
 
 CI now runs the PostgreSQL parity test through a container created by the test
@@ -11,7 +64,9 @@ itself on the local Docker socket. The harness generates its own user,
 password, database, container identity, ownership label, and Docker-assigned
 IPv4 loopback port. It never reads or accepts a database URL and verifies its
 ownership label before removing the container. Local runs skip only when the
-local Docker socket is unavailable; CI fails closed instead.
+local Docker socket is unavailable; CI fails closed instead. The 0.26.0
+harness additionally exercises protected skill publication/resolution through
+generated ORM operations.
 
 This changes test and release-gate behavior only. It adds no public Rust API,
 GraphQL SDL, entity, index, constraint, persistent semantic, authorization,

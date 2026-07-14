@@ -10,6 +10,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Protected live streaming](live-streaming.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Bounded session retention](session-retention.md)
+- [Protected skills and typed UI intents](skills-and-ui-intents.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
 - [Native Anthropic provider](anthropic.md)
 - [Native xAI provider](xai.md)

@@ -1487,8 +1487,11 @@ pub(crate) struct AiSkillRecord {
     #[primary_key]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
     pub scope_kind: String,
+    #[filterable(type = "string")]
     pub scope_id: String,
+    #[filterable(type = "string")]
     pub tenant_id: Option<String>,
     #[filterable(type = "string")]
     #[sortable]
@@ -1518,6 +1521,7 @@ pub(crate) struct AiSkillRecord {
 )]
 pub(crate) struct AiSkillVersionRecord {
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     #[filterable(type = "uuid")]
@@ -1789,7 +1793,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.23.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.24.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

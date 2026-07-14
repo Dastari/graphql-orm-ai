@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.23.0`) and 39 private records
+- AI schema-module identity (currently version `0.24.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -28,8 +28,9 @@ production-ready behavior.
 - Test-owned PostgreSQL 17 parity through a random, ownership-labeled
   disposable Docker container and unique database. The harness accepts no
   database URL, binds only a Docker-assigned IPv4 loopback port, applies the
-  generated module, exercises atomic session/message/run and keyset behavior,
-  proves stale-fence rejection, and verifies ownership again before cleanup.
+  generated module, exercises atomic session/message/run, protected skills,
+  and keyset behavior, proves stale-fence rejection, and verifies ownership
+  again before cleanup.
 - Provider-neutral capability/request/event/stream interfaces with validated
   function schemas and separately authorized built-in tools.
 - Deterministic mock provider and native feature-gated OpenAI Responses/SSE
@@ -222,6 +223,13 @@ production-ready behavior.
 - Explicit egress manifests, deployment boundary, policy decision, and
   allowed-manifest proof.
 - JSON Schema 2020-12 structured proposal registry and provenance validation.
+- Protected immutable skill catalog with exact-scope bounded reads,
+  recent-MFA/CAS publication and enablement, same-transaction redacted audit,
+  strict versioned policy JSON, protected instructions, canonical checksums,
+  exact tool/UI-intent fingerprints, and authority-free runtime resolution.
+- Default-deny logical UI-intent catalog with bounded JSON Schema 2020-12
+  validation and exact descriptor fingerprints. Validated values are frontend
+  suggestions only and contain no route or executable authority.
 - Canonical host request-context/executor contracts and current-principal tool
   bridge. Registered tool execution now returns a bounded
   `AiToolExecutionResult` only after fresh tool policy, ordinary resolver
@@ -280,8 +288,9 @@ production-ready behavior.
   and provider-persistent-file retention workflows. Principal-inbox pruning
   and bounded per-session provisional-delta/message-content pruning are
   implemented; their reports do not claim complete erasure.
-- Usage and skill roots beyond the session,
-  configuration, attachment, proposal, and approval surfaces.
+- Durable validated UI-intent session-event persistence and delivery. The
+  exact registry/schema validation contract is implemented; hosts must not
+  deliver unvalidated model output in the meantime.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
@@ -332,8 +341,9 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add skill/rule publication and typed UI-intent contracts without allowing
-   untrusted instructions to widen tool, egress, or budget policy.
+2. Add durable validated UI-intent event delivery and hierarchical rule
+   narrowing without allowing lower scopes to widen tool, egress, or budget
+   policy.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

@@ -5,12 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.25.0` and the
-AI schema module to `0.23.0`. No table, column, index, constraint, or entity is
-added; the module version changes because provider-profile `data_policy` now
-has a versioned OpenAI-compatible capability and retention meaning.
+This development line advances the pre-1.0 crate version to `0.26.0` and the
+AI schema module to `0.24.0`. No table, column, index, constraint, or entity is
+added; the module version changes because existing skill/version fields now
+have a strict protected publication, checksum, policy, and restore meaning.
 
 ### Added
+
+- A protected `OrmAiSkillCatalogService` and separately composable GraphQL
+  skill roots. Safe metadata, immutable publication, and enablement require
+  exact host scope policy, recent MFA, compare-and-swap state, and atomic
+  redacted audit. Instructions are protected before persistence; strict v1
+  metadata binds exact tool and UI-intent descriptor fingerprints,
+  classification/maturity ceilings, schemas, provider capability requests,
+  proposal types, activation, and hard per-run limits. Resolution reopens and
+  checksum-validates current versions but grants no authority.
+- A project-neutral `AiUiIntentCatalog` with bounded logical type IDs, JSON
+  Schema 2020-12 payload contracts, exact descriptor fingerprints, bounded
+  display metadata, and exact skill bindings. Validated intents are suggestions
+  only; the crate contains no route, URL, component, callback, or navigation
+  implementation.
 
 - A feature-gated, explicitly profiled OpenAI-compatible Responses/SSE
   adapter. Construction fixes one normalized endpoint, provider-profile ID,
@@ -27,8 +41,9 @@ has a versioned OpenAI-compatible capability and retention meaning.
 - A PostgreSQL parity integration test that creates and owns its disposable
   Docker container, random credentials, unique database, and loopback port.
   It applies the generated AI module and exercises atomic session/message/run,
-  keyset, and stale-fence behavior entirely through `graphql-orm`, then verifies
-  the ownership label before cleanup. CI never accepts a database URL.
+  protected skill publication/resolution, keyset, and stale-fence behavior
+  entirely through `graphql-orm`, then verifies the ownership label before
+  cleanup. CI never accepts a database URL.
 
 - A feature-gated native xAI/Grok Responses/SSE adapter fixed to the official
   HTTPS endpoint. It resolves Bearer credentials immediately before transport,
@@ -52,6 +67,15 @@ has a versioned OpenAI-compatible capability and retention meaning.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- Skill discovery, enablement, and resolution cannot widen current tool,
+  resolver, egress, provider, budget, proposal, approval, or UI policy.
+  Unknown stored fields/formats, duplicate bindings, swapped scope/current
+  version/provenance, checksum mismatch, stale UI-intent fingerprints, and
+  schema-invalid intent payloads fail closed. Restore facts now classify an
+  invalid skill catalog as fatal start-gate evidence. Durable intent event
+  delivery is not yet enabled, so unvalidated model output must not be sent to
+  frontends.
 
 - Compatible endpoints remain behind the deployment-owned endpoint policy;
   URL syntax validation and redirect denial do not claim DNS-rebinding or

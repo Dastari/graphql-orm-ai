@@ -1,7 +1,7 @@
 use async_graphql::{EmptySubscription, Schema};
 use graphql_orm_ai::{
     AiConfigurationMutationRoot, AiConfigurationQueryRoot, AiMutationRoot, AiQueryRoot,
-    AiSubscriptionRoot,
+    AiSkillMutationRoot, AiSkillQueryRoot, AiSubscriptionRoot,
 };
 
 #[test]
@@ -16,6 +16,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     )
     .finish()
     .sdl();
+    let skill_sdl = Schema::build(AiSkillQueryRoot, AiSkillMutationRoot, EmptySubscription)
+        .finish()
+        .sdl();
 
     #[cfg(not(feature = "graphql-case-pascal"))]
     {
@@ -30,6 +33,10 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(configuration_sdl.contains("openaiCompatible: AiOpenAiCompatibleProfileInput"));
         assert!(configuration_sdl.contains("providerRetainedContinuation: Boolean!"));
+        assert!(skill_sdl.contains("aiSkills(scope:"));
+        assert!(skill_sdl.contains("upsertAiSkill(input:"));
+        assert!(skill_sdl.contains("publishAiSkillVersion(input:"));
+        assert!(skill_sdl.contains("allowedUiIntents: [AiSkillUiIntentBindingInput!]!"));
         assert!(!sdl.contains("AiSessions("));
     }
 
@@ -46,6 +53,10 @@ fn configured_graphql_case_is_coherent_without_aliases() {
         assert!(configuration_sdl.contains("LocalHarness"));
         assert!(configuration_sdl.contains("OpenaiCompatible: AiOpenAiCompatibleProfileInput"));
         assert!(configuration_sdl.contains("ProviderRetainedContinuation: Boolean!"));
+        assert!(skill_sdl.contains("AiSkills(Scope:"));
+        assert!(skill_sdl.contains("UpsertAiSkill(Input:"));
+        assert!(skill_sdl.contains("PublishAiSkillVersion(Input:"));
+        assert!(skill_sdl.contains("AllowedUiIntents: [AiSkillUiIntentBindingInput!]!"));
         assert!(!configuration_sdl.contains("LOCAL_HARNESS"));
         assert!(!sdl.contains("aiSessions("));
     }

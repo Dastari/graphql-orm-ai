@@ -69,6 +69,8 @@ mod orm_session_retention;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_sessions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_skills;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
@@ -88,8 +90,10 @@ mod runtime;
 mod secrets;
 mod session_retention;
 mod sessions;
+mod skills;
 mod subscriptions;
 mod tools;
+mod ui_intents;
 mod usage;
 
 pub use access::*;
@@ -141,6 +145,8 @@ pub use orm_session_retention::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_sessions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_skills::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
@@ -162,8 +168,10 @@ pub use runtime::*;
 pub use secrets::*;
 pub use session_retention::*;
 pub use sessions::*;
+pub use skills::*;
 pub use subscriptions::*;
 pub use tools::*;
+pub use ui_intents::*;
 pub use usage::*;
 
 /// Common imports for host integrations.
@@ -182,7 +190,8 @@ pub mod prelude {
         AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
         AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiSessionRetentionService,
-        AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiUsageAccessPolicy,
+        AiSkillAccessPolicy, AiSkillCatalogService, AiToolAuthorizationPolicy, AiToolCatalog,
+        AiToolDescriptor, AiUiIntentCatalog, AiUiIntentTypeDescriptor, AiUsageAccessPolicy,
         AiUsageService, DataClassification, SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -201,7 +210,7 @@ pub mod prelude {
         OrmAiCoordinatorCheckpointService, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
         OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
         OrmAiProviderOutputService, OrmAiRunService, OrmAiSessionRetentionService,
-        OrmAiUsageService,
+        OrmAiSkillCatalogService, OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

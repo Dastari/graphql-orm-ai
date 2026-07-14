@@ -48,33 +48,39 @@ camelCase to PascalCase.
 5. Register reviewed application tools with server-authored documents, exact
    operation contracts, and static disclosure schemas. Registration does not
    enable a tool.
-6. Register proposal types and provider adapters.
-7. Install `OrmAiProposalService`/`OrmAiApprovalService` when composing their
+6. Register proposal types, exact UI-intent descriptors, and provider adapters.
+7. Install `OrmAiSkillCatalogService` as `Arc<dyn AiSkillCatalogService>` when
+   composing the separate skill roots. Supply exact scope access, recent-MFA,
+   trusted clock, and content-protection implementations. Skill resolution is
+   eligibility data only and must be intersected with current tool, egress,
+   provider, proposal, approval, and budget policy. See the
+   [skill and UI-intent guide](skills-and-ui-intents.md).
+8. Install `OrmAiProposalService`/`OrmAiApprovalService` when composing their
    authenticated GraphQL roots. Supply host policies, fresh principal
    rehydration, content protection, recent-MFA policy, and the same fenced run
    service; do not expose the private generated ORM entities.
-8. Install `OrmAiInboxService` as `Arc<dyn AiInboxService>` when composing the
+9. Install `OrmAiInboxService` as `Arc<dyn AiInboxService>` when composing the
    ordinary query/subscription roots. Configure `OrmAiConfigurationService`
    retention policy access, then schedule `OrmAiInboxPruningService` only as a
    trusted bounded host worker.
-9. Schedule `OrmAiSessionRetentionService` as a separate trusted host worker.
+10. Schedule `OrmAiSessionRetentionService` as a separate trusted host worker.
    Start a scan cycle with no cursor and continue its bounded keyset pages until
    `next_session_cursor` is absent. This prunes only eligible provisional
    deltas and terminal unattached message content; see the
    [retention guide](session-retention.md).
-10. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
+11. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.
-11. Opt into budget-policy mutations with
+12. Opt into budget-policy mutations with
    `OrmAiConfigurationService::with_budget_policy_management`, using deployment
    ceilings no broader than operational spend policy. Authorize reads and
    writes independently; writes require recent MFA.
-12. Construct `OrmAiPricingService` with an independent configuration access
+13. Construct `OrmAiPricingService` with an independent configuration access
    policy, recent-MFA policy, trusted clock, and
    `AiPricingCatalogManagementLimits`. Install the same instance as
    `Arc<dyn AiPricingCatalogService>`, `Arc<dyn AiPricingQuoteService>`, and
    `Arc<dyn AiProviderUsageAccounting>` when using its token-only accounting.
-13. Apply/validate migrations and restore reconciliation, then open the runtime
+14. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,

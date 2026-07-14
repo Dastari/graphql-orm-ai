@@ -5,13 +5,16 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
-use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, SessionContext, SystemClock};
+use agql_auth::{
+    AccessTokenMetadata, AssuranceMatchMode, AuthPrincipal, AuthUser, FixedClock, MfaAcceptance,
+    RecentMfaPolicy, SessionAssurance, SessionContext, SystemClock,
+};
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
 use graphql_orm::prelude::{Database, PostgresBackend};
 use graphql_orm_ai::*;
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
@@ -232,14 +235,39 @@ impl AiContentProtectionPolicyResolver for ProtectionPolicy {
     }
 }
 
-fn principal() -> AuthPrincipal {
+struct AllowSkills;
+
+#[async_trait]
+impl AiSkillAccessPolicy for AllowSkills {
+    async fn can_access_skill(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        _action: AiSkillAction,
+    ) -> bool {
+        true
+    }
+}
+
+fn principal(now: OffsetDateTime) -> AuthPrincipal {
+    let assurance = SessionAssurance::new(
+        now,
+        ["otp", "pwd"],
+        Some("urn:postgres-parity:loa:2".to_owned()),
+        Some("postgres-parity".to_owned()),
+        MfaAcceptance::Satisfied,
+    )
+    .expect("test assurance should validate");
     AuthPrincipal::User(AuthUser {
         user_id: "postgres-parity-owner".to_owned(),
         session_id: Uuid::new_v4(),
         roles: vec![],
         scopes: vec![],
-        session: SessionContext::default(),
+        session: SessionContext::default().with_assurance(assurance),
         token_claims: AccessTokenMetadata {
+            auth_time: Some(now.unix_timestamp()),
+            amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+            acr: Some("urn:postgres-parity:loa:2".to_owned()),
             tenant_id: Some("postgres-parity-tenant".to_owned()),
             ..AccessTokenMetadata::default()
         },
@@ -247,7 +275,7 @@ fn principal() -> AuthPrincipal {
 }
 
 #[tokio::test]
-async fn owned_postgres_runs_generated_migration_sessions_and_fencing() {
+async fn owned_postgres_runs_generated_migration_sessions_skills_and_fencing() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
         return;
     };
@@ -258,7 +286,7 @@ async fn owned_postgres_runs_generated_migration_sessions_and_fencing() {
     let migration = database
         .schema()
         .plan_migration_to_entities(
-            "ai-postgres-parity-v023",
+            "ai-postgres-parity-v024",
             "graphql-orm-ai disposable PostgreSQL parity",
             module.entities(),
         )
@@ -276,7 +304,9 @@ async fn owned_postgres_runs_generated_migration_sessions_and_fencing() {
         Arc::new(ProtectionPolicy),
         Arc::new(DatabaseManagedContentProtector),
     );
-    let principal = principal();
+    let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
+        .expect("current whole-second test time should validate");
+    let principal = principal(now);
     let session = sessions
         .create_session(
             &principal,
@@ -319,6 +349,86 @@ async fn owned_postgres_runs_generated_migration_sessions_and_fencing() {
     assert_eq!(messages.edges.len(), 1);
     assert_eq!(messages.edges[0].node.id, queued.message_id);
 
+    let skills = OrmAiSkillCatalogService::new(
+        database.clone(),
+        Arc::new(AllowSkills),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+        RecentMfaPolicy {
+            maximum_age: Duration::minutes(5),
+            clock_skew: Duration::seconds(30),
+            allowed_amr: vec!["otp".to_owned()],
+            allowed_acr: vec!["urn:postgres-parity:loa:2".to_owned()],
+            match_mode: AssuranceMatchMode::All,
+        },
+        Arc::new(FixedClock::new(now)),
+    );
+    let skill = skills
+        .upsert_skill(
+            &principal,
+            UpsertAiSkillInput {
+                id: None,
+                scope: AiScopeInput {
+                    kind: "postgres-parity".to_owned(),
+                    id: "scope-1".to_owned(),
+                    tenant_id: Some("postgres-parity-tenant".to_owned()),
+                },
+                name: "PostgreSQL parity skill".to_owned(),
+                description: "Exercises generated exact-scope skill persistence.".to_owned(),
+                expected_version: None,
+            },
+        )
+        .await
+        .expect("skill metadata should persist through generated PostgreSQL ORM APIs");
+    let published_skill = skills
+        .publish_version(
+            &principal,
+            PublishAiSkillVersionInput {
+                skill_id: skill.id,
+                expected_skill_version: skill.row_version,
+                version: "1".to_owned(),
+                instructions: "Use only freshly authorized tools.".to_owned(),
+                allowed_tool_fingerprints: vec!["a".repeat(64)],
+                maximum_classification: AiSkillClassificationInput::Internal,
+                maximum_tool_maturity: AiSkillMaturityInput::ReadOnly,
+                activation: AiSkillActivationInput::Manual,
+                input_schema: async_graphql::Json(serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false
+                })),
+                output_schema: async_graphql::Json(serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false
+                })),
+                required_provider_capabilities: AiSkillProviderCapabilitiesInput::default(),
+                budget: AiSkillBudgetInput {
+                    maximum_steps: 2,
+                    maximum_duration_seconds: 30,
+                    maximum_output_tokens: 1_024,
+                    maximum_cost_microunits: None,
+                },
+                allowed_proposal_types: vec![],
+                allowed_ui_intents: vec![],
+                enable: true,
+            },
+        )
+        .await
+        .expect("protected immutable skill version should persist on PostgreSQL");
+    assert!(published_skill.enabled);
+    assert_eq!(
+        skills
+            .resolve_enabled_skills(
+                &principal,
+                AiScope::new("postgres-parity", "scope-1").with_tenant_id("postgres-parity-tenant"),
+            )
+            .await
+            .expect("exact-scope PostgreSQL skill query should resolve")
+            .len(),
+        1
+    );
+
     let runs = OrmAiRunService::new(
         database,
         Arc::new(SystemClock),
@@ -339,6 +449,7 @@ async fn owned_postgres_runs_generated_migration_sessions_and_fencing() {
     assert_eq!(running.run_id(), claimed.run_id());
 
     drop(sessions);
+    drop(skills);
     drop(runs);
     drop(container);
 }

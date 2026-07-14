@@ -47,6 +47,13 @@ below are still being implemented.
 - Default-deny tool registration and enablement, maturity gates, exact
   descriptor fingerprints, recursive AI-control-plane denial, and static
   result disclosure schemas.
+- A protected, immutable, GraphQL-managed skill catalog with recent-MFA
+  publication, exact scope/CAS/audit enforcement, tool and UI-intent
+  descriptor fingerprints, capability/classification/maturity requests,
+  schemas, and hard per-run ceilings. Skill resolution grants no authority.
+- A default-deny logical UI-intent registry with JSON Schema 2020-12 payload
+  validation and exact descriptor fingerprints. Validated intents are
+  suggestions only; consumers own resource reauthorization and route mapping.
 - Fresh `agql-auth` principal rehydration before application tools, with the
   host's ordinary GraphQL context, resolver authorization, row policy,
   assurance, rate limits, and audit remaining authoritative.
@@ -208,8 +215,9 @@ A host then:
    restore-readiness implementations.
 4. Registers immutable logical GraphQL targets and reviewed application tools
    with exact operation and disclosure contracts.
-5. Composes `AiQueryRoot`, `AiMutationRoot`, and `AiSubscriptionRoot` into the
-   application or dedicated AI subgraph.
+5. Composes `AiQueryRoot`, `AiMutationRoot`, and `AiSubscriptionRoot`, plus
+   separately composable configuration, proposal, attachment, and skill roots
+   as required, into the application or dedicated AI subgraph.
 6. Opens the runtime start gate only after managed migration validation and
    restore reconciliation succeed.
 
@@ -223,6 +231,8 @@ implementation, credential format, HTTP stack, or service topology. See the
 
 The [getting-started guide](docs/getting-started.md) tracks which runtime
 services are concrete today and which host seams are still foundations.
+Skill publication and logical frontend suggestions are described in the
+[skills and UI-intents guide](docs/skills-and-ui-intents.md).
 
 ## Chat and streaming model
 
@@ -257,6 +267,9 @@ exact approval binding, proposal schemas, fenced state transitions, and restore
 planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
+Protected immutable skill publication/resolution and exact schema-fingerprinted
+logical UI-intent validation are implemented as separately composable,
+project-neutral contracts; durable intent event delivery remains pending.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authoritative built-in-tool
@@ -312,6 +325,9 @@ in-memory databases. PostgreSQL/MSSQL checks are compile-only unless a test
 harness proves that it created and owns a disposable Docker container, unique
 credentials, database, and cleanup. Generic `DATABASE_URL` fallbacks are
 forbidden. Consumer-application integration tests belong to those consumers.
+The owned PostgreSQL harness exercises only generated ORM migrations,
+transactions, queries, keysets, skill persistence, and fencing; it contains no
+application raw SQL.
 
 ```bash
 cargo fmt --check
