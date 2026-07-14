@@ -49,19 +49,24 @@ camelCase to PascalCase.
    ordinary query/subscription roots. Configure `OrmAiConfigurationService`
    retention policy access, then schedule `OrmAiInboxPruningService` only as a
    trusted bounded host worker.
-9. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
+9. Schedule `OrmAiSessionRetentionService` as a separate trusted host worker.
+   Start a scan cycle with no cursor and continue its bounded keyset pages until
+   `next_session_cursor` is absent. This prunes only eligible provisional
+   deltas and terminal unattached message content; see the
+   [retention guide](session-retention.md).
+10. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.
-10. Opt into budget-policy mutations with
+11. Opt into budget-policy mutations with
    `OrmAiConfigurationService::with_budget_policy_management`, using deployment
    ceilings no broader than operational spend policy. Authorize reads and
    writes independently; writes require recent MFA.
-11. Construct `OrmAiPricingService` with an independent configuration access
+12. Construct `OrmAiPricingService` with an independent configuration access
    policy, recent-MFA policy, trusted clock, and
    `AiPricingCatalogManagementLimits`. Install the same instance as
    `Arc<dyn AiPricingCatalogService>`, `Arc<dyn AiPricingQuoteService>`, and
    `Arc<dyn AiProviderUsageAccounting>` when using its token-only accounting.
-12. Apply/validate migrations and restore reconciliation, then open the runtime
+13. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
@@ -175,7 +180,8 @@ ambiguous replay remain closed. See the
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
 upload/search/deletion, attachment quotas/derivatives, authoritative
-provider-built-in unit pricing, per-session live-delta retention,
+provider-built-in unit pricing, complete deleting-session and external-artifact
+retention,
 provider-turn/partial-
 batch restart adoption, and top-level approval-wait coordination remain under
 implementation. Protected provisional live output is opt-in and documented in

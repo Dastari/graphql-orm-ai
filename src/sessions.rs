@@ -97,6 +97,8 @@ pub struct AiMessageView {
     pub run_id: Option<Uuid>,
     /// Protected/decrypted bounded preview, maximum 4 KiB.
     pub preview: String,
+    /// Whether retention removed the protected preview and content blocks.
+    pub content_purged: bool,
     /// Number of separately fetched blocks.
     pub block_count: i64,
     /// Completion state.

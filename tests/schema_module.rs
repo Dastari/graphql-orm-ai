@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.19.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.20.0");
     assert_eq!(catalog.entities().len(), 39);
     assert!(
         catalog
@@ -120,6 +120,40 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 "sequence".to_owned(),
             ]
     }));
+    let message = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_messages")
+        .expect("message table should exist");
+    assert!(
+        message
+            .columns
+            .iter()
+            .any(|column| { column.name == "protected_preview" && column.nullable })
+    );
+    assert!(
+        message
+            .columns
+            .iter()
+            .any(|column| { column.name == "content_purged_at" && column.nullable })
+    );
+    assert!(
+        message
+            .columns
+            .iter()
+            .any(|column| { column.name == "row_version" && !column.nullable })
+    );
+    let attachment = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_attachments")
+        .expect("attachment table should exist");
+    assert!(
+        attachment
+            .indexes
+            .iter()
+            .any(|index| { index.columns == ["message_id"] && !index.is_unique })
+    );
     assert!(
         inbox_event
             .columns

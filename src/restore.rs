@@ -58,6 +58,9 @@ pub struct AiRestoreSnapshotFacts {
     /// Immutable pricing versions with invalid unique references, scope/route
     /// bindings, rates, or creator audit linkage.
     pub invalid_pricing_policy_count: u64,
+    /// Message-content tombstones, retained block rows, or expected
+    /// retention-gap classifications that fail the current purge contract.
+    pub invalid_session_retention_count: u64,
     /// Duplicate durable stream sequence count.
     pub duplicate_stream_sequence_count: u64,
     /// Retention/known stream gap count.
@@ -205,6 +208,13 @@ impl AiRestoreReconciler {
         if facts.invalid_pricing_policy_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_PRICING_POLICY_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_session_retention_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_SESSION_RETENTION_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

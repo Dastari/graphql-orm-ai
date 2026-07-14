@@ -9,6 +9,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Usage ledger, budgets, and reporting](usage-and-budgets.md)
 - [Protected live streaming](live-streaming.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
+- [Bounded session retention](session-retention.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
 - [Native Ollama provider](ollama.md)
 - [Installed local harness boundary](local-harness.md)

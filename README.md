@@ -30,6 +30,11 @@ adapters listed below are still being implemented.
   assistant-output notifications, bounded catch-up, resumable subscriptions,
   periodic current-principal reauthorization, explicit retention-gap reset,
   and a GraphQL-policy-driven bounded pruning worker.
+- A host-only bounded session-retention worker that uses generated ORM
+  transactions to remove expired provisional deltas and scrub eligible
+  terminal message content under the exact current GraphQL-managed scope
+  policy. Message metadata remains as an explicit tombstone, sequence gaps
+  force bounded client reset, and attachments or nonterminal work stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
@@ -248,7 +253,7 @@ implemented through authenticated, optionally PascalCase GraphQL roots.
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
-recovery, and per-session live-delta retention/purge,
+recovery, complete deleting-session/raw-payload/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivatives/retention purge, production mutable secret
 stores/keyrings, other provider adapters,
@@ -258,8 +263,10 @@ production OS/container local-harness launchers/ACP framing, and Docker-owned
 PostgreSQL parity testing. Details live in
 [implementation status](docs/implementation-status.md).
 
-See [protected live streaming](docs/live-streaming.md) for the opt-in sink,
-provisional-event contract, client reconciliation rules, and failure model.
+See [session retention](docs/session-retention.md) for the bounded deletion and
+tombstone contract. See [protected live streaming](docs/live-streaming.md) for
+the opt-in sink, provisional-event contract, client reconciliation rules, and
+failure model.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 

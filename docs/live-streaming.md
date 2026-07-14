@@ -107,8 +107,10 @@ uncertain for privileged reconciliation. The worker must not replay that
 provider call. A stale worker cannot append after lease expiry or recovery
 because the durable transaction re-reads the exact current fence.
 
-The principal-inbox retention worker does not prune per-session live-delta
-events. Hosts must not manually delete those rows or reuse cursors. A separate
-bounded session-event retention worker remains required; until it lands, keep
-the configured delta policy as an obligation rather than treating it as
-executed purge.
+The host-only `OrmAiSessionRetentionService` now deletes expired
+`provider_live_delta` rows in bounded per-session transactions under the exact
+current GraphQL-managed scope policy. It never rewinds or reuses sequence
+values. A later replay that crosses a removed sequence returns
+`reset_required`, so the client discards provisional rendering and reloads its
+bounded authoritative windows. Stable lifecycle/completion events are not
+deleted by this worker. See the [session-retention guide](session-retention.md).

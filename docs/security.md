@@ -130,6 +130,18 @@ client data. Retention is recent-MFA/CAS/audit managed and deletes only a
 contiguous prefix under current scope policies. A missing policy, cursor gap,
 or concurrent stream change fails closed instead of guessing.
 
+Session retention is not a user capability and does not execute application
+resolvers. The trusted worker uses only generated ORM repositories, validates
+deployment hard bounds, and reloads the exact current GraphQL-managed scope
+policy in the same transaction as deletion. It never decrypts the preview,
+block, or event payload it removes. A message is eligible only after
+finalization, terminal run state, an exact block-count check, and proof that no
+attachment references it. Corruption, missing policy, nonterminal work,
+attachments, or a CAS race retains content. The resulting tombstone proves
+only that this worker removed the protected preview and block rows; it does not
+prove deletion of metadata, external objects, provider files, tools,
+proposals, usage, audit, or domain data.
+
 ## Operational safety
 
 Runs use monotonically increasing fencing generations. Stale workers and late

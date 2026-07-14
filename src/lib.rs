@@ -65,6 +65,8 @@ mod orm_provider_output;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_session_retention;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_sessions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_subscriptions;
@@ -84,6 +86,7 @@ mod restore;
 mod run_state;
 mod runtime;
 mod secrets;
+mod session_retention;
 mod sessions;
 mod subscriptions;
 mod tools;
@@ -134,6 +137,8 @@ pub use orm_provider_output::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_runs::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_session_retention::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_sessions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_subscriptions::*;
@@ -155,6 +160,7 @@ pub use restore::*;
 pub use run_state::*;
 pub use runtime::*;
 pub use secrets::*;
+pub use session_retention::*;
 pub use sessions::*;
 pub use subscriptions::*;
 pub use tools::*;
@@ -175,9 +181,9 @@ pub mod prelude {
         AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
         AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,
-        AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiToolAuthorizationPolicy,
-        AiToolCatalog, AiToolDescriptor, AiUsageAccessPolicy, AiUsageService, DataClassification,
-        SecretRef, ToolMaturity,
+        AiRuntime, AiRuntimeBuilder, AiScope, AiSecretStore, AiSessionRetentionService,
+        AiToolAuthorizationPolicy, AiToolCatalog, AiToolDescriptor, AiUsageAccessPolicy,
+        AiUsageService, DataClassification, SecretRef, ToolMaturity,
     };
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub use crate::{
@@ -190,11 +196,12 @@ pub mod prelude {
         AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
         AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,
         AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
-        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
-        OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-        OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
-        OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRunService, OrmAiUsageService,
+        AiSessionRetentionLimits, OrmAiApplicationToolCallService, OrmAiApprovalService,
+        OrmAiAttachmentService, OrmAiBudgetService, OrmAiConsequentialToolCallService,
+        OrmAiCoordinatorCheckpointService, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
+        OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
+        OrmAiProviderOutputService, OrmAiRunService, OrmAiSessionRetentionService,
+        OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

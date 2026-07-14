@@ -5,10 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.19.0` and the AI
-schema module to `0.19.0`.
+This development line advances the pre-1.0 crate version to `0.20.0` and the AI
+schema module to `0.20.0`.
 
 ### Added
+
+- A host-only `AiSessionRetentionService` and generated-ORM
+  `OrmAiSessionRetentionService` for bounded keyset scan cycles. Each session
+  transaction reloads its exact current GraphQL-managed scope policy, deletes
+  only expired provisional `provider_live_delta` events, and scrubs protected
+  preview/block content only from finalized messages whose producing run is
+  terminal and which have no linked attachment. Nonterminal, attached,
+  corrupt, unconfigured, or concurrently changed state fails closed.
+- Explicit retained-message tombstones through `AiMessageView::content_purged`.
+  Authorized message windows retain metadata and a fixed server-authored
+  preview, while block reads return an empty window without opening protected
+  data. Session-event windows now signal `reset_required` when selective delta
+  retention creates a sequence gap.
+- Same-transaction redacted retention audit, bounded/idempotent SQLite tests,
+  and fatal restore evidence for inconsistent message tombstones or retention
+  gap classification.
 
 - An append-only, GraphQL-managed immutable pricing catalog with exact
   scope/provider/model bindings, globally unique version references,

@@ -1169,11 +1169,12 @@ impl OrmAiRunService {
                         run_id: Some(lease.run_id.0),
                         provider_kind: Some(output.provider_kind),
                         provider_model: Some(output.provider_model),
-                        protected_preview: output.protected_preview,
+                        protected_preview: Some(output.protected_preview),
                         block_count: i64::try_from(output.blocks.len())
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
                         completion_state: "complete".to_owned(),
                         finalized_at: Some(now.unix_timestamp()),
+                        content_purged_at: None,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;

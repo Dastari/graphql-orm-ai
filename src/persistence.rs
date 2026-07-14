@@ -768,7 +768,7 @@ pub(crate) struct AiMessageRecord {
     pub provider_model: Option<String>,
     /// Protected bounded preview envelope.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_preview: serde_json::Value,
+    pub protected_preview: Option<serde_json::Value>,
     /// Number of separately windowed content blocks.
     pub block_count: i64,
     /// Completion state.
@@ -777,6 +777,14 @@ pub(crate) struct AiMessageRecord {
     pub created_at: i64,
     /// Finalized timestamp.
     pub finalized_at: Option<i64>,
+    /// Timestamp at which protected preview and block content were removed by
+    /// the trusted retention worker.
+    #[filterable(type = "number")]
+    pub content_purged_at: Option<i64>,
+    /// CAS version used to serialize retention with any future message
+    /// metadata maintenance.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
 }
 
 /// Windowable content block capped by runtime policy.
@@ -842,6 +850,7 @@ pub(crate) struct AiAttachmentRecord {
     pub owner_subject: String,
     #[filterable(type = "uuid")]
     pub session_id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "uuid")]
     pub message_id: Option<graphql_orm::uuid::Uuid>,
     /// Storage-provider opaque reference, never a user-controlled path.
     #[backup(redact)]
@@ -1780,7 +1789,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.19.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.20.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

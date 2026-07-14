@@ -4,6 +4,75 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: bounded session content retention (crate/schema 0.19.0 to 0.20.0)
+
+Apply AI schema module `0.20.0` while session/provider workers, subscriptions,
+backups, and restore callbacks are closed. Do not run 0.20.0 code against
+module 0.19.0. The module still owns 39 private entities and changes only
+AI-owned storage:
+
+- make `graphql_orm_ai_messages.protected_preview` nullable;
+- add nullable `content_purged_at` and required CAS `row_version` to messages;
+  and
+- add a non-unique lookup index on
+  `graphql_orm_ai_attachments.message_id`.
+
+For every existing message, preserve its protected preview, set
+`content_purged_at` to null, and initialize `row_version` to zero using the
+dependency-generated migration/default. Do not synthesize a tombstone or
+delete a block during migration. Validate that each unpurged complete message
+still has a protected preview and exactly `block_count` ordered block rows.
+There is no consumer-owned application/domain data migration.
+
+After migration, schedule `OrmAiSessionRetentionService` as a trusted host
+worker. Begin each scan cycle with no cursor, pass each returned opaque
+`next_session_cursor` into the next call, and begin a later cycle only after it
+returns absent. Deployment limits bound every scan, event query, message query,
+and block deletion. The worker uses generated ORM repositories and
+state-machine transactions only; do not replace it with application SQL or
+expose it as a user GraphQL operation.
+
+The current exact scope retention policy is reloaded and validated inside each
+session transaction. Missing/legacy policy, corrupt rows, CAS conflicts,
+nonterminal runs, linked attachments, and block-count mismatch retain content
+and fail closed or are reported. A successful pass may:
+
+- delete expired provisional `provider_live_delta` session-event rows;
+- clear the protected preview and delete blocks for an expired, finalized,
+  terminal-run message with no attachment;
+- retain the message shell with `content_purged_at`, `block_count = 0`, and a
+  fixed server-authored tombstone in authenticated reads; and
+- append one redacted audit fact in the same transaction.
+
+This is not complete erasure. It never deletes a session, message metadata,
+attachments or blob objects, runs, tool/proposal/approval payloads, raw
+provider payloads, provider-persistent files, usage, egress, audit, fence, or
+restore evidence. Continue to treat those retention fields and deleting-
+session workflows as separate obligations.
+
+`AiMessageView` gains required GraphQL/Rust field `content_purged` (or
+`ContentPurged` under the PascalCase feature). A purged authorized message has
+the fixed preview `Content removed by retention policy`, reports zero blocks,
+and returns an empty authorized block window. Clients must not infer that the
+message metadata or linked external artifacts were erased.
+
+Selective live-delta deletion can leave durable sequence gaps without reusing
+or rewinding sequence values. `AiSessionService::session_event_page` now
+returns an empty page with `reset_required = true` when the requested replay
+window crosses such a gap. Subscription and virtualized clients must discard
+provisional state and reload bounded authoritative message/session windows.
+
+Restore fact collectors must populate
+`AiRestoreSnapshotFacts::invalid_session_retention_count`. Report nonzero for
+inconsistent purged/unpurged message shapes, retained blocks behind a
+tombstone, or an event gap that cannot be classified as expected retention.
+Any nonzero value adds fatal `AI_RESTORE_SESSION_RETENTION_INVALID` and keeps
+runtime readiness closed. Expected, validated retention gaps remain represented
+through reset semantics; duplicate sequence values remain independently fatal.
+
+This is a pre-1.0 public Rust API, GraphQL SDL, persistence, migration,
+backup/restore, and behavioral contract change.
+
 ## Unreleased: immutable pricing catalog (crate/schema 0.18.0 to 0.19.0)
 
 Apply AI schema module `0.19.0` while configuration writes, provider workers,

@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.19.0`) and 39 private records
+- AI schema-module identity (currently version `0.20.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -226,6 +226,11 @@ production-ready behavior.
   current policies in the deletion transaction, preserves a recent-event
   floor, deletes only a contiguous expired prefix, never rewinds the stream
   head, and fails closed for absent/legacy policy.
+- Host-only bounded session retention using generated ORM keysets and
+  state-machine transactions. The exact current scope policy gates deletion of
+  expired provisional live deltas and scrubbing of terminal unattached message
+  preview/blocks; metadata tombstones remain windowable, event gaps request a
+  client reset, and every changed session appends redacted audit atomically.
 - Optional coherent `graphql-case-pascal` contract covering roots, arguments,
   inputs, outputs, subscriptions, enums, and forwarded generated ORM fields
   without lowercase aliases.
@@ -237,9 +242,10 @@ production-ready behavior.
 
 - Applied host migrations and production PostgreSQL parity testing. PostgreSQL
   remains compile-checked only; no local or production PostgreSQL was touched.
-- Per-session event/live-delta and message/content retention purge execution.
-  Principal-inbox retention is implemented; other retention fields remain
-  obligations until their dedicated bounded workers land.
+- Complete deleting-session, raw-provider/tool payload, audit, attachment/blob,
+  and provider-persistent-file retention workflows. Principal-inbox pruning
+  and bounded per-session provisional-delta/message-content pruning are
+  implemented; their reports do not claim complete erasure.
 - Usage and skill roots beyond the session,
   configuration, attachment, proposal, and approval surfaces.
 - Application-encrypted field/keyring and production mutable secret-store
@@ -294,12 +300,11 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add bounded session-event/content retention workers.
-2. Add provider-independent stateless conversation checkpoints for safe Ollama
+1. Add provider-independent stateless conversation checkpoints for safe Ollama
    and installed-harness tool continuation, then a separately reviewed
    production OS/container launcher; provider-persistent file lifecycle
    remains gated.
-3. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
+2. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
 ## Current verification

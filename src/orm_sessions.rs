@@ -280,8 +280,19 @@ impl AiSessionService for OrmAiSessionService {
 
         let mut edges = Vec::with_capacity(connection.edges.len());
         for edge in connection.edges {
-            let preview = self
-                .open_value(
+            let content_purged = edge.node.content_purged_at.is_some();
+            let preview = if content_purged {
+                if edge.node.protected_preview.is_some() || edge.node.block_count != 0 {
+                    return Err(AiError::PersistenceFailed);
+                }
+                "Content removed by retention policy".to_owned()
+            } else {
+                let protected_preview = edge
+                    .node
+                    .protected_preview
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?;
+                self.open_value(
                     &policy,
                     content_context(
                         "graphql_orm_ai_messages",
@@ -289,15 +300,15 @@ impl AiSessionService for OrmAiSessionService {
                         "protected_preview",
                         &scope,
                     ),
-                    &edge.node.protected_preview,
+                    protected_preview,
                 )
-                .await?;
-            let preview = preview
+                .await?
                 .as_str()
                 .ok_or(AiError::PersistenceFailed)?
-                .to_owned();
+                .to_owned()
+            };
             edges.push(AiMessageEdge {
-                node: message_view(&edge.node, preview),
+                node: message_view(&edge.node, preview, content_purged),
                 cursor: edge.cursor,
             });
         }
@@ -333,6 +344,15 @@ impl AiSessionService for OrmAiSessionService {
             )
             .await?
             .ok_or(AiError::NotFound)?;
+        if message.content_purged_at.is_some() {
+            if message.protected_preview.is_some() || message.block_count != 0 {
+                return Err(AiError::PersistenceFailed);
+            }
+            return Ok(Vec::new());
+        }
+        if message.protected_preview.is_none() {
+            return Err(AiError::PersistenceFailed);
+        }
         let scope = record_scope(&session);
         let policy = self.protection_policy(principal, &scope).await?;
         let block_after = after_block_index.map(|value| IntFilter {
@@ -435,6 +455,28 @@ impl AiSessionService for OrmAiSessionService {
             })
             .await
             .map_err(map_transaction)?;
+        let mut expected_sequence = after_sequence.saturating_add(1);
+        let reset_required = if after_sequence >= watermark {
+            false
+        } else if rows.is_empty() {
+            true
+        } else {
+            rows.iter().any(|row| {
+                let gap = row.session_id != session_id.0
+                    || row.sequence != expected_sequence
+                    || row.sequence > watermark;
+                expected_sequence = row.sequence.saturating_add(1);
+                gap
+            })
+        };
+        if reset_required {
+            return Ok(AiSessionEventPage {
+                events: Vec::new(),
+                watermark,
+                has_more: false,
+                reset_required: true,
+            });
+        }
         let has_more = rows.len() > first as usize;
         let mut rows = rows;
         rows.truncate(first as usize);
@@ -871,10 +913,11 @@ impl AiSessionService for OrmAiSessionService {
                         run_id: Some(run_id),
                         provider_kind: None,
                         provider_model: None,
-                        protected_preview,
+                        protected_preview: Some(protected_preview),
                         block_count: 1,
                         completion_state: "complete".to_owned(),
                         finalized_at: Some(now),
+                        content_purged_at: None,
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
@@ -1111,7 +1154,7 @@ fn session_view(record: &AiSessionRecord) -> AiSessionView {
     }
 }
 
-fn message_view(record: &AiMessageRecord, preview: String) -> AiMessageView {
+fn message_view(record: &AiMessageRecord, preview: String, content_purged: bool) -> AiMessageView {
     AiMessageView {
         id: record.id,
         session_id: record.session_id,
@@ -1120,6 +1163,7 @@ fn message_view(record: &AiMessageRecord, preview: String) -> AiMessageView {
         author_subject: record.author_subject.clone(),
         run_id: record.run_id,
         preview,
+        content_purged,
         block_count: record.block_count,
         completion_state: record.completion_state.clone(),
         created_at: record.created_at,

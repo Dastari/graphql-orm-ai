@@ -21,6 +21,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     {
         assert!(sdl.contains("aiSessions("));
         assert!(sdl.contains("aiMessages(sessionId:"));
+        assert!(sdl.contains("contentPurged: Boolean!"));
         assert!(sdl.contains("createAiSession(input:"));
         assert!(sdl.contains("aiSessionEvents(sessionId:"));
         assert!(sdl.contains("aiInboxEventPage("));
@@ -34,6 +35,7 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     {
         assert!(sdl.contains("AiSessions("));
         assert!(sdl.contains("AiMessages(SessionId:"));
+        assert!(sdl.contains("ContentPurged: Boolean!"));
         assert!(sdl.contains("CreateAiSession(Input:"));
         assert!(sdl.contains("AiSessionEvents(SessionId:"));
         assert!(sdl.contains("AiInboxEventPage("));
