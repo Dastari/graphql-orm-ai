@@ -835,13 +835,13 @@ impl OrmAiRunService {
                                 }
                                 (Some(checkpoint.provider_response_id), false)
                             } else if checkpoint.checkpoint_kind == "tool_batch_persisted" {
-                                let provider_response_id = checkpoint
-                                    .provider_response_id
-                                    .as_deref()
-                                    .filter(|value| valid_provider_reference(value))
-                                    .ok_or_else(|| {
-                                        OrmPublicError::new(OrmErrorCode::InternalError)
-                                    })?;
+                                let provider_response_id =
+                                    checkpoint.provider_response_id.as_deref();
+                                if provider_response_id
+                                    .is_some_and(|value| !valid_provider_reference(value))
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
                                 let budget_reservation_id =
                                     checkpoint.budget_reservation_id.ok_or_else(|| {
                                         OrmPublicError::new(OrmErrorCode::InternalError)
@@ -886,7 +886,7 @@ impl OrmAiRunService {
                                     &checkpoint.checkpoint_kind,
                                     &reservation.provider_kind,
                                     &reservation.provider_model,
-                                    Some(provider_response_id),
+                                    provider_response_id,
                                     budget_reservation_id,
                                     protected_state,
                                 )
@@ -912,7 +912,7 @@ impl OrmAiRunService {
                                     .filter(|call| {
                                         call.lease_generation == lease.lease_generation
                                             && call.provider_response_id.as_deref()
-                                                == Some(provider_response_id)
+                                                == provider_response_id
                                             && call.budget_reservation_id
                                                 == Some(budget_reservation_id)
                                     })
@@ -949,7 +949,14 @@ impl OrmAiRunService {
                                         ));
                                     }
                                 }
-                                (None, true)
+                                // Stateless checkpoints contain the complete
+                                // protected conversation but deliberately have
+                                // no provider response ID. They are safe for
+                                // same-generation consumption, while an
+                                // expired lease remains closed for privileged
+                                // recovery until cross-generation replay
+                                // validation is implemented.
+                                (None, provider_response_id.is_some())
                             } else {
                                 (None, false)
                             }
@@ -1261,10 +1268,7 @@ impl OrmAiRunService {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     let valid_kind = match checkpoint.checkpoint_kind.as_str() {
                         "provider_turn_persisted" => checkpoint.completed_tools.is_empty(),
-                        "tool_batch_persisted" => {
-                            checkpoint.provider_response_id.is_some()
-                                && !checkpoint.completed_tools.is_empty()
-                        }
+                        "tool_batch_persisted" => !checkpoint.completed_tools.is_empty(),
                         _ => false,
                     };
                     if persisted_state(&current)? != AiRunState::Running
@@ -1438,7 +1442,6 @@ impl OrmAiRunService {
                         .ok_or_else(OrmPublicError::not_found)?;
                     if checkpoint.run_id != current.id
                         || checkpoint.checkpoint_kind != "tool_batch_persisted"
-                        || checkpoint.provider_response_id.is_none()
                         || checkpoint.budget_reservation_id.is_none()
                         || checkpoint.assistant_message_id.is_some()
                         || checkpoint.protected_state.is_none()
@@ -2581,7 +2584,7 @@ fn valid_provider_reference(value: &str) -> bool {
 fn valid_provider_kind(value: &str) -> bool {
     matches!(
         value,
-        "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible"
+        "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible" | "local_harness"
     )
 }
 
@@ -2626,7 +2629,7 @@ pub(crate) fn coordinator_checkpoint_hash(
     let provider_kind_hash_value = match provider_kind {
         "openai" => "open_ai",
         "openai_compatible" => "open_ai_compatible",
-        "anthropic" | "xai" | "ollama" => provider_kind,
+        "anthropic" | "xai" | "ollama" | "local_harness" => provider_kind,
         _ => return Err(AiError::PersistenceFailed),
     };
     let protected_state_hash = hex::encode(Sha256::digest(

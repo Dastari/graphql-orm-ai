@@ -6,10 +6,11 @@ local HTTP providers: those use fixed endpoint adapters, while an installed
 program uses an immutable deployment registration and a trusted process-tree
 launcher.
 
-The implemented foundation is suitable for a narrow text or structured-output
-harness. It deliberately does not grant coding-workspace, filesystem, terminal,
-MCP, provider built-in, attachment, network, credential, custom-tool, or
-provider-continuation authority.
+The implemented foundation is suitable for a narrow text/structured-output
+harness and may opt into exact stateless application tools. It deliberately
+does not grant coding-workspace, filesystem, terminal, MCP, provider built-in,
+attachment, network, credential, arbitrary callback, or provider-retained
+continuation authority.
 
 ## Authority split
 
@@ -60,32 +61,55 @@ contract.
 
 ```json
 {
-  "protocol": "graphql-orm-ai/local-harness-jsonl/v1",
+  "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
   "type": "request",
   "model": "deployment-logical-name",
   "instructions": ["trusted runtime instruction"],
   "input": [{"type": "text", "text": "authorized content"}],
+  "continuation_mode": "stateless_replay",
+  "continuation": null,
+  "tools": [{
+    "tool_id": "records.read",
+    "provider_name": "records_read",
+    "fingerprint": "reviewed-fingerprint",
+    "description": "Read one authorized record",
+    "parameters": {"type": "object", "additionalProperties": false},
+    "strict": true
+  }],
   "output_schema": null,
   "maximum_output_tokens": 256
 }
 ```
 
 It then closes stdin. Stdout is arbitrary transport chunks containing newline-
-terminated serialized `ProviderEvent` values. The initial driver accepts one
+terminated serialized `ProviderEvent` values. The driver accepts one
 ordered sequence of:
 
 1. `response_started` without a response ID;
-2. zero or more visible `text_delta` values;
-3. one usage event within registered context/output token ceilings; and
+2. zero or more visible `text_delta` values and bounded tool calls, where each
+   call uses an exact offered local tool ID and follows
+   `tool_call_started` → optional argument deltas → one object-valued
+   `tool_call_completed`;
+3. one usage event after every started call is complete and within registered
+   context/output token ceilings; and
 4. `response_completed` without a response ID, followed by successful process
    exit.
 
 Every line, total stdout, discarded stderr, frame count, startup, turn, and
 shutdown is bounded. A partial line, malformed JSON, excessive counter,
-duplicate/out-of-order terminal event, response ID, reasoning event, citation,
-tool/built-in request, unknown event, output overrun, timeout, or unsuccessful
-exit fails closed. Raw stderr and process/request content are never placed in a
-`ProviderError`.
+duplicate/out-of-order terminal or tool event, unknown/unoffered tool ID,
+response ID, reasoning event, citation, built-in request, unknown event, output
+overrun, timeout, or unsuccessful exit fails closed. Raw stderr and
+process/request content are never placed in a `ProviderError`.
+
+Tool-capable registrations must set both `custom_tools` and
+`stateless_continuation`; `parallel_tool_calls` may then be enabled. The
+request's protected continuation contains only the original trusted
+instructions, visible text/JSON, exact assistant calls, and
+disclosure-validated tool outputs. Each replayed tool output has a distinct
+fresh egress proof. The harness cannot ask the server to invoke an arbitrary
+callback: normalized calls still flow through the ordinary durable
+`graphql-orm-ai` tool service and authenticated GraphQL resolver path.
 
 `AiLocalHarnessProvider` first validates the ordinary `ProviderRequestContext`
 as `ProviderKind::LocalHarness`, including the exact current call's atomic
@@ -111,6 +135,9 @@ use graphql_orm_ai::{
 let capabilities = ProviderCapabilities {
     streaming: true,
     structured_output: true,
+    custom_tools: true,
+    parallel_tool_calls: true,
+    stateless_continuation: true,
     local: true,
     maximum_context_tokens: Some(8_192),
     maximum_output_tokens: Some(1_024),
@@ -145,11 +172,12 @@ The repository tests use an in-memory fake process/launcher. They prove that
 the process request does not contain executable, arguments, sandbox identity,
 or stderr; fixed launch facts cannot be swapped by model input; model/budget
 proof swaps fail before launch; arbitrary output chunk boundaries normalize;
-unsafe capabilities and process-requested tools fail; stderr and partial-frame
-limits terminate; and dropping a partial stream exercises the required
+unsafe capabilities and unoffered/malformed tool events fail; stateless
+history and exact definitions use v2 framing; stderr and partial-frame limits
+terminate; and dropping a partial stream exercises the required
 kill-on-drop path. The suite starts no subprocess, contacts no model/provider,
 and opens no database.
 
-ACP framing, mediated tool callbacks, resumable sessions, and any separately
-sandboxed coding workspace remain future adapters. They must not widen this
-safe registration implicitly.
+ACP framing, general mediated callbacks, cross-generation stateless adoption,
+resumable process sessions, and any separately sandboxed coding workspace
+remain future adapters. They must not widen this safe registration implicitly.

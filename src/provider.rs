@@ -6,11 +6,14 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 const MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+const MAXIMUM_STATELESS_TOOL_RESULTS: usize = 256;
 
 use crate::{
     AiBudgetReservationId, AiEgressCapability, AiEgressManifest, AiError,
@@ -81,6 +84,10 @@ pub struct ProviderCapabilities {
     pub embeddings: bool,
     /// Background processing/webhooks.
     pub background: bool,
+    /// Provider-retained response continuation.
+    pub provider_retained_continuation: bool,
+    /// Full provider-independent stateless conversation replay.
+    pub stateless_continuation: bool,
     /// Executes locally within the configured deployment boundary.
     pub local: bool,
     /// Maximum context tokens when known.
@@ -151,19 +158,107 @@ impl ModelInputBlock {
     }
 }
 
-/// Explicit provider-side conversation continuation.
+/// Explicit provider-retained or protected stateless conversation continuation.
 ///
 /// A continuation is not an authorization proof. The next request still needs
 /// fresh principal access, budget, and exact egress proofs. Provider adapters
 /// may reject retained-response continuation unless deployment configuration
-/// deliberately permits provider response storage.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// deliberately permits provider response storage. Stateless replay contains
+/// protected content but still proves neither current access nor egress.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ModelContinuation {
     /// Continue from one exact provider response retained by the provider.
     ProviderResponse {
         /// Opaque provider response identifier.
         response_id: String,
+    },
+    /// Replay one exact bounded conversation without provider-retained state.
+    StatelessConversation {
+        /// Original trusted runtime instructions, replayed unchanged.
+        instructions: Vec<String>,
+        /// Exact user/assistant/tool history ending in an assistant tool-call
+        /// message whose results are supplied in the request input.
+        messages: Vec<ModelConversationMessage>,
+    },
+}
+
+impl ModelContinuation {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn chain_reference(&self, input: &[ModelInputBlock]) -> Option<String> {
+        match self {
+            Self::ProviderResponse { response_id } => Some(response_id.clone()),
+            Self::StatelessConversation { .. } => {
+                let encoded = serde_json::to_vec(&(self, input)).ok()?;
+                let mut hasher = Sha256::new();
+                hasher.update(b"graphql-orm-ai/stateless-continuation/v1\0");
+                hasher.update(encoded);
+                Some(format!("stateless:{}", hex::encode(hasher.finalize())))
+            }
+        }
+    }
+}
+
+/// Continuation storage strategy selected by the trusted server-authored plan.
+///
+/// This is not a provider capability proof. Adapters still reject a mode they
+/// do not implement, and every replay needs fresh budget and egress proofs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelContinuationMode {
+    /// The provider retains the preceding response under an opaque ID.
+    #[default]
+    ProviderRetained,
+    /// The runtime replays a complete protected, bounded conversation.
+    StatelessReplay,
+}
+
+/// One assistant-requested tool call retained in stateless conversation state.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelConversationToolCall {
+    /// Runtime-normalized opaque call ID.
+    pub call_id: String,
+    /// Stable local tool ID.
+    pub tool_id: String,
+    /// Provider-facing function name from the exact reviewed definition.
+    pub provider_name: String,
+    /// Exact registered descriptor fingerprint.
+    pub tool_fingerprint: String,
+    /// Complete schema-validated arguments.
+    pub arguments: serde_json::Value,
+}
+
+/// One message in a provider-independent stateless tool conversation.
+///
+/// The representation deliberately excludes hidden thinking, attachments,
+/// provider built-ins, arbitrary roles, and model-authored system messages.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum ModelConversationMessage {
+    /// Initial user content. Stateless tool loops currently accept text/JSON
+    /// only so an attachment cannot be replayed without exact reopening.
+    User {
+        /// Ordered bounded user input blocks.
+        content: Vec<ModelInputBlock>,
+    },
+    /// Accumulated visible assistant content and exact application-tool calls.
+    Assistant {
+        /// Visible assistant text only; hidden thinking is never retained.
+        content: String,
+        /// Ordered exact tool requests from this turn.
+        tool_calls: Vec<ModelConversationToolCall>,
+    },
+    /// One disclosure-validated tool result paired to the preceding assistant
+    /// call by exact order and identity.
+    Tool {
+        /// Runtime-normalized opaque call ID.
+        call_id: String,
+        /// Stable local tool ID.
+        tool_id: String,
+        /// Provider-facing function name from the exact reviewed definition.
+        provider_name: String,
+        /// Disclosure-validated model-visible result.
+        output: serde_json::Value,
     },
 }
 
@@ -178,6 +273,9 @@ pub struct ModelRequest {
     pub input: Vec<ModelInputBlock>,
     /// Optional explicit continuation of the immediately preceding response.
     pub continuation: Option<ModelContinuation>,
+    /// Server-selected continuation storage strategy.
+    #[serde(default)]
+    pub continuation_mode: ModelContinuationMode,
     /// Enabled custom tools already filtered by local policy.
     pub tools: Vec<ModelToolDefinition>,
     /// Enabled provider built-ins, each separately approved for egress.
@@ -215,10 +313,23 @@ impl ModelRequest {
         {
             return Err(ProviderError::InvalidRequest);
         }
-        if let Some(ModelContinuation::ProviderResponse { response_id }) = &self.continuation
-            && !valid_provider_reference(response_id)
-        {
-            return Err(ProviderError::InvalidRequest);
+        match (&self.continuation_mode, &self.continuation) {
+            (
+                ModelContinuationMode::ProviderRetained,
+                Some(ModelContinuation::ProviderResponse { response_id }),
+            ) if valid_provider_reference(response_id) => {}
+            (ModelContinuationMode::ProviderRetained, None)
+            | (ModelContinuationMode::StatelessReplay, None) => {}
+            (
+                ModelContinuationMode::StatelessReplay,
+                Some(ModelContinuation::StatelessConversation {
+                    instructions,
+                    messages,
+                }),
+            ) if self.instructions.is_empty()
+                && valid_instructions(instructions)
+                && validate_stateless_messages(messages, &self.input, &self.tools) => {}
+            _ => return Err(ProviderError::InvalidRequest),
         }
         let has_tool_results = self
             .input
@@ -276,6 +387,17 @@ impl ModelRequest {
             {
                 return Err(ProviderError::InvalidRequest);
             }
+        }
+        if self.continuation_mode == ModelContinuationMode::StatelessReplay
+            && !self.tools.is_empty()
+            && (self
+                .input
+                .iter()
+                .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))
+                || !self.builtin_tools.is_empty()
+                || self.output_schema.is_some())
+        {
+            return Err(ProviderError::InvalidRequest);
         }
         let mut builtin_kinds = BTreeSet::new();
         for builtin in &self.builtin_tools {
@@ -363,6 +485,156 @@ impl ModelRequest {
         }
         (total <= MAXIMUM_PROVIDER_REQUEST_METADATA_BYTES).then_some(total)
     }
+}
+
+fn valid_instructions(instructions: &[String]) -> bool {
+    instructions.len() <= 32
+        && instructions
+            .iter()
+            .all(|instruction| instruction.len() <= 1024 * 1024)
+}
+
+fn validate_stateless_messages(
+    messages: &[ModelConversationMessage],
+    input: &[ModelInputBlock],
+    tools: &[ModelToolDefinition],
+) -> bool {
+    if messages.len() < 2 || messages.len() > 256 || tools.is_empty() {
+        return false;
+    }
+    let definitions = tools
+        .iter()
+        .map(|tool| {
+            (
+                tool.tool_id.as_str(),
+                (tool.provider_name.as_str(), tool.fingerprint.as_str()),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut call_ids = BTreeSet::new();
+    let mut pending: Vec<&ModelConversationToolCall> = Vec::new();
+    let mut tool_result_count = 0_usize;
+    let mut expecting_assistant = false;
+    for (index, message) in messages.iter().enumerate() {
+        match message {
+            ModelConversationMessage::User { content }
+                if index == 0
+                    && !content.is_empty()
+                    && content.len() <= 256
+                    && content.iter().all(valid_stateless_user_block) =>
+            {
+                expecting_assistant = true;
+            }
+            ModelConversationMessage::Assistant {
+                content,
+                tool_calls,
+            } if expecting_assistant
+                && content.len() <= 16 * 1024 * 1024
+                && !tool_calls.is_empty()
+                && tool_calls.len() <= 64
+                && tool_calls.iter().all(|call| {
+                    definitions.get(call.tool_id.as_str()).is_some_and(
+                        |(provider_name, fingerprint)| {
+                            *provider_name == call.provider_name
+                                && *fingerprint == call.tool_fingerprint
+                                && valid_provider_reference(&call.call_id)
+                                && call_ids.insert(call.call_id.as_str())
+                                && call.arguments.is_object()
+                                && serde_json::to_vec(&call.arguments)
+                                    .is_ok_and(|encoded| encoded.len() <= 16 * 1024 * 1024)
+                        },
+                    )
+                }) =>
+            {
+                pending = tool_calls.iter().collect();
+                expecting_assistant = false;
+            }
+            ModelConversationMessage::Tool {
+                call_id,
+                tool_id,
+                provider_name,
+                output,
+            } if !expecting_assistant && !pending.is_empty() => {
+                let expected = pending.remove(0);
+                if call_id != &expected.call_id
+                    || tool_id != &expected.tool_id
+                    || provider_name != &expected.provider_name
+                    || serde_json::to_vec(output)
+                        .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024)
+                {
+                    return false;
+                }
+                tool_result_count = match tool_result_count.checked_add(1) {
+                    Some(count) if count <= MAXIMUM_STATELESS_TOOL_RESULTS => count,
+                    _ => return false,
+                };
+                if pending.is_empty() {
+                    expecting_assistant = true;
+                }
+            }
+            _ => return false,
+        }
+    }
+    if expecting_assistant || pending.is_empty() || input.len() != pending.len() {
+        return false;
+    }
+    input.iter().zip(pending).all(|(block, expected)| {
+        matches!(block, ModelInputBlock::ToolResult { call_id, tool_id, .. }
+            if call_id == &expected.call_id && tool_id == &expected.tool_id)
+    }) && tool_result_count.saturating_add(input.len()) <= MAXIMUM_STATELESS_TOOL_RESULTS
+}
+
+fn valid_stateless_user_block(block: &ModelInputBlock) -> bool {
+    match block {
+        ModelInputBlock::Text { text } => text.len() <= 16 * 1024 * 1024,
+        ModelInputBlock::Json { value } => {
+            serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 16 * 1024 * 1024)
+        }
+        ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => false,
+    }
+}
+
+fn tool_result_egress_bytes(request: &ModelRequest) -> Vec<u64> {
+    let historical = request
+        .continuation
+        .as_ref()
+        .into_iter()
+        .flat_map(|continuation| match continuation {
+            ModelContinuation::StatelessConversation { messages, .. } => messages.as_slice(),
+            ModelContinuation::ProviderResponse { .. } => &[],
+        })
+        .filter_map(|message| match message {
+            ModelConversationMessage::Tool {
+                call_id,
+                tool_id,
+                output,
+                ..
+            } => Some((call_id, tool_id, output)),
+            ModelConversationMessage::User { .. } | ModelConversationMessage::Assistant { .. } => {
+                None
+            }
+        });
+    historical
+        .chain(request.input.iter().filter_map(|block| match block {
+            ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            } => Some((call_id, tool_id, output)),
+            ModelInputBlock::Text { .. }
+            | ModelInputBlock::Attachment { .. }
+            | ModelInputBlock::Json { .. } => None,
+        }))
+        .map(|(call_id, tool_id, output)| {
+            u64::try_from(
+                call_id
+                    .len()
+                    .saturating_add(tool_id.len())
+                    .saturating_add(output.to_string().len()),
+            )
+            .unwrap_or(u64::MAX)
+        })
+        .collect()
 }
 
 fn serialized_bytes(value: &impl Serialize) -> Option<u64> {
@@ -654,6 +926,40 @@ impl ProviderRequestContext {
             attachment_count,
             estimated_bytes,
         )?;
+        let mut tool_result_bytes = tool_result_egress_bytes(request);
+        let tool_result_transfers = self
+            .transfers
+            .iter()
+            .filter(|transfer| transfer.manifest.capability == AiEgressCapability::ToolResult)
+            .collect::<Vec<_>>();
+        let mut tool_result_hashes = BTreeSet::new();
+        let mut tool_result_sources = BTreeSet::new();
+        if tool_result_transfers.len() != tool_result_bytes.len()
+            || tool_result_transfers.iter().any(|transfer| {
+                transfer.manifest.provider_kind != provider_kind.as_str()
+                    || transfer.manifest.model != request.model
+                    || transfer.manifest.stable_hash() != transfer.proof.manifest_hash()
+                    || transfer.manifest.sources.len() != 1
+                    || transfer.manifest.sources[0].kind != "application_tool_result"
+                    || !tool_result_hashes.insert(transfer.manifest.stable_hash())
+                    || !tool_result_sources.insert(transfer.manifest.sources[0].reference.as_str())
+            })
+        {
+            return Err(ProviderError::EgressDenied);
+        }
+        tool_result_bytes.sort_unstable();
+        let mut transfer_capacities = tool_result_transfers
+            .iter()
+            .map(|transfer| transfer.manifest.estimated_bytes)
+            .collect::<Vec<_>>();
+        transfer_capacities.sort_unstable();
+        if tool_result_bytes
+            .iter()
+            .zip(transfer_capacities)
+            .any(|(required, capacity)| capacity < *required)
+        {
+            return Err(ProviderError::EgressDenied);
+        }
         for block in &request.input {
             match block {
                 ModelInputBlock::Attachment { mime, .. } => {
@@ -689,24 +995,7 @@ impl ProviderRequestContext {
                     }
                     self.resolved_attachment(&attachment_request)?;
                 }
-                ModelInputBlock::ToolResult {
-                    call_id,
-                    tool_id,
-                    output,
-                } => {
-                    let bytes = call_id
-                        .len()
-                        .saturating_add(tool_id.len())
-                        .saturating_add(output.to_string().len())
-                        as u64;
-                    self.require_capability(
-                        provider_kind,
-                        request,
-                        AiEgressCapability::ToolResult,
-                        0,
-                        bytes,
-                    )?;
-                }
+                ModelInputBlock::ToolResult { .. } => {}
                 ModelInputBlock::Text { .. } | ModelInputBlock::Json { .. } => {}
             }
         }

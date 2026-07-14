@@ -288,7 +288,7 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
     ///
     /// Returns a safe error unless every result is protected, separately
     /// egress-authorized, durably complete, and bound to the current fence and
-    /// preceding provider response.
+    /// preceding provider response or exact stateless conversation chain.
     #[allow(clippy::too_many_arguments)]
     async fn persist_tool_batch(
         &self,
@@ -307,9 +307,10 @@ pub trait AiAgentCheckpointWriter: Send + Sync {
 /// Protected state recovered from one exact completed read-only tool batch.
 ///
 /// Fields are private so a host cannot manufacture resume counters, response
-/// chaining, or model-visible tool results. Adoption proves the prior batch's
-/// durable integrity under current access and protection policy; it does not
-/// authorize the next provider request, budget, or egress decision.
+/// chaining, or model-visible tool results. Adoption currently applies only
+/// to provider-retained continuations. It proves the prior batch's durable
+/// integrity under current access and protection policy; it does not authorize
+/// the next provider request, budget, or egress decision.
 #[derive(Clone, Debug)]
 pub struct AiAdoptedReadOnlyToolBatch {
     checkpoint_id: Uuid,
@@ -358,7 +359,8 @@ impl AiAdoptedReadOnlyToolBatch {
 }
 
 /// Current-authority adoption and one-shot consumption of protected tool
-/// checkpoints.
+/// checkpoints. Stateless checkpoints can be consumed by the same fenced
+/// generation but fail closed on generation adoption.
 #[async_trait]
 pub trait AiAgentCheckpointAdopter: Send + Sync {
     /// Opens and validates the linked completed tool batch, when present.
@@ -448,10 +450,12 @@ pub enum AiReadOnlyAgentRunOutcome {
 /// planner for each turn, executes provider calls, resolves every custom query
 /// through the protected ORM tool service, constructs exact continuations,
 /// persists final output, and commits a terminal outcome. It can adopt only an
-/// opaque, freshly validated complete read-only tool batch and consumes that
-/// checkpoint before provider transport. Any ambiguous provider/tool/output
-/// handoff becomes `RecoveryRequired`; the coordinator never reconstructs or
-/// silently replays uncertain state.
+/// opaque, freshly validated complete read-only tool batch with a
+/// provider-retained continuation and consumes that checkpoint before provider
+/// transport. Stateless batches remain usable within the same fenced
+/// generation and become `RecoveryRequired` after lease loss. Any ambiguous
+/// provider/tool/output handoff is similarly closed; the coordinator never
+/// reconstructs or silently replays uncertain state.
 pub struct AiReadOnlyAgentCoordinator {
     run_control: Arc<dyn AiAgentRunControl>,
     provider_executor: Arc<dyn AiAgentProviderTurnExecutor>,
@@ -522,12 +526,27 @@ impl AiReadOnlyAgentCoordinator {
                         .await;
                 }
             };
+            let continuation_reference = match adopted.continuation.chain_reference() {
+                Ok(reference) => reference,
+                Err(_) => {
+                    let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
+                    return self
+                        .finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "checkpoint_adoption_reference_invalid",
+                            None,
+                        )
+                        .await;
+                }
+            };
             let guard = match AiAgentLoopGuard::resume_after_tool_batch(
                 &lease,
                 self.limits.loop_limits,
                 adopted.provider_turns,
                 adopted.total_tool_calls,
-                adopted.continuation.previous_response_id(),
+                &continuation_reference,
             ) {
                 Ok(guard) => guard,
                 Err(_) => {

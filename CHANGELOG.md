@@ -5,10 +5,30 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.20.0` and the AI
-schema module to `0.20.0`.
+This development line advances the pre-1.0 crate version to `0.21.0` and the AI
+schema module to `0.21.0`.
 
 ### Added
+
+- Provider-independent bounded stateless application-tool continuation through
+  `ModelContinuationMode`, protected `StatelessConversation` history, exact
+  assistant/tool identity, and domain-separated continuation-chain hashes.
+  Every historical and current tool output requires its own unique freshly
+  authorized `ToolResult` manifest; hidden thinking, attachments, provider
+  built-ins, arbitrary roles, and model-authored instructions cannot enter the
+  replay format.
+- Native Ollama custom and parallel application-tool calls with exact
+  provider-name/local-ID/fingerprint mapping, native message/tool-result
+  replay, bounded normalized calls, and no provider-retained response state.
+- Installed local-harness JSON-lines protocol v2, including exact stateless
+  history/tool definitions and a start/delta/complete tool-event state machine
+  restricted to server-offered IDs. Registrations may opt into custom tools
+  only together with stateless continuation; filesystem, network, shell,
+  credential, built-in, and provider-retained authority remain unavailable.
+- Protected stateless tool-batch checkpoints using the existing generated ORM
+  entities. They are consumable only under the same run fence; lease loss or
+  restart remains `RecoveryRequired` until full cross-generation historical
+  row adoption is implemented.
 
 - A host-only `AiSessionRetentionService` and generated-ORM
   `OrmAiSessionRetentionService` for bounded keyset scan cycles. Each session
@@ -66,11 +86,11 @@ schema module to `0.20.0`.
 - An optional installed local-harness foundation with immutable
   deployment-owned logical-model registrations, fixed absolute executable and
   arguments, mandatory executable digest/sandbox/resource contracts, a trusted
-  process-launcher seam, and a bounded JSON-lines provider driver. The safe
-  initial protocol is text/structured-output only and its deterministic fake
-  process suite covers fixed launch facts, environment/command
+  process-launcher seam, and a bounded JSON-lines v2 provider driver. The safe
+  protocol supports text/structured output plus opt-in stateless application
+  tools, and its deterministic fake process suite covers fixed launch facts, environment/command
   non-injection, framing, stderr/output limits, cancellation cleanup, swapped
-  budget/model proofs, secret non-persistence, and forbidden tool events.
+  budget/model proofs, secret non-persistence, and unoffered tool events.
 - A native feature-gated Ollama `/api/chat` adapter for bounded NDJSON text
   streaming, exact ephemeral PNG/JPEG/WebP image input, JSON-schema structured
   output, and authoritative prompt/evaluation token usage. Deployment endpoint
@@ -258,11 +278,11 @@ schema module to `0.20.0`.
   logical installed profile but cannot configure its process registration.
   The new `local-harness` feature exports the registry, provider, protocol
   driver, process boundary, limits, and non-sensitive transport errors.
-- `provider-ollama` now enables the optional HTTP/Base64 dependencies and
-  exports `OllamaProvider`/`OllamaProviderConfig`. The initial adapter reports
-  only its implemented capabilities; custom tools, provider built-ins, files,
-  and continuation fail closed pending provider-independent stateless
-  conversation checkpoints.
+- `provider-ollama` enables the optional HTTP/Base64 dependencies and exports
+  `OllamaProvider`/`OllamaProviderConfig`. It reports only implemented
+  capabilities: native stateless custom tools are supported, while provider
+  built-ins, files, provider-retained continuation, and hidden thinking fail
+  closed.
 - AI schema module `0.16.0` adds principal inbox stream heads, exact
   principal-sequence uniqueness, captured event scope identity, and nullable
   migration-gated inbox fields plus a stable scope key on retention policies.

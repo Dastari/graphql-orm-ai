@@ -13,6 +13,7 @@ fn request(model: &str) -> ModelRequest {
             text: "synthetic input".to_owned(),
         }],
         continuation: None,
+        continuation_mode: ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
         output_schema: None,
@@ -236,6 +237,137 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
 }
 
 #[tokio::test]
+async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
+    let session_id = AiSessionId::new();
+    let run_id = AiRunId::new();
+    let model = "test-model";
+    let definition = ModelToolDefinition {
+        tool_id: "records.read".to_owned(),
+        provider_name: "records_read".to_owned(),
+        fingerprint: "records-read-v1".to_owned(),
+        description: "Read one authorized record".to_owned(),
+        parameters: json!({
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+        strict: true,
+    };
+    let stateless_request = ModelRequest {
+        model: model.to_owned(),
+        instructions: Vec::new(),
+        input: vec![ModelInputBlock::ToolResult {
+            call_id: "call-2".to_owned(),
+            tool_id: "records.read".to_owned(),
+            output: json!({"record": 55}),
+        }],
+        continuation: Some(ModelContinuation::StatelessConversation {
+            instructions: vec!["Use only authorized tools.".to_owned()],
+            messages: vec![
+                ModelConversationMessage::User {
+                    content: vec![ModelInputBlock::Text {
+                        text: "Read records 54 and 55".to_owned(),
+                    }],
+                },
+                ModelConversationMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![ModelConversationToolCall {
+                        call_id: "call-1".to_owned(),
+                        tool_id: "records.read".to_owned(),
+                        provider_name: "records_read".to_owned(),
+                        tool_fingerprint: "records-read-v1".to_owned(),
+                        arguments: json!({"id": 54}),
+                    }],
+                },
+                ModelConversationMessage::Tool {
+                    call_id: "call-1".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                    provider_name: "records_read".to_owned(),
+                    output: json!({"record": 54}),
+                },
+                ModelConversationMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![ModelConversationToolCall {
+                        call_id: "call-2".to_owned(),
+                        tool_id: "records.read".to_owned(),
+                        provider_name: "records_read".to_owned(),
+                        tool_fingerprint: "records-read-v1".to_owned(),
+                        arguments: json!({"id": 55}),
+                    }],
+                },
+            ],
+        }),
+        continuation_mode: ModelContinuationMode::StatelessReplay,
+        tools: vec![definition],
+        builtin_tools: Vec::new(),
+        output_schema: None,
+        maximum_output_tokens: Some(64),
+    };
+    stateless_request
+        .validate()
+        .expect("bounded stateless history should validate");
+    let inference = manifest(
+        session_id,
+        run_id,
+        model,
+        AiEgressCapability::ModelInference,
+    );
+    let base = ProviderRequestContext::new(
+        session_id,
+        run_id,
+        "correlation",
+        budget(run_id, ProviderKind::OpenAiCompatible, model),
+        inference.clone(),
+        proof(&inference),
+    )
+    .expect("inference proof should bind");
+    let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted { response_id: None }]);
+    assert!(matches!(
+        provider
+            .stream(stateless_request.clone(), base.clone())
+            .await,
+        Err(ProviderError::EgressDenied)
+    ));
+
+    let tool_manifest = |purpose: &str| {
+        let mut manifest = manifest(session_id, run_id, model, AiEgressCapability::ToolResult);
+        manifest.sources = vec![AiDataSourceRef {
+            kind: "application_tool_result".to_owned(),
+            reference: Uuid::new_v4().to_string(),
+            classification: DataClassification::Internal,
+            trust: AiSourceTrust::ResolverResult,
+        }];
+        manifest.purpose = purpose.to_owned();
+        manifest
+    };
+    let first = tool_manifest("historical-result");
+    let one_proof = base
+        .clone()
+        .with_authorized_transfer(first.clone(), proof(&first))
+        .expect("first tool proof should bind");
+    assert!(matches!(
+        provider.stream(stateless_request.clone(), one_proof).await,
+        Err(ProviderError::EgressDenied)
+    ));
+
+    let second = tool_manifest("current-result");
+    let exact = base
+        .with_authorized_transfer(first.clone(), proof(&first))
+        .expect("historical proof should bind")
+        .with_authorized_transfer(second.clone(), proof(&second))
+        .expect("current proof should bind");
+    provider
+        .stream(stateless_request, exact)
+        .await
+        .expect("exact replay proofs should pass")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("mock replay should complete");
+    assert_eq!(provider.request_count(), 1);
+}
+
+#[tokio::test]
 async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
     let session_id = AiSessionId::new();
     let run_id = AiRunId::new();
@@ -256,6 +388,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         instructions: vec![],
         input: vec![attachment_block],
         continuation: None,
+        continuation_mode: ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
         output_schema: None,

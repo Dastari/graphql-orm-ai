@@ -146,6 +146,9 @@ impl OpenAiProvider {
         request: &ModelRequest,
         context: &ProviderRequestContext,
     ) -> Result<Value, ProviderError> {
+        if request.continuation_mode != crate::ModelContinuationMode::ProviderRetained {
+            return Err(ProviderError::Unsupported);
+        }
         if request.input.is_empty() {
             return Err(ProviderError::InvalidRequest);
         }
@@ -287,6 +290,8 @@ impl AiProvider for OpenAiProvider {
             image_generation: true,
             embeddings: false,
             background: false,
+            provider_retained_continuation: self.config.store_responses,
+            stateless_continuation: false,
             local: false,
             maximum_context_tokens: None,
             maximum_output_tokens: None,
@@ -933,6 +938,7 @@ mod tests {
             continuation: Some(ModelContinuation::ProviderResponse {
                 response_id: "resp-1".to_owned(),
             }),
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: Vec::new(),
             builtin_tools: Vec::new(),
             output_schema: None,
@@ -991,6 +997,7 @@ mod tests {
             instructions: vec![],
             input: vec![image_block.clone(), file_block.clone()],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -1059,6 +1066,7 @@ mod tests {
                 text: "synthetic hello".to_owned(),
             }],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -1099,6 +1107,7 @@ mod tests {
                 text: "synthetic hello".to_owned(),
             }],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -1156,6 +1165,7 @@ mod tests {
                 text: "This is a synthetic provider smoke test.".to_owned(),
             }],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,

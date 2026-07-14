@@ -841,7 +841,7 @@ impl OrmAiApplicationToolCallService {
             || result.run_id() != lease.run_id()
             || result.attempt_id() != lease.attempt_id()
             || result.lease_generation() != lease.lease_generation()
-            || result.provider_response_id().is_none()
+            || (result.provider_response_id().is_none() && !result.uses_stateless_continuation())
             || context.provider_turn_index >= self.limits.maximum_provider_turns
             || context.tool_call_index >= self.limits.maximum_calls_per_turn
             || context.tool_call_index >= result.tool_calls().len()
@@ -1593,7 +1593,7 @@ fn validate_provider_binding(
         || result.run_id() != lease.run_id()
         || result.attempt_id() != lease.attempt_id()
         || result.lease_generation() != lease.lease_generation()
-        || result.provider_response_id().is_none()
+        || (result.provider_response_id().is_none() && !result.uses_stateless_continuation())
         || context.provider_turn_index >= service.limits.maximum_provider_turns
         || context.tool_call_index >= service.limits.maximum_calls_per_turn
         || context.tool_call_index >= result.tool_calls().len()

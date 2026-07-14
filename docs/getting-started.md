@@ -21,8 +21,9 @@ Exactly one persistence backend is currently required:
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter. `provider-ollama` enables the native Ollama `/api/chat`
 adapter; it needs an explicit deployment endpoint policy even for loopback.
-`local-harness` enables the installed text/structured-output protocol and
-provider wrapper; it still requires a deployment-owned sandbox launcher.
+`local-harness` enables the installed JSON-lines v2 text/structured/stateless-
+tool protocol and provider wrapper; it still requires a deployment-owned
+sandbox launcher.
 `graphql-case-pascal` changes the complete GraphQL naming contract from default
 camelCase to PascalCase.
 
@@ -71,10 +72,12 @@ camelCase to PascalCase.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,
 and pass the same exact egress and atomic budget proofs as any remote provider.
-The initial adapter supports streaming text, exact PNG/JPEG/WebP input, and
-structured output. It deliberately rejects tools and continuation until a
-provider-independent stateless checkpoint can reconstruct the full chat. See
-the [Ollama guide](ollama.md).
+The adapter supports streaming text, exact PNG/JPEG/WebP input, structured
+output, and exact registered application tools through
+`ModelContinuationMode::StatelessReplay`. Every replayed tool result needs its
+own fresh manifest. Provider-retained continuation, built-ins, and hidden
+thinking remain rejected; lease loss closes stateless checkpoints for recovery
+rather than cross-generation replay. See the [Ollama guide](ollama.md).
 
 For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
 `AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,
@@ -84,6 +87,9 @@ profile has no process configuration or base URL. Do not implement the launcher
 as a plain inherited `Command`; it must meet the digest, clean-environment,
 network-denial, resource, process-tree, and kill-on-drop obligations in the
 [local harness guide](local-harness.md).
+Tool-capable harnesses implement JSON-lines v2 and advertise `custom_tools`
+and `stateless_continuation` together. A text-only harness may leave both false;
+neither form receives filesystem, network, shell, or credential authority.
 
 The principal inbox lets a virtualized chat drawer refresh bounded session
 shells across multiple conversations without loading transcript history. Its

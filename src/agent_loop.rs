@@ -62,15 +62,17 @@ pub struct AiAgentContinuation {
     continuation: ModelContinuation,
     input: Vec<ModelInputBlock>,
     transfers: Vec<AiEgressManifest>,
+    replay_transfers: Vec<AiEgressManifest>,
 }
 
 impl AiAgentContinuation {
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
-            "formatVersion": 1,
+            "formatVersion": 2,
             "continuation": self.continuation,
             "input": self.input,
             "transfers": self.transfers,
+            "replayTransfers": self.replay_transfers,
         })
     }
 
@@ -82,13 +84,15 @@ impl AiAgentContinuation {
             continuation: ModelContinuation,
             input: Vec<ModelInputBlock>,
             transfers: Vec<AiEgressManifest>,
+            #[serde(default)]
+            replay_transfers: Vec<AiEgressManifest>,
         }
 
         let snapshot: Snapshot =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
-        if snapshot.format_version != 1
+        if !matches!(snapshot.format_version, 1 | 2)
             || snapshot.input.is_empty()
-            || snapshot.input.len() > 4_096
+            || snapshot.input.len() > 256
             || snapshot.input.len() != snapshot.transfers.len()
         {
             return Err(AiError::Conflict);
@@ -110,20 +114,51 @@ impl AiAgentContinuation {
                 return Err(AiError::Conflict);
             }
         }
-        let ModelContinuation::ProviderResponse { response_id } = &snapshot.continuation;
-        if !valid_provider_reference(response_id) {
-            return Err(AiError::Conflict);
+        match &snapshot.continuation {
+            ModelContinuation::ProviderResponse { response_id } => {
+                if !valid_provider_reference(response_id) || !snapshot.replay_transfers.is_empty() {
+                    return Err(AiError::Conflict);
+                }
+            }
+            ModelContinuation::StatelessConversation { messages, .. } => {
+                let historical_results = messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(message, crate::ModelConversationMessage::Tool { .. })
+                    })
+                    .count();
+                if snapshot.format_version != 2
+                    || historical_results != snapshot.replay_transfers.len()
+                    || snapshot.replay_transfers.iter().any(|transfer| {
+                        transfer.capability != crate::AiEgressCapability::ToolResult
+                    })
+                    || snapshot
+                        .continuation
+                        .chain_reference(&snapshot.input)
+                        .is_none()
+                {
+                    return Err(AiError::Conflict);
+                }
+            }
         }
         Ok(Self {
             continuation: snapshot.continuation,
             input: snapshot.input,
             transfers: snapshot.transfers,
+            replay_transfers: snapshot.replay_transfers,
         })
     }
 
-    pub(crate) fn previous_response_id(&self) -> &str {
+    pub(crate) fn chain_reference(&self) -> Result<String, AiError> {
+        self.continuation
+            .chain_reference(&self.input)
+            .ok_or(AiError::Conflict)
+    }
+
+    pub(crate) fn provider_response_id(&self) -> Option<&str> {
         match &self.continuation {
-            ModelContinuation::ProviderResponse { response_id } => response_id,
+            ModelContinuation::ProviderResponse { response_id } => Some(response_id),
+            ModelContinuation::StatelessConversation { .. } => None,
         }
     }
 
@@ -135,6 +170,10 @@ impl AiAgentContinuation {
         &self.transfers
     }
 
+    pub(crate) fn replay_transfers(&self) -> &[AiEgressManifest] {
+        &self.replay_transfers
+    }
+
     pub(crate) fn apply_with_transfers(
         self,
         request: &mut ModelRequest,
@@ -142,9 +181,25 @@ impl AiAgentContinuation {
         if !request.input.is_empty() || request.continuation.is_some() {
             return Err(AiError::Conflict);
         }
+        let expected_mode = match &self.continuation {
+            ModelContinuation::ProviderResponse { .. } => {
+                crate::ModelContinuationMode::ProviderRetained
+            }
+            ModelContinuation::StatelessConversation { .. } => {
+                crate::ModelContinuationMode::StatelessReplay
+            }
+        };
+        if request.continuation_mode != expected_mode
+            || (expected_mode == crate::ModelContinuationMode::StatelessReplay
+                && !request.instructions.is_empty())
+        {
+            return Err(AiError::Conflict);
+        }
         request.continuation = Some(self.continuation);
         request.input = self.input;
-        Ok(self.transfers)
+        let mut transfers = self.replay_transfers;
+        transfers.extend(self.transfers);
+        Ok(transfers)
     }
 }
 
@@ -163,11 +218,13 @@ pub struct AiAgentLoopGuard {
     limits: AiAgentLoopLimits,
     provider_turns: u32,
     total_tool_calls: u32,
-    expected_previous_response_id: Option<String>,
+    expected_previous_reference: Option<String>,
     pending_order: Vec<String>,
     pending_tools: BTreeMap<String, String>,
     outputs: BTreeMap<String, ModelInputBlock>,
     output_transfers: BTreeMap<String, AiEgressManifest>,
+    pending_continuation: Option<ModelContinuation>,
+    replay_transfers: Vec<AiEgressManifest>,
     terminal: bool,
 }
 
@@ -182,11 +239,13 @@ impl AiAgentLoopGuard {
             limits,
             provider_turns: 0,
             total_tool_calls: 0,
-            expected_previous_response_id: None,
+            expected_previous_reference: None,
             pending_order: Vec::new(),
             pending_tools: BTreeMap::new(),
             outputs: BTreeMap::new(),
             output_transfers: BTreeMap::new(),
+            pending_continuation: None,
+            replay_transfers: Vec::new(),
             terminal: false,
         }
     }
@@ -196,13 +255,13 @@ impl AiAgentLoopGuard {
         limits: AiAgentLoopLimits,
         provider_turns: u32,
         total_tool_calls: u32,
-        previous_response_id: &str,
+        previous_reference: &str,
     ) -> Result<Self, AiError> {
         if provider_turns == 0
             || provider_turns > limits.maximum_provider_turns
             || total_tool_calls == 0
             || total_tool_calls > limits.maximum_total_tool_calls
-            || !valid_provider_reference(previous_response_id)
+            || !valid_provider_reference(previous_reference)
         {
             return Err(AiError::Conflict);
         }
@@ -214,11 +273,13 @@ impl AiAgentLoopGuard {
             limits,
             provider_turns,
             total_tool_calls,
-            expected_previous_response_id: Some(previous_response_id.to_owned()),
+            expected_previous_reference: Some(previous_reference.to_owned()),
             pending_order: Vec::new(),
             pending_tools: BTreeMap::new(),
             outputs: BTreeMap::new(),
             output_transfers: BTreeMap::new(),
+            pending_continuation: None,
+            replay_transfers: Vec::new(),
             terminal: false,
         })
     }
@@ -228,8 +289,8 @@ impl AiAgentLoopGuard {
     /// # Errors
     ///
     /// Returns [`AiError::Conflict`] for a swapped fence/chain, pending calls,
-    /// a terminal loop, duplicate call IDs, absent response ID, or a hard-limit
-    /// breach.
+    /// a terminal loop, duplicate call IDs, unavailable continuation material,
+    /// or a hard-limit breach.
     pub fn observe_provider_turn(
         &mut self,
         result: &AiProviderCallResult,
@@ -242,7 +303,8 @@ impl AiAgentLoopGuard {
             || result.run_id() != self.run_id
             || result.attempt_id() != self.attempt_id
             || result.lease_generation() != self.lease_generation
-            || result.previous_response_id() != self.expected_previous_response_id.as_deref()
+            || result.previous_continuation_reference()
+                != self.expected_previous_reference.as_deref()
             || self.provider_turns >= self.limits.maximum_provider_turns
         {
             return Err(AiError::Conflict);
@@ -263,10 +325,7 @@ impl AiAgentLoopGuard {
             .checked_add(call_count)
             .filter(|count| *count <= self.limits.maximum_total_tool_calls)
             .ok_or(AiError::Conflict)?;
-        let response_id = result
-            .provider_response_id()
-            .map(str::to_owned)
-            .ok_or(AiError::Conflict)?;
+        let continuation = result.next_continuation()?;
         let mut call_ids = BTreeSet::new();
         for call in result.tool_calls() {
             if !call_ids.insert(call.call_id()) {
@@ -282,7 +341,13 @@ impl AiAgentLoopGuard {
                 call.tool_id().as_str().to_owned(),
             );
         }
-        self.expected_previous_response_id = Some(response_id);
+        self.replay_transfers = match &continuation {
+            ModelContinuation::ProviderResponse { .. } => Vec::new(),
+            ModelContinuation::StatelessConversation { .. } => {
+                result.replay_tool_transfers().to_vec()
+            }
+        };
+        self.pending_continuation = Some(continuation);
         Ok(AiAgentLoopTurn::ToolCalls {
             provider_turn_index,
             call_count: result.tool_calls().len(),
@@ -336,7 +401,7 @@ impl AiAgentLoopGuard {
         if self.pending_order.is_empty()
             || self.outputs.len() != self.pending_order.len()
             || self.output_transfers.len() != self.pending_order.len()
-            || self.expected_previous_response_id.is_none()
+            || self.pending_continuation.is_none()
         {
             return Err(AiError::Conflict);
         }
@@ -352,16 +417,15 @@ impl AiAgentLoopGuard {
         }
         self.pending_order.clear();
         self.pending_tools.clear();
-        Ok(AiAgentContinuation {
-            continuation: ModelContinuation::ProviderResponse {
-                response_id: self
-                    .expected_previous_response_id
-                    .clone()
-                    .ok_or(AiError::Conflict)?,
-            },
+        let continuation = self.pending_continuation.take().ok_or(AiError::Conflict)?;
+        let next = AiAgentContinuation {
+            continuation,
             input,
             transfers,
-        })
+            replay_transfers: std::mem::take(&mut self.replay_transfers),
+        };
+        self.expected_previous_reference = Some(next.chain_reference()?);
+        Ok(next)
     }
 
     /// Number of accepted provider turns.

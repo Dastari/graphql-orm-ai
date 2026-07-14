@@ -29,6 +29,7 @@ impl MockProvider {
                 streaming: true,
                 custom_tools: true,
                 structured_output: true,
+                provider_retained_continuation: true,
                 local: true,
                 ..ProviderCapabilities::default()
             },

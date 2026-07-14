@@ -81,10 +81,20 @@ tool calls. For every turn:
    one model-visible result.
 
 Use `AiProviderCallPlan::new_continuation_with_tools` for the next provider
-turn. It installs the previous response ID, matched tool result blocks, and the
-immutable manifests produced for those exact results as one unit. The normal
-provider executor still reserves a fresh atomic budget and freshly authorizes
-and audits the model-inference and result transfers before transport.
+turn. In `ProviderRetained` mode it installs the previous response ID. In
+`StatelessReplay` mode it installs the protected original instructions,
+visible text/JSON user input, exact assistant calls, preceding tool messages,
+and matched current result blocks. Both modes carry the immutable manifests
+for every result as one unit. The normal provider executor still reserves a
+fresh atomic budget and freshly authorizes and audits model inference plus one
+unique `ToolResult` transfer for every historical and current output before
+transport.
+
+Stateless history is bounded to 256 messages/tool results and excludes hidden
+thinking, arbitrary roles, attachments, provider built-ins, output schemas,
+and model-authored system instructions. Tool IDs, provider names,
+fingerprints, argument objects, call order, and result order must still match
+the currently reviewed definitions exactly.
 
 The top-level coordinator additionally requires an `AiAgentCheckpointWriter`
 and `AiAgentCheckpointAdopter`. The ORM checkpoint service implements both. It
@@ -93,11 +103,13 @@ protects the exact complete tool batch and opaque continuation before the next
 plan. Checkpoint persistence failure after either external boundary closes the
 run for recovery and never replays the provider or resolver.
 
-Do not reconstruct a guard yourself. Recovery can retain only an exact complete
-tool-batch checkpoint; the adopter must freshly authorize, open and validate
-all durable evidence, construct the opaque proof, and consume the checkpoint
-before the following transport. A provider-turn checkpoint, partially
-completed batch, consumed link, unknown response, or malformed restore state
+Do not reconstruct a guard yourself. Cross-generation recovery can retain only
+an exact complete provider-retained tool-batch checkpoint; the adopter must
+freshly authorize, open and validate all durable evidence, construct the opaque
+proof, and consume the checkpoint before the following transport. A stateless
+checkpoint is consumed normally by the same fenced generation, but lease loss
+makes it `RecoveryRequired`. A provider-turn checkpoint, partially completed
+batch, consumed link, unknown response, or malformed restore state likewise
 stays closed for reconciliation/operator review.
 
 ## OpenAI continuation and retention
@@ -125,8 +137,8 @@ or turn retention on.
   [supervised service](supervised-tool-loop.md) for exact one-shot application
   mutations; it is not yet owned by this coordinator.
 - Cross-generation adoption is intentionally limited to exact completed
-  read-only tool batches. Provider-turn, partial-batch, consequential, and
-  provider-independent stateless continuation adoption remain unimplemented.
+  provider-retained read-only tool batches. Provider-turn, partial-batch,
+  consequential, and stateless continuation adoption remain unimplemented.
 - Optional protected live persistence is implemented for visible text and
   reasoning summaries. It excludes structured/tool events and validates fresh
   authority, protection policy, the exact run fence, and uncertain budget for
@@ -134,5 +146,6 @@ or turn retention on.
   coordinator's deliberately closed replay rules.
 - Tool enablement management is not yet exposed through its final
   authenticated GraphQL configuration lifecycle.
-- Provider-independent stateless continuation and Anthropic/xAI/Ollama tool
-  result mappings remain future adapter work.
+- Anthropic/xAI tool-result mappings remain future adapter work. Ollama and the
+  installed JSON-lines v2 harness implement the bounded stateless contract;
+  OpenAI continues to use explicit provider-retained response IDs.

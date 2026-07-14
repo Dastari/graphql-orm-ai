@@ -11,9 +11,10 @@ use graphql_orm_ai::{
     AiJsonLinesLocalHarnessDriver, AiLocalHarnessLimits, AiLocalHarnessProcess,
     AiLocalHarnessProcessError, AiLocalHarnessProcessLauncher, AiLocalHarnessProcessOutput,
     AiLocalHarnessProvider, AiLocalHarnessRegistration, AiLocalHarnessRegistry, AiProvider,
-    AiRunId, AiScope, AiSessionId, AiSourceTrust, DataClassification, ModelInputBlock,
-    ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent, ProviderKind,
-    ProviderRequestContext,
+    AiRunId, AiScope, AiSessionId, AiSourceTrust, DataClassification, ModelContinuation,
+    ModelContinuationMode, ModelConversationMessage, ModelConversationToolCall, ModelInputBlock,
+    ModelRequest, ModelToolDefinition, ProviderCapabilities, ProviderError, ProviderEvent,
+    ProviderKind, ProviderRequestContext,
 };
 
 #[derive(Default)]
@@ -135,10 +136,62 @@ fn capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         streaming: true,
         structured_output: true,
+        custom_tools: true,
+        parallel_tool_calls: true,
+        stateless_continuation: true,
         local: true,
         maximum_context_tokens: Some(4_096),
         maximum_output_tokens: Some(128),
         ..ProviderCapabilities::default()
+    }
+}
+
+fn stateless_tool_request(model: &str) -> ModelRequest {
+    ModelRequest {
+        model: model.to_owned(),
+        instructions: Vec::new(),
+        input: vec![ModelInputBlock::ToolResult {
+            call_id: "call-1".to_owned(),
+            tool_id: "records.read".to_owned(),
+            output: serde_json::json!({"records": [54]}),
+        }],
+        continuation: Some(ModelContinuation::StatelessConversation {
+            instructions: vec!["Use only offered tools.".to_owned()],
+            messages: vec![
+                ModelConversationMessage::User {
+                    content: vec![ModelInputBlock::Text {
+                        text: "Find record 54".to_owned(),
+                    }],
+                },
+                ModelConversationMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![ModelConversationToolCall {
+                        call_id: "call-1".to_owned(),
+                        tool_id: "records.read".to_owned(),
+                        provider_name: "records_read".to_owned(),
+                        tool_fingerprint: "records-read-v1".to_owned(),
+                        arguments: serde_json::json!({"id": 54}),
+                    }],
+                },
+            ],
+        }),
+        continuation_mode: ModelContinuationMode::StatelessReplay,
+        tools: vec![ModelToolDefinition {
+            tool_id: "records.read".to_owned(),
+            provider_name: "records_read".to_owned(),
+            fingerprint: "records-read-v1".to_owned(),
+            description: "Read one authorized record".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        }],
+        builtin_tools: Vec::new(),
+        output_schema: None,
+        maximum_output_tokens: Some(64),
     }
 }
 
@@ -165,6 +218,7 @@ fn request(model: &str) -> ModelRequest {
             text: "synthetic local request".to_owned(),
         }],
         continuation: None,
+        continuation_mode: graphql_orm_ai::ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
         output_schema: None,
@@ -231,8 +285,58 @@ fn context(model_request: &ModelRequest) -> ProviderRequestContext {
         time::OffsetDateTime::now_utc(),
     )
     .expect("budget should authorize");
-    ProviderRequestContext::new(session_id, run_id, "test", budget, manifest, proof)
-        .expect("context should validate")
+    let mut context =
+        ProviderRequestContext::new(session_id, run_id, "test", budget, manifest, proof)
+            .expect("context should validate");
+    let historical_tool_results = model_request
+        .continuation
+        .as_ref()
+        .into_iter()
+        .flat_map(|continuation| match continuation {
+            ModelContinuation::StatelessConversation { messages, .. } => messages.as_slice(),
+            ModelContinuation::ProviderResponse { .. } => &[],
+        })
+        .filter(|message| matches!(message, ModelConversationMessage::Tool { .. }))
+        .count();
+    let current_tool_results = model_request
+        .input
+        .iter()
+        .filter(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        .count();
+    for index in 0..historical_tool_results + current_tool_results {
+        let manifest = AiEgressManifest {
+            provider_profile_id: "installed-local-profile".to_owned(),
+            provider_kind: ProviderKind::LocalHarness.as_str().to_owned(),
+            model: model_request.model.clone(),
+            destination: "installed-local-harness".to_owned(),
+            destination_trust: AiDestinationTrust::Local,
+            capability: AiEgressCapability::ToolResult,
+            scope: AiScope::new("project", "synthetic"),
+            session_id: Some(session_id),
+            run_id: Some(run_id),
+            sources: vec![AiDataSourceRef {
+                kind: "application_tool_result".to_owned(),
+                reference: uuid::Uuid::new_v4().to_string(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::ResolverResult,
+            }],
+            estimated_bytes: 1_000_000,
+            estimated_tokens: 1_000,
+            attachment_count: 0,
+            purpose: format!("test-tool-result-{index}"),
+            retention: "none".to_owned(),
+            residency: Some("local".to_owned()),
+            policy_version: "test-v1".to_owned(),
+            consent_reference: None,
+        };
+        let proof = AiEgressDecision::allow(&manifest, "test", "test-principal")
+            .authorize(&manifest)
+            .expect("tool manifest should authorize");
+        context = context
+            .with_authorized_transfer(manifest, proof)
+            .expect("tool transfer should bind");
+    }
+    context
 }
 
 fn encoded_events(events: &[ProviderEvent]) -> Vec<u8> {
@@ -341,7 +445,7 @@ async fn fake_process_receives_only_bounded_protocol_and_normalizes_output() {
     .expect("input frame should be JSON");
     assert_eq!(
         request_value["protocol"],
-        "graphql-orm-ai/local-harness-jsonl/v1"
+        "graphql-orm-ai/local-harness-jsonl/v2"
     );
     assert_eq!(request_value["model"], "local/synthetic");
     let input_text = String::from_utf8_lossy(&state.input);
@@ -349,6 +453,64 @@ async fn fake_process_receives_only_bounded_protocol_and_normalizes_output() {
     assert!(!input_text.contains("--json-lines"));
     assert!(!input_text.contains("isolated-no-network"));
     assert!(!input_text.contains("synthetic-secret-diagnostic"));
+}
+
+#[tokio::test]
+async fn stateless_replay_and_native_tool_events_use_the_reviewed_v2_protocol() {
+    let expected_events = vec![
+        ProviderEvent::ResponseStarted { response_id: None },
+        ProviderEvent::ToolCallStarted {
+            call_id: "call-2".to_owned(),
+            tool_id: "records.read".to_owned(),
+        },
+        ProviderEvent::ToolArgumentsDelta {
+            call_id: "call-2".to_owned(),
+            delta: "{\"id\":".to_owned(),
+        },
+        ProviderEvent::ToolCallCompleted {
+            call_id: "call-2".to_owned(),
+            arguments: serde_json::json!({"id": 55}),
+        },
+        ProviderEvent::Usage {
+            input_tokens: 40,
+            output_tokens: 8,
+            cached_input_tokens: 0,
+        },
+        ProviderEvent::ResponseCompleted { response_id: None },
+    ];
+    let outputs = vec![
+        AiLocalHarnessProcessOutput::Stdout(encoded_events(&expected_events)),
+        AiLocalHarnessProcessOutput::Exited { success: true },
+    ];
+    let (launcher, state) = FakeLauncher::new(outputs);
+    let provider = AiLocalHarnessProvider::new(
+        AiLocalHarnessRegistry::new([registration("local/synthetic")])
+            .expect("registry should validate"),
+        Arc::new(AiJsonLinesLocalHarnessDriver::new(launcher)),
+    );
+    let model_request = stateless_tool_request("local/synthetic");
+    let events = provider
+        .stream(model_request.clone(), context(&model_request))
+        .await
+        .expect("stateless harness process should start")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("reviewed tool events should normalize");
+    assert_eq!(events, expected_events);
+
+    let state = state.lock().expect("fake state should lock");
+    let frame: serde_json::Value = serde_json::from_slice(
+        state
+            .input
+            .strip_suffix(b"\n")
+            .expect("input must be one framed line"),
+    )
+    .expect("input frame should be JSON");
+    assert_eq!(frame["protocol"], "graphql-orm-ai/local-harness-jsonl/v2");
+    assert_eq!(frame["continuation_mode"], "stateless_replay");
+    assert_eq!(frame["tools"][0]["tool_id"], "records.read");
+    assert_eq!(frame["continuation"]["type"], "stateless_conversation");
+    assert_eq!(frame["input"][0]["type"], "tool_result");
 }
 
 #[tokio::test]

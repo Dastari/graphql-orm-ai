@@ -4,6 +4,62 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: stateless local tool continuation (crate/schema 0.20.0 to 0.21.0)
+
+Apply AI schema module `0.21.0` while provider workers, coordinator workers,
+backups, and restore callbacks are closed. Do not run 0.21.0 code against a
+module registered as 0.20.0. The module still owns 39 private entities and the
+generated migration has no table, column, index, or consumer-data rewrite.
+The module version advances because the protected coordinator-checkpoint
+semantic contract now accepts version-2 stateless conversation payloads.
+Existing version-1 provider-retained checkpoints remain readable.
+
+Public Rust API changes are pre-1.0 breaking for exhaustive matches and struct
+literals:
+
+- `ModelRequest` adds required `continuation_mode`; use
+  `ProviderRetained` for the existing OpenAI response-ID path and
+  `StatelessReplay` only for an adapter that advertises it.
+- `ModelContinuation` adds `StatelessConversation`, and the new
+  `ModelConversationMessage`/`ModelConversationToolCall` types retain exact
+  bounded visible history. Update exhaustive matches.
+- `ProviderCapabilities` adds `provider_retained_continuation` and
+  `stateless_continuation`. Providers and registries must state these
+  independently; neither is inferred from `custom_tools`.
+- Provider plans now reject duplicate manifest hashes and permit at most 288
+  transfers so a bounded stateless replay can carry one distinct proof for
+  each of up to 256 tool results. Every `ToolResult` manifest must contain one
+  `application_tool_result` source and may cover exactly one replayed result.
+
+The native Ollama adapter now accepts only server-authored custom-tool plans in
+`StatelessReplay` mode. It maps the full protected text/JSON, assistant-call,
+and tool-result history into `/api/chat`, rejects hidden thinking and
+provider-retained continuation, and normalizes only offered function names
+back to local tool IDs. Existing text/image/structured requests in
+`ProviderRetained` mode continue unchanged.
+
+The installed-harness framing contract changes from
+`graphql-orm-ai/local-harness-jsonl/v1` to `/v2`. Update reviewed harnesses to
+accept `continuation_mode`, `continuation`, and `tools` in the single request
+frame. A tool-capable registration must set `custom_tools = true` and
+`stateless_continuation = true` together; `parallel_tool_calls` is optional.
+The driver accepts only exact offered tool IDs in bounded
+start/delta/complete order. Text-only harnesses may keep both capabilities
+false but must still implement v2 framing.
+
+Stateless tool batches are protected and checkpointed through generated
+`graphql-orm` repositories and transactions; no raw SQL is introduced. The
+same fenced generation consumes the checkpoint before its next provider call.
+If that lease expires, restore validates the durable budget/tool/step/hash
+evidence but moves the run to `RecoveryRequired`; it does not replay a local
+model or application resolver. Cross-generation adoption remains limited to
+provider-retained response-ID checkpoints. No existing data backfill is
+needed, and no consumer-owned application/domain data is changed.
+
+This is a pre-1.0 Rust API, provider capability, local-harness protocol,
+persistence-semantic, restore, and behavioral contract change. It adds no
+GraphQL field or root and therefore does not change the public GraphQL SDL.
+
 ## Unreleased: bounded session content retention (crate/schema 0.19.0 to 0.20.0)
 
 Apply AI schema module `0.20.0` while session/provider workers, subscriptions,

@@ -1,6 +1,6 @@
 //! Security-ordered execution of one provider call for a fenced run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,9 +15,11 @@ use crate::{
     AiLiveDeltaCoalescerLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaSink,
     AiProviderAttachmentRequest, AiProviderAttachmentResolver, AiResolvedProviderAttachment,
     AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiToolPolicySet, ModelBuiltinTool,
-    ModelContinuation, ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind,
-    ProviderRequestContext,
+    ModelContinuation, ModelContinuationMode, ModelConversationMessage, ModelConversationToolCall,
+    ModelInputBlock, ModelRequest, ProviderEvent, ProviderKind, ProviderRequestContext,
 };
+
+const MAXIMUM_PROVIDER_TRANSFERS: usize = 288;
 
 /// Deployment-owned bounds for a single normalized provider stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,23 +170,42 @@ impl AiProviderCallPlan {
     ///
     /// Returns [`AiError::InvalidInput`] for a malformed request/correlation,
     /// custom tools, mismatched provider/model/session/run/scope, duplicate or
-    /// absent model-inference manifest, or more than 32 transfers.
+    /// absent model-inference manifest, duplicate manifest, or more than 288
+    /// transfers. The larger bound accommodates an exact proof for each item
+    /// in one bounded stateless tool-result replay.
     pub fn new(
         provider_kind: ProviderKind,
         request: ModelRequest,
         budget: AiBudgetReservationRequest,
-        mut transfers: Vec<AiEgressManifest>,
+        transfers: Vec<AiEgressManifest>,
         correlation_id: impl Into<String>,
+    ) -> Result<Self, AiError> {
+        Self::new_internal(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id.into(),
+            false,
+        )
+    }
+
+    fn new_internal(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: String,
+        allow_bound_tools: bool,
     ) -> Result<Self, AiError> {
         request
             .validate()
             .map_err(|_| AiError::InvalidInput("invalid provider call plan".to_owned()))?;
-        let correlation_id = correlation_id.into();
-        if !request.tools.is_empty()
+        if (!allow_bound_tools && !request.tools.is_empty())
             || correlation_id.trim().is_empty()
             || correlation_id.len() > 512
             || transfers.is_empty()
-            || transfers.len() > 32
+            || transfers.len() > MAXIMUM_PROVIDER_TRANSFERS
             || budget.provider_kind != provider_kind
             || budget.model != request.model
         {
@@ -192,12 +213,14 @@ impl AiProviderCallPlan {
                 "invalid provider call plan".to_owned(),
             ));
         }
+        let mut manifest_hashes = BTreeSet::new();
         if transfers.iter().any(|manifest| {
             manifest.provider_kind != provider_kind.as_str()
                 || manifest.model != request.model
                 || manifest.session_id != Some(budget.session_id)
                 || manifest.run_id != Some(budget.run_id)
                 || manifest.scope != budget.scope
+                || !manifest_hashes.insert(manifest.stable_hash())
         }) || transfers
             .iter()
             .filter(|manifest| manifest.capability == AiEgressCapability::ModelInference)
@@ -329,17 +352,14 @@ impl AiProviderCallPlan {
         for definition in &request.tools {
             catalog.validate_read_only_model_definition(definition, policy)?;
         }
-        let mut request_without_tools = request.clone();
-        request_without_tools.tools.clear();
-        let mut plan = Self::new(
+        Self::new_internal(
             provider_kind,
-            request_without_tools,
+            request,
             budget,
             transfers,
-            correlation_id,
-        )?;
-        plan.request = request;
-        Ok(plan)
+            correlation_id.into(),
+            true,
+        )
     }
 
     fn new_with_bound_supervised_tools(
@@ -359,26 +379,25 @@ impl AiProviderCallPlan {
         for definition in &request.tools {
             catalog.validate_supervised_model_definition(definition, policy)?;
         }
-        let mut request_without_tools = request.clone();
-        request_without_tools.tools.clear();
-        let mut plan = Self::new(
+        Self::new_internal(
             provider_kind,
-            request_without_tools,
+            request,
             budget,
             transfers,
-            correlation_id,
-        )?;
-        plan.request = request;
-        Ok(plan)
+            correlation_id.into(),
+            true,
+        )
     }
 
     /// Creates a subsequent read-only tool turn from one exact bounded-loop
     /// continuation.
     ///
-    /// The continuation installs the previous response ID, matched tool-result
-    /// blocks, and their immutable exact egress manifests as one unit. The
-    /// caller supplies a fresh model-inference manifest and budget request;
-    /// every transfer is freshly reauthorized and audited by the executor.
+    /// The continuation installs either the previous response ID or exact
+    /// bounded stateless history, plus matched tool-result blocks and their
+    /// immutable exact egress manifests as one unit. The caller supplies a
+    /// fresh model-inference manifest and budget request; every historical and
+    /// current result transfer is freshly reauthorized and audited by the
+    /// executor.
     ///
     /// # Errors
     ///
@@ -482,6 +501,7 @@ impl AiProviderCallPlan {
                 continuation: continuation.then(|| ModelContinuation::ProviderResponse {
                     response_id: "test-previous-response".to_owned(),
                 }),
+                continuation_mode: crate::ModelContinuationMode::ProviderRetained,
                 tools: vec![crate::ModelToolDefinition {
                     tool_id: "test.read".to_owned(),
                     provider_name: "test_read".to_owned(),
@@ -528,6 +548,7 @@ impl AiProviderCallPlan {
 pub struct AiProviderToolCall {
     call_id: String,
     tool_id: crate::AiToolId,
+    provider_name: String,
     tool_fingerprint: String,
     arguments: serde_json::Value,
 }
@@ -541,6 +562,11 @@ impl AiProviderToolCall {
     /// Stable local registered tool identifier.
     pub fn tool_id(&self) -> &crate::AiToolId {
         &self.tool_id
+    }
+
+    /// Exact provider-facing name from the reviewed model definition.
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
     }
 
     /// Exact descriptor fingerprint exposed in the provider request.
@@ -575,7 +601,10 @@ pub struct AiProviderCallResult {
     provider_response_id: Option<String>,
     budget_reservation_id: AiBudgetReservationId,
     previous_response_id: Option<String>,
+    previous_continuation_reference: Option<String>,
     tool_calls: Vec<AiProviderToolCall>,
+    request_snapshot: ModelRequest,
+    replay_tool_transfers: Vec<AiEgressManifest>,
 }
 
 /// Authoritative provider usage observation requiring deployment pricing/unit
@@ -702,6 +731,7 @@ impl AiProviderCallResult {
             "toolCalls": self.tool_calls.iter().map(|call| serde_json::json!({
                 "callId": call.call_id,
                 "toolId": call.tool_id.as_str(),
+                "providerName": call.provider_name,
                 "toolFingerprint": call.tool_fingerprint,
                 "arguments": call.arguments,
             })).collect::<Vec<_>>(),
@@ -768,6 +798,18 @@ impl AiProviderCallResult {
         self.previous_response_id.as_deref()
     }
 
+    pub(crate) fn previous_continuation_reference(&self) -> Option<&str> {
+        self.previous_continuation_reference.as_deref()
+    }
+
+    pub(crate) fn replay_tool_transfers(&self) -> &[AiEgressManifest] {
+        &self.replay_tool_transfers
+    }
+
+    pub(crate) fn uses_stateless_continuation(&self) -> bool {
+        self.request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
+    }
+
     /// Exact normalized custom application-tool requests in arrival order.
     pub fn tool_calls(&self) -> &[AiProviderToolCall] {
         &self.tool_calls
@@ -790,6 +832,103 @@ impl AiProviderCallResult {
         Ok(ModelContinuation::ProviderResponse { response_id })
     }
 
+    pub(crate) fn next_continuation(&self) -> Result<ModelContinuation, AiError> {
+        if self.tool_calls.is_empty() {
+            return Err(AiError::ProviderFailed);
+        }
+        match self.request_snapshot.continuation_mode {
+            ModelContinuationMode::ProviderRetained => self.continuation(),
+            ModelContinuationMode::StatelessReplay => {
+                let (instructions, mut messages) = match &self.request_snapshot.continuation {
+                    None => {
+                        if self.request_snapshot.input.is_empty()
+                            || self.request_snapshot.input.iter().any(|block| {
+                                !matches!(
+                                    block,
+                                    ModelInputBlock::Text { .. } | ModelInputBlock::Json { .. }
+                                )
+                            })
+                        {
+                            return Err(AiError::Conflict);
+                        }
+                        (
+                            self.request_snapshot.instructions.clone(),
+                            vec![ModelConversationMessage::User {
+                                content: self.request_snapshot.input.clone(),
+                            }],
+                        )
+                    }
+                    Some(ModelContinuation::StatelessConversation {
+                        instructions,
+                        messages,
+                    }) => {
+                        let mut messages = messages.clone();
+                        let calls = match messages.last() {
+                            Some(ModelConversationMessage::Assistant { tool_calls, .. }) => {
+                                tool_calls.clone()
+                            }
+                            _ => return Err(AiError::Conflict),
+                        };
+                        if calls.len() != self.request_snapshot.input.len() {
+                            return Err(AiError::Conflict);
+                        }
+                        for (call, input) in calls.iter().zip(&self.request_snapshot.input) {
+                            let ModelInputBlock::ToolResult {
+                                call_id,
+                                tool_id,
+                                output,
+                            } = input
+                            else {
+                                return Err(AiError::Conflict);
+                            };
+                            if call_id != &call.call_id || tool_id != &call.tool_id {
+                                return Err(AiError::Conflict);
+                            }
+                            messages.push(ModelConversationMessage::Tool {
+                                call_id: call_id.clone(),
+                                tool_id: tool_id.clone(),
+                                provider_name: call.provider_name.clone(),
+                                output: output.clone(),
+                            });
+                        }
+                        (instructions.clone(), messages)
+                    }
+                    Some(ModelContinuation::ProviderResponse { .. }) => {
+                        return Err(AiError::Conflict);
+                    }
+                };
+                let mut content = String::new();
+                for event in &self.events {
+                    if let ProviderEvent::TextDelta { text } = event {
+                        content
+                            .try_reserve(text.len())
+                            .map_err(|_| AiError::PersistenceFailed)?;
+                        content.push_str(text);
+                    }
+                }
+                let tool_calls = self
+                    .tool_calls
+                    .iter()
+                    .map(|call| ModelConversationToolCall {
+                        call_id: call.call_id.clone(),
+                        tool_id: call.tool_id.as_str().to_owned(),
+                        provider_name: call.provider_name.clone(),
+                        tool_fingerprint: call.tool_fingerprint.clone(),
+                        arguments: call.arguments.clone(),
+                    })
+                    .collect();
+                messages.push(ModelConversationMessage::Assistant {
+                    content,
+                    tool_calls,
+                });
+                Ok(ModelContinuation::StatelessConversation {
+                    instructions,
+                    messages,
+                })
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_result(
         lease: &AiRunLease,
@@ -803,6 +942,7 @@ impl AiProviderCallResult {
                 call_id: call_id.to_owned(),
                 tool_id: crate::AiToolId::parse(tool_id)
                     .expect("coordinator test tool ID should be valid"),
+                provider_name: tool_id.replace('.', "_"),
                 tool_fingerprint: "test-fingerprint".to_owned(),
                 arguments,
             })
@@ -836,8 +976,31 @@ impl AiProviderCallResult {
             cached_input_tokens: 0,
             provider_response_id: Some(provider_response_id.to_owned()),
             budget_reservation_id: AiBudgetReservationId::new(),
-            previous_response_id,
+            previous_response_id: previous_response_id.clone(),
+            previous_continuation_reference: previous_response_id.clone(),
             tool_calls,
+            request_snapshot: ModelRequest {
+                model: "coordinator-test-model".to_owned(),
+                instructions: Vec::new(),
+                input: previous_response_id
+                    .as_ref()
+                    .map(|_| ModelInputBlock::ToolResult {
+                        call_id: "previous-test-call".to_owned(),
+                        tool_id: "test.read".to_owned(),
+                        output: serde_json::json!({"test": true}),
+                    })
+                    .into_iter()
+                    .collect(),
+                continuation: previous_response_id
+                    .clone()
+                    .map(|response_id| ModelContinuation::ProviderResponse { response_id }),
+                continuation_mode: ModelContinuationMode::ProviderRetained,
+                tools: Vec::new(),
+                builtin_tools: Vec::new(),
+                output_schema: None,
+                maximum_output_tokens: Some(64),
+            },
+            replay_tool_transfers: Vec::new(),
         }
     }
 }
@@ -1122,10 +1285,28 @@ impl AiProviderCallExecutor {
         let live_correlation_id = plan.correlation_id.clone();
         let live_provider_kind = plan.provider_kind.clone();
         let builtin_tools = plan.request.builtin_tools.clone();
-        let previous_response_id = plan.request.continuation.as_ref().map(|continuation| {
-            let ModelContinuation::ProviderResponse { response_id } = continuation;
-            response_id.clone()
-        });
+        let request_snapshot = plan.request.clone();
+        let previous_response_id =
+            plan.request
+                .continuation
+                .as_ref()
+                .and_then(|continuation| match continuation {
+                    ModelContinuation::ProviderResponse { response_id } => {
+                        Some(response_id.clone())
+                    }
+                    ModelContinuation::StatelessConversation { .. } => None,
+                });
+        let previous_continuation_reference = plan
+            .request
+            .continuation
+            .as_ref()
+            .and_then(|continuation| continuation.chain_reference(&plan.request.input));
+        let replay_tool_transfers = plan
+            .transfers
+            .iter()
+            .filter(|manifest| manifest.capability == AiEgressCapability::ToolResult)
+            .cloned()
+            .collect::<Vec<_>>();
         let offered_tools = plan
             .request
             .tools
@@ -1133,7 +1314,11 @@ impl AiProviderCallExecutor {
             .map(|tool| {
                 (
                     tool.tool_id.clone(),
-                    (tool.fingerprint.clone(), tool.parameters.clone()),
+                    (
+                        tool.provider_name.clone(),
+                        tool.fingerprint.clone(),
+                        tool.parameters.clone(),
+                    ),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -1248,7 +1433,9 @@ impl AiProviderCallExecutor {
                     if completed_tool_calls.contains_key(call_id) {
                         return Err(AiError::ProviderFailed);
                     }
-                    let Some((fingerprint, argument_schema)) = offered_tools.get(tool_id) else {
+                    let Some((provider_name, fingerprint, argument_schema)) =
+                        offered_tools.get(tool_id)
+                    else {
                         return Err(AiError::ProviderFailed);
                     };
                     let validator = jsonschema::validator_for(argument_schema)
@@ -1262,6 +1449,7 @@ impl AiProviderCallExecutor {
                             call_id: call_id.clone(),
                             tool_id: crate::AiToolId::parse(tool_id.clone())
                                 .map_err(|_| AiError::ProviderFailed)?,
+                            provider_name: provider_name.clone(),
                             tool_fingerprint: fingerprint.clone(),
                             arguments: arguments.clone(),
                         },
@@ -1316,6 +1504,14 @@ impl AiProviderCallExecutor {
                     .ok_or(AiError::ProviderFailed)?,
             );
         }
+        if (request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
+            && provider_response_id.is_some())
+            || (request_snapshot.continuation_mode == ModelContinuationMode::ProviderRetained
+                && !tool_calls.is_empty()
+                && provider_response_id.is_none())
+        {
+            return Err(AiError::ProviderFailed);
+        }
 
         let observation = AiProviderUsageObservation {
             scope: plan.budget.scope.clone(),
@@ -1365,7 +1561,10 @@ impl AiProviderCallExecutor {
             provider_response_id,
             budget_reservation_id: reservation.id(),
             previous_response_id,
+            previous_continuation_reference,
             tool_calls,
+            request_snapshot,
+            replay_tool_transfers,
         })
     }
 
@@ -2119,6 +2318,7 @@ mod tests {
                 text: "hello".to_owned(),
             }],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -2212,6 +2412,13 @@ mod tests {
             &policy,
         )
         .expect("registered enabled read-only tool plan should validate")
+    }
+
+    fn stateless_tool_plan(fixture: &Fixture) -> AiProviderCallPlan {
+        let mut plan = tool_plan(fixture);
+        plan.request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        plan.transfers[0].estimated_bytes = plan.request.conservative_egress_bytes();
+        plan
     }
 
     fn attachment_plan(fixture: &Fixture, bytes: &[u8]) -> AiProviderCallPlan {
@@ -2958,6 +3165,7 @@ mod tests {
             instructions: vec!["Continue after the tool result".to_owned()],
             input: Vec::new(),
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![ModelToolDefinition {
                 tool_id: descriptor.id.as_str().to_owned(),
                 provider_name: "records_read".to_owned(),
@@ -2981,6 +3189,7 @@ mod tests {
             continuation: Some(ModelContinuation::ProviderResponse {
                 response_id: "tool-response-1".to_owned(),
             }),
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             input: vec![ModelInputBlock::ToolResult {
                 call_id: "call-1".to_owned(),
                 tool_id: descriptor.id.as_str().to_owned(),
@@ -3048,6 +3257,212 @@ mod tests {
             )
             .await
             .expect("renewed tool fence should complete the run");
+    }
+
+    #[tokio::test]
+    async fn stateless_tool_batch_is_checkpointed_and_consumed_without_response_id() {
+        let fixture = fixture(vec![
+            ProviderEvent::ResponseStarted { response_id: None },
+            ProviderEvent::ToolCallStarted {
+                call_id: "stateless-call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+            },
+            ProviderEvent::ToolCallCompleted {
+                call_id: "stateless-call-1".to_owned(),
+                arguments: json!({"recordId": "54"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 18,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted { response_id: None },
+        ])
+        .await;
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let result = provider_executor
+            .execute(&fixture.lease, stateless_tool_plan(&fixture))
+            .await
+            .expect("stateless tool turn should normalize");
+        assert_eq!(result.provider_response_id(), None);
+        assert!(result.uses_stateless_continuation());
+
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
+        );
+        assert_eq!(
+            guard
+                .observe_provider_turn(&result)
+                .expect("stateless turn should bind"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 0,
+                call_count: 1,
+            }
+        );
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_authorized_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("tool-result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &result,
+                &fixture.scope,
+                "stateless-tool-loop",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("stateless provider turn should checkpoint");
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let persisted = tool_service
+            .execute_read_only(
+                &lease,
+                &result,
+                AiApplicationToolCallContext::new(
+                    0,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-tool-loop",
+                    "stateless-provider-turn-1",
+                )
+                .expect("tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("stateless tool should execute through the resolver");
+        guard
+            .observe_tool_result(&persisted)
+            .expect("tool output should match the stateless turn");
+        let continuation = guard
+            .continuation()
+            .expect("complete stateless batch should continue");
+        assert_eq!(
+            continuation.checkpoint_value()["continuation"]["type"],
+            "stateless_conversation"
+        );
+        let lease = checkpoint_service
+            .persist_tool_batch(
+                persisted.lease(),
+                &result,
+                std::slice::from_ref(&persisted),
+                &continuation,
+                &fixture.scope,
+                "stateless-tool-loop",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("stateless tool batch should checkpoint");
+        let checkpoint_id = lease
+            .latest_checkpoint_id()
+            .expect("stateless checkpoint should be linked");
+        let checkpoint = AiRunCheckpointRecord::find_by_id(&fixture.database, &checkpoint_id)
+            .await
+            .expect("checkpoint lookup should succeed")
+            .expect("checkpoint should exist");
+        assert_eq!(checkpoint.provider_response_id, None);
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&lease).await,
+            Err(AiError::Conflict)
+        ));
+        let consumed = checkpoint_service
+            .consume_before_provider(&lease, checkpoint_id)
+            .await
+            .expect("same generation should consume the stateless checkpoint");
+        assert_eq!(consumed.latest_checkpoint_id(), None);
+
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("tool should remain registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let base = plan(&fixture);
+        let next = AiProviderCallPlan::new_continuation_with_tools(
+            base.provider_kind,
+            ModelRequest {
+                model: "mock-model".to_owned(),
+                instructions: Vec::new(),
+                input: Vec::new(),
+                continuation: None,
+                continuation_mode: ModelContinuationMode::StatelessReplay,
+                tools: vec![ModelToolDefinition {
+                    tool_id: descriptor.id.as_str().to_owned(),
+                    provider_name: "records_read".to_owned(),
+                    fingerprint: descriptor.fingerprint.clone(),
+                    description: descriptor.description.clone(),
+                    parameters: descriptor.argument_schema.clone(),
+                    strict: true,
+                }],
+                builtin_tools: Vec::new(),
+                output_schema: None,
+                maximum_output_tokens: Some(100),
+            },
+            base.budget,
+            base.transfers,
+            "stateless-continuation",
+            continuation,
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("stateless continuation plan should remain exact");
+        assert!(matches!(
+            next.request.continuation,
+            Some(ModelContinuation::StatelessConversation { .. })
+        ));
+        assert_eq!(
+            next.transfers
+                .iter()
+                .filter(|manifest| manifest.capability == AiEgressCapability::ToolResult)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3397,6 +3812,7 @@ mod tests {
             instructions: vec![],
             input: vec![],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![ModelToolDefinition {
                 tool_id: "records.read".to_owned(),
                 provider_name: "records_read".to_owned(),

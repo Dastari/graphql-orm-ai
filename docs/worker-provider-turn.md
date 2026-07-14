@@ -131,11 +131,12 @@ fence. `AiAgentLoopGuard` binds each result to its opaque provider `call_id`
 before `new_continuation_with_tools` can construct the next request.
 
 The coordinator is restart-adoptable across generations only for an exact
-completed read-only tool batch. The protected adopter—not host code—rebuilds
+completed provider-retained read-only tool batch. The protected adopter—not host code—rebuilds
 the guard and continuation after current-authority and durable-evidence checks,
 then consumes the checkpoint before transport. A provider-turn checkpoint,
-partial batch, unknown provider response, consumed link, or malformed restore
-state remains closed for reconciliation.
+partial batch, stateless checkpoint after lease loss, unknown provider
+response, consumed link, or malformed restore state remains closed for
+reconciliation.
 Consequential, mutation, proposal, approval-required, and non-idempotent
 descriptors remain rejected
 until canonical preview, one-shot approval persistence, post-approval fresh

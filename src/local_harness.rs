@@ -1,6 +1,6 @@
 //! Deployment-registered installed local-harness boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,8 +10,8 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::{
-    AiProvider, ModelInputBlock, ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    AiProvider, ModelContinuationMode, ModelInputBlock, ModelRequest, ProviderCapabilities,
+    ProviderError, ProviderEvent, ProviderEventStream, ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_REGISTRATIONS: usize = 128;
@@ -217,10 +217,12 @@ impl std::fmt::Debug for AiLocalHarnessRegistration {
 impl AiLocalHarnessRegistration {
     /// Creates one immutable deployment-owned registration.
     ///
-    /// The initial safe protocol supports streaming text and optional
-    /// structured output only. File/image input, custom or built-in tools,
-    /// continuation, background work, embeddings, and coding authority must be
-    /// false in `capabilities`.
+    /// The safe protocol supports streaming text, optional structured output,
+    /// and an optional exact stateless application-tool contract. File/image
+    /// input, built-in tools, provider-retained continuation, background work,
+    /// embeddings, and coding authority must be false in `capabilities`.
+    /// `custom_tools` and `stateless_continuation` must be enabled together;
+    /// `parallel_tool_calls` may be enabled only with that pair.
     ///
     /// # Errors
     ///
@@ -531,9 +533,10 @@ pub trait AiLocalHarnessDriver: Send + Sync {
 ///
 /// The request is one versioned JSON line. Output is a sequence of normalized
 /// [`ProviderEvent`] JSON lines followed by a successful process exit. Only
-/// started/text/usage/completed events are accepted in the initial protocol;
-/// response IDs, reasoning, tools, citations, built-ins, and unknown events
-/// fail closed.
+/// started/text/tool/usage/completed events are accepted by protocol v2.
+/// Tool events must name one exact offered tool and form a bounded,
+/// start-before-delta-before-complete sequence. Response IDs, reasoning,
+/// citations, built-ins, and unknown events fail closed.
 pub struct AiJsonLinesLocalHarnessDriver {
     launcher: Arc<dyn AiLocalHarnessProcessLauncher>,
 }
@@ -562,12 +565,20 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
     ) -> Result<ProviderEventStream, ProviderError> {
         validate_registered_request(&registration, &request)?;
         let limits = registration.limits();
+        let offered_tool_ids = request
+            .tools
+            .iter()
+            .map(|tool| tool.tool_id.clone())
+            .collect::<BTreeSet<_>>();
         let mut encoded = serde_json::to_vec(&json!({
-            "protocol": "graphql-orm-ai/local-harness-jsonl/v1",
+            "protocol": "graphql-orm-ai/local-harness-jsonl/v2",
             "type": "request",
             "model": request.model,
             "instructions": request.instructions,
             "input": request.input,
+            "continuation_mode": request.continuation_mode,
+            "continuation": request.continuation,
+            "tools": request.tools,
             "output_schema": request.output_schema,
             "maximum_output_tokens": request.maximum_output_tokens,
         }))
@@ -605,6 +616,7 @@ impl AiLocalHarnessDriver for AiJsonLinesLocalHarnessDriver {
             limits,
             maximum_input_tokens,
             maximum_output_tokens,
+            offered_tool_ids,
         ))
     }
 }
@@ -667,6 +679,7 @@ fn normalized_process_stream(
     limits: AiLocalHarnessLimits,
     maximum_input_tokens: u64,
     maximum_output_tokens: u64,
+    offered_tool_ids: BTreeSet<String>,
 ) -> ProviderEventStream {
     Box::pin(async_stream::try_stream! {
         let deadline = tokio::time::Instant::now() + limits.turn_timeout();
@@ -674,7 +687,11 @@ fn normalized_process_stream(
         let mut total_output_bytes = 0usize;
         let mut stderr_bytes = 0usize;
         let mut frame_count = 0usize;
-        let mut state = HarnessEventState::new(maximum_input_tokens, maximum_output_tokens);
+        let mut state = HarnessEventState::new(
+            maximum_input_tokens,
+            maximum_output_tokens,
+            offered_tool_ids,
+        );
         loop {
             let observation = match timeout_until(deadline, process.next_output()).await {
                 Ok(observation) => observation,
@@ -751,16 +768,24 @@ struct HarnessEventState {
     completed: bool,
     maximum_input_tokens: u64,
     maximum_output_tokens: u64,
+    offered_tool_ids: BTreeSet<String>,
+    tool_calls: BTreeMap<String, bool>,
 }
 
 impl HarnessEventState {
-    const fn new(maximum_input_tokens: u64, maximum_output_tokens: u64) -> Self {
+    fn new(
+        maximum_input_tokens: u64,
+        maximum_output_tokens: u64,
+        offered_tool_ids: BTreeSet<String>,
+    ) -> Self {
         Self {
             started: false,
             usage: false,
             completed: false,
             maximum_input_tokens,
             maximum_output_tokens,
+            offered_tool_ids,
+            tool_calls: BTreeMap::new(),
         }
     }
 
@@ -772,6 +797,31 @@ impl HarnessEventState {
                 self.started = true;
             }
             ProviderEvent::TextDelta { .. } if self.started && !self.usage && !self.completed => {}
+            ProviderEvent::ToolCallStarted { call_id, tool_id }
+                if self.started
+                    && !self.usage
+                    && !self.completed
+                    && valid_event_reference(call_id)
+                    && self.offered_tool_ids.contains(tool_id)
+                    && self.tool_calls.len() < 64
+                    && !self.tool_calls.contains_key(call_id) =>
+            {
+                self.tool_calls.insert(call_id.clone(), false);
+            }
+            ProviderEvent::ToolArgumentsDelta { call_id, .. }
+                if self.started
+                    && !self.usage
+                    && !self.completed
+                    && self.tool_calls.get(call_id) == Some(&false) => {}
+            ProviderEvent::ToolCallCompleted { call_id, arguments }
+                if self.started
+                    && !self.usage
+                    && !self.completed
+                    && arguments.is_object()
+                    && self.tool_calls.get(call_id) == Some(&false) =>
+            {
+                self.tool_calls.insert(call_id.clone(), true);
+            }
             ProviderEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -781,7 +831,8 @@ impl HarnessEventState {
                 && !self.completed
                 && *input_tokens <= self.maximum_input_tokens
                 && *output_tokens <= self.maximum_output_tokens
-                && *cached_input_tokens <= *input_tokens =>
+                && *cached_input_tokens <= *input_tokens
+                && self.tool_calls.values().all(|complete| *complete) =>
             {
                 self.usage = true;
             }
@@ -816,21 +867,32 @@ fn validate_registered_request(
     request: &ModelRequest,
 ) -> Result<(), ProviderError> {
     request.validate()?;
+    let capabilities = registration.capabilities();
+    let invalid_continuation = match request.continuation_mode {
+        ModelContinuationMode::ProviderRetained => {
+            request.continuation.is_some()
+                || !request.tools.is_empty()
+                || request
+                    .input
+                    .iter()
+                    .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        }
+        ModelContinuationMode::StatelessReplay => {
+            !capabilities.stateless_continuation
+                || (!request.tools.is_empty() && !capabilities.custom_tools)
+        }
+    };
     if request.model != registration.logical_model()
-        || request.continuation.is_some()
-        || !request.tools.is_empty()
+        || invalid_continuation
         || !request.builtin_tools.is_empty()
-        || request.input.iter().any(|block| {
-            matches!(
-                block,
-                ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. }
-            )
-        })
-        || (request.output_schema.is_some() && !registration.capabilities().structured_output)
+        || request
+            .input
+            .iter()
+            .any(|block| matches!(block, ModelInputBlock::Attachment { .. }))
+        || (request.output_schema.is_some() && !capabilities.structured_output)
         || request.maximum_output_tokens.is_none()
         || request.maximum_output_tokens.is_some_and(|requested| {
-            registration
-                .capabilities()
+            capabilities
                 .maximum_output_tokens
                 .is_some_and(|maximum| requested > maximum)
         })
@@ -845,14 +907,15 @@ fn safe_capabilities(capabilities: &ProviderCapabilities) -> bool {
         && capabilities.local
         && !capabilities.image_input
         && !capabilities.file_input
-        && !capabilities.custom_tools
-        && !capabilities.parallel_tool_calls
+        && capabilities.custom_tools == capabilities.stateless_continuation
+        && (!capabilities.parallel_tool_calls || capabilities.custom_tools)
         && !capabilities.web_search
         && !capabilities.file_search
         && !capabilities.code_execution
         && !capabilities.image_generation
         && !capabilities.embeddings
         && !capabilities.background
+        && !capabilities.provider_retained_continuation
         && capabilities
             .maximum_context_tokens
             .is_some_and(|value| value > 0)
@@ -867,6 +930,12 @@ fn valid_identifier(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/')
         })
+}
+
+fn valid_event_reference(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 1_024
+        && value.bytes().all(|byte| !byte.is_ascii_control())
 }
 
 fn normal_absolute_path(path: &Path) -> bool {

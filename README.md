@@ -13,10 +13,11 @@ read-only application-tool/result, bounded coordinator/continuation, protected
 output/provider-turn/tool-batch checkpoints, supervised consequential-tool, and
 private remote GraphQL adapter foundations compile and are tested. Protected
 proposal review and exact one-shot approval lifecycles also compile and are
-tested. Exact completed read-only tool batches can also be adopted across a
-new fenced generation under current authority. Provider-turn/partial-batch
-adoption, a top-level approval-wait coordinator, and several operational
-adapters listed below are still being implemented.
+tested. Exact completed read-only tool batches with provider-retained response
+IDs can also be adopted across a new fenced generation under current
+authority. Provider-turn/partial-batch/stateless adoption, a top-level
+approval-wait coordinator, and several operational adapters listed below are
+still being implemented.
 
 ## What it provides
 
@@ -51,13 +52,14 @@ adapters listed below are still being implemented.
   assurance, rate limits, and audit remaining authoritative.
 - Provider-neutral streaming events, deterministic network-free mocks, a
   feature-gated OpenAI Responses/SSE adapter, and a native Ollama `/api/chat`
-  adapter for streaming text, exact images, and structured output. Anthropic,
-  xAI, and explicitly profiled OpenAI-compatible adapters remain reserved.
+  adapter for streaming text, exact images, structured output, and stateless
+  application-tool loops. Anthropic, xAI, and explicitly profiled
+  OpenAI-compatible adapters remain reserved.
 - An opt-in installed local-harness boundary with deployment-frozen logical
   model registrations, fixed executable/digest/sandbox/resource contracts, a
-  bounded JSON-lines provider driver, and deterministic fake-process
-  conformance tests. The crate intentionally supplies no generic unsandboxed
-  subprocess launcher.
+  bounded JSON-lines v2 provider driver, optional stateless application-tool
+  calls, and deterministic fake-process conformance tests. The crate
+  intentionally supplies no generic unsandboxed subprocess launcher.
 - Separate, exact proofs for provider egress and atomic budget reservation.
   Provider built-ins such as web search, file search, code execution, image
   analysis, and image generation require their own authorized transfer.
@@ -98,8 +100,13 @@ adapters listed below are still being implemented.
   provider turn and complete model-visible read-only tool batch. They bind
   settled usage, loop state, scope/route, exact outputs, and continuation;
   failed checkpoint handoff requires recovery and does not trigger replay.
-- One-shot cross-generation adoption for an exact completed read-only tool
-  batch. Recovery preserves only a hash- and budget-bound complete batch; the
+- Provider-independent stateless continuation for Ollama and reviewed local
+  harnesses. Only bounded visible text/JSON, exact assistant calls, and
+  disclosure-validated tool outputs are retained; every replayed output has a
+  unique freshly authorized egress proof. Stateless checkpoints continue only
+  under the same fence and become `RecoveryRequired` after lease loss.
+- One-shot cross-generation adoption for an exact completed provider-retained
+  read-only tool batch. Recovery preserves only a hash- and budget-bound complete batch; the
   new worker freshly reauthorizes, reopens and validates every durable result
   and egress proof, reconstructs bounded continuation state, and consumes the
   checkpoint before the next provider transport.
@@ -165,9 +172,9 @@ Exactly one persistence backend should be selected:
 | `provider-openai` | no | Native OpenAI Responses/SSE adapter |
 | `provider-anthropic` | no | Reserved; adapter not implemented yet |
 | `provider-xai` | no | Reserved; adapter not implemented yet |
-| `provider-ollama` | no | Native Ollama chat: streaming text, exact images, structured output |
+| `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
 | `provider-openai-compatible` | no | Reserved; requires explicit endpoint profiles |
-| `local-harness` | no | Installed text/structured harness protocol over a trusted sandbox launcher |
+| `local-harness` | no | Installed JSONL v2 text/structured/stateless-tool protocol over a trusted sandbox launcher |
 | `graphql-case-pascal` | no | PascalCase roots, arguments, inputs, outputs, and ORM fields |
 
 Do not build with `--all-features`: the database backends are mutually
@@ -250,7 +257,8 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include provider-turn and partial-tool-batch adoption, a
+Production blockers include provider-turn, partial-tool-batch, and
+cross-generation stateless-checkpoint adoption, a
 top-level supervised approval-wait coordinator, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,
@@ -270,15 +278,16 @@ failure model.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 
-Local execution is a first-class path. The initial native Ollama adapter is
+Local execution is a first-class path. The native Ollama adapter is
 implemented; its exact supported and deliberately gated behaviors are in the
 [Ollama guide](docs/ollama.md). OpenAI-compatible loopback servers will use a
 separately profiled provider adapter. The installed-harness JSON-lines
 foundation is also implemented with no shell, fixed command and arguments, no
-inherited environment or network authority, sandbox/resource contracts, and a
-trusted launcher seam. GraphQL may select an approved logical profile but can
-never configure a command. A concrete OS/container launcher, ACP, and mediated
-tool callbacks remain separately gated; see the
+inherited environment or network authority, sandbox/resource contracts,
+stateless application-tool framing, and a trusted launcher seam. GraphQL may
+select an approved logical profile but can never configure a command. A
+concrete OS/container launcher, ACP, and general mediated coding-workspace
+callbacks remain separately gated; see the
 [local harness guide](docs/local-harness.md).
 
 ## Development safety and checks

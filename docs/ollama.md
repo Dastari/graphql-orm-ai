@@ -13,22 +13,37 @@ The initial adapter supports:
 - exact released PNG, JPEG, and WebP attachments encoded ephemerally in the
   request;
 - JSON-schema structured output;
+- exact registered custom application tools, including bounded parallel calls;
+- provider-independent stateless replay of visible text/JSON, exact assistant
+  calls, and disclosure-validated tool results;
 - an explicit maximum output-token request; and
 - authoritative `prompt_eval_count` and `eval_count` usage.
 
 It sends `think: false` and never emits or persists Ollama thinking content.
-It rejects custom tools, provider built-ins, non-image files, and continuation.
-Ollama has native tool calling, but this runtime cannot safely advertise it
-until a provider-independent stateless conversation checkpoint can reconstruct
-the complete message/tool-result history after a durable handoff or restart.
+It rejects provider built-ins, non-image files, provider-retained response
+continuation, arbitrary roles, and model-authored instructions. Custom tools
+are available only in `ModelContinuationMode::StatelessReplay` and only after
+the ordinary catalog/policy constructors bind each definition. The native
+function name is mapped back to one exact local tool ID and fingerprint; an
+unknown or malformed call fails the stream.
+
+The first tool turn retains the exact original trusted instructions and
+text/JSON user blocks. Each later request replays ordered assistant function
+calls and separately authorized tool messages. Attachments, output schemas,
+provider built-ins, and hidden thinking cannot enter a stateless tool history.
+Every historical and current tool result needs its own unique `ToolResult`
+manifest and fresh egress decision. The protected checkpoint is consumable by
+the same fenced generation; lease loss remains `RecoveryRequired` rather than
+replaying Ollama or an application resolver. Cross-generation stateless
+adoption is not implemented.
 
 The protocol behavior follows Ollama's official
 [`/api/chat` reference](https://docs.ollama.com/api/chat),
 [streaming contract](https://docs.ollama.com/api/streaming),
 [vision guidance](https://docs.ollama.com/capabilities/vision), and
 [structured-output guidance](https://docs.ollama.com/capabilities/structured-outputs).
-Native [tool calling](https://docs.ollama.com/capabilities/tool-calling) remains
-deliberately gated by the runtime guarantee above.
+Native [tool calling](https://docs.ollama.com/capabilities/tool-calling) uses
+that deliberately narrow stateless runtime guarantee.
 
 ## Construction
 
@@ -67,6 +82,8 @@ before transport. It must contain an exact `ModelInference` egress proof and an
 atomic budget proof bound to Ollama, the selected model, run, attempt, fence,
 output ceiling, pricing version, and expiry. Each image additionally needs its
 exact `ImageAnalysis` transfer and `AiProviderAttachmentResolver` result.
+Every replayed application result additionally needs one exact, unique
+`ToolResult` transfer whose source is the durable application-tool-result row.
 
 The adapter accepts only the freshly reopened bytes whose opaque attachment ID,
 detected MIME, byte count, and SHA-256 match the request. It never sends a blob
@@ -84,5 +101,6 @@ model provenance, and process isolation.
 Automated tests use a deterministic loopback HTTP server that captures one
 native request and fragments synthetic NDJSON. They do not contact a real
 Ollama installation, fetch a model, use a credential, or connect to a database.
-Wrong-model responses, truncated streams, unsafe endpoints, missing exact image
-proofs, and unsupported tool requests fail closed.
+Wrong-model responses, truncated streams, unsafe endpoints, missing exact
+image/tool-result proofs, unknown tool names, malformed arguments, and
+stateful tool requests fail closed.

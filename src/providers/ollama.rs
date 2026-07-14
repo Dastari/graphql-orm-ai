@@ -1,5 +1,6 @@
 //! Native deployment-authorized Ollama chat adapter.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +12,9 @@ use url::Url;
 
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiProviderEndpointPolicy, AiProviderKindInput,
-    ModelInputBlock, ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent,
-    ProviderEventStream, ProviderKind, ProviderRequestContext,
+    ModelContinuation, ModelContinuationMode, ModelConversationMessage, ModelInputBlock,
+    ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream,
+    ProviderKind, ProviderRequestContext,
 };
 
 const MAXIMUM_NDJSON_LINE_BYTES: usize = 2 * 1024 * 1024;
@@ -61,11 +63,11 @@ impl std::fmt::Debug for OllamaProviderConfig {
 
 /// Native Ollama `/api/chat` provider.
 ///
-/// This initial adapter supports bounded streaming text, exact inline image
-/// input, and JSON-schema output. It deliberately rejects custom tools,
-/// provider built-ins, file inputs, and continuation until the runtime has a
-/// provider-independent stateless conversation checkpoint; advertising a
-/// native Ollama capability is not sufficient to make restart/replay safe.
+/// The adapter supports bounded streaming text, exact inline image input,
+/// JSON-schema output, and custom application tools through the runtime's exact
+/// provider-independent stateless conversation contract. Provider built-ins,
+/// file inputs, provider-retained continuation, and hidden thinking remain
+/// unsupported.
 pub struct OllamaProvider {
     config: OllamaProviderConfig,
     client: reqwest::Client,
@@ -136,54 +138,79 @@ impl OllamaProvider {
         request: &ModelRequest,
         context: &ProviderRequestContext,
     ) -> Result<Value, ProviderError> {
-        if request.input.is_empty() {
-            return Err(ProviderError::InvalidRequest);
+        request.validate()?;
+        if request.input.is_empty() || !request.builtin_tools.is_empty() {
+            return Err(ProviderError::Unsupported);
         }
-        if request.continuation.is_some()
-            || !request.tools.is_empty()
-            || !request.builtin_tools.is_empty()
-            || request
-                .input
-                .iter()
-                .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        if request.continuation_mode == ModelContinuationMode::ProviderRetained
+            && (request.continuation.is_some()
+                || !request.tools.is_empty()
+                || request
+                    .input
+                    .iter()
+                    .any(|block| matches!(block, ModelInputBlock::ToolResult { .. })))
         {
             return Err(ProviderError::Unsupported);
         }
 
+        let definitions = request
+            .tools
+            .iter()
+            .map(|tool| (tool.tool_id.as_str(), tool))
+            .collect::<BTreeMap<_, _>>();
         let mut messages = Vec::new();
-        if !request.instructions.is_empty() {
+        let instructions = match &request.continuation {
+            Some(ModelContinuation::StatelessConversation { instructions, .. }) => instructions,
+            Some(ModelContinuation::ProviderResponse { .. }) => {
+                return Err(ProviderError::Unsupported);
+            }
+            None => &request.instructions,
+        };
+        if !instructions.is_empty() {
             messages.push(json!({
                 "role": "system",
-                "content": request.instructions.join("\n\n")
+                "content": instructions.join("\n\n")
             }));
         }
-        let mut content = Vec::new();
-        let mut images = Vec::new();
-        for block in &request.input {
-            match block {
-                ModelInputBlock::Text { text } => content.push(text.clone()),
-                ModelInputBlock::Json { value } => content.push(value.to_string()),
-                ModelInputBlock::Attachment { mime, .. } => {
-                    if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp") {
-                        return Err(ProviderError::Unsupported);
-                    }
-                    let attachment_request = AiProviderAttachmentRequest::try_from(block)
-                        .map_err(|_| ProviderError::InvalidRequest)?;
-                    let attachment = context.resolved_attachment(&attachment_request)?;
-                    images
-                        .push(base64::engine::general_purpose::STANDARD.encode(attachment.bytes()));
+
+        match &request.continuation {
+            None => messages.push(user_message(&request.input, context)?),
+            Some(ModelContinuation::StatelessConversation {
+                messages: history, ..
+            }) => {
+                for message in history {
+                    messages.push(conversation_message(message, &definitions)?);
                 }
-                ModelInputBlock::ToolResult { .. } => return Err(ProviderError::Unsupported),
+                let calls = match history.last() {
+                    Some(ModelConversationMessage::Assistant { tool_calls, .. }) => tool_calls,
+                    _ => return Err(ProviderError::InvalidRequest),
+                };
+                if calls.len() != request.input.len() {
+                    return Err(ProviderError::InvalidRequest);
+                }
+                for (call, input) in calls.iter().zip(&request.input) {
+                    let ModelInputBlock::ToolResult {
+                        call_id,
+                        tool_id,
+                        output,
+                    } = input
+                    else {
+                        return Err(ProviderError::InvalidRequest);
+                    };
+                    if call_id != &call.call_id || tool_id != &call.tool_id {
+                        return Err(ProviderError::InvalidRequest);
+                    }
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_name": call.provider_name,
+                        "content": output.to_string()
+                    }));
+                }
+            }
+            Some(ModelContinuation::ProviderResponse { .. }) => {
+                return Err(ProviderError::Unsupported);
             }
         }
-        let mut user_message = json!({
-            "role": "user",
-            "content": content.join("\n\n")
-        });
-        if !images.is_empty() {
-            user_message["images"] = Value::Array(images.into_iter().map(Value::String).collect());
-        }
-        messages.push(user_message);
 
         let mut body = json!({
             "model": request.model,
@@ -192,6 +219,24 @@ impl OllamaProvider {
             "think": false,
             "keep_alive": format!("{}s", self.config.keep_alive.as_secs())
         });
+        if !request.tools.is_empty() {
+            body["tools"] = Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        json!({
+                            "type": "function",
+                            "function": {
+                                "name": tool.provider_name,
+                                "description": tool.description,
+                                "parameters": tool.parameters
+                            }
+                        })
+                    })
+                    .collect(),
+            );
+        }
         if let Some(schema) = &request.output_schema {
             if !schema.is_object()
                 || serde_json::to_vec(schema)
@@ -222,7 +267,10 @@ impl AiProvider for OllamaProvider {
         ProviderCapabilities {
             streaming: true,
             image_input: true,
+            custom_tools: true,
+            parallel_tool_calls: true,
             structured_output: true,
+            stateless_continuation: true,
             local: true,
             ..ProviderCapabilities::default()
         }
@@ -236,6 +284,11 @@ impl AiProvider for OllamaProvider {
         context.validate_request(&ProviderKind::Ollama, &request)?;
         let body = self.request_body(&request, &context)?;
         let expected_model = request.model;
+        let offered_tools = request
+            .tools
+            .into_iter()
+            .map(|tool| (tool.provider_name, tool.tool_id))
+            .collect();
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -246,16 +299,122 @@ impl AiProvider for OllamaProvider {
         if !response.status().is_success() {
             return Err(classify_status(response.status()));
         }
-        Ok(normalized_stream(response, expected_model))
+        Ok(normalized_stream(response, expected_model, offered_tools))
     }
 }
 
-fn normalized_stream(response: reqwest::Response, expected_model: String) -> ProviderEventStream {
+fn user_message(
+    input: &[ModelInputBlock],
+    context: &ProviderRequestContext,
+) -> Result<Value, ProviderError> {
+    let mut content = Vec::new();
+    let mut images = Vec::new();
+    for block in input {
+        match block {
+            ModelInputBlock::Text { text } => content.push(text.clone()),
+            ModelInputBlock::Json { value } => content.push(value.to_string()),
+            ModelInputBlock::Attachment { mime, .. } => {
+                if !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp") {
+                    return Err(ProviderError::Unsupported);
+                }
+                let attachment_request = AiProviderAttachmentRequest::try_from(block)
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                let attachment = context.resolved_attachment(&attachment_request)?;
+                images.push(base64::engine::general_purpose::STANDARD.encode(attachment.bytes()));
+            }
+            ModelInputBlock::ToolResult { .. } => return Err(ProviderError::InvalidRequest),
+        }
+    }
+    let mut message = json!({
+        "role": "user",
+        "content": content.join("\n\n")
+    });
+    if !images.is_empty() {
+        message["images"] = Value::Array(images.into_iter().map(Value::String).collect());
+    }
+    Ok(message)
+}
+
+fn conversation_message(
+    message: &ModelConversationMessage,
+    definitions: &BTreeMap<&str, &crate::ModelToolDefinition>,
+) -> Result<Value, ProviderError> {
+    match message {
+        ModelConversationMessage::User { content } => {
+            let content = content
+                .iter()
+                .map(|block| match block {
+                    ModelInputBlock::Text { text } => Ok(text.clone()),
+                    ModelInputBlock::Json { value } => Ok(value.to_string()),
+                    ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => {
+                        Err(ProviderError::InvalidRequest)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({"role": "user", "content": content.join("\n\n")}))
+        }
+        ModelConversationMessage::Assistant {
+            content,
+            tool_calls,
+        } => {
+            let calls = tool_calls
+                .iter()
+                .map(|call| {
+                    let definition = definitions
+                        .get(call.tool_id.as_str())
+                        .ok_or(ProviderError::InvalidRequest)?;
+                    if definition.provider_name != call.provider_name
+                        || definition.fingerprint != call.tool_fingerprint
+                    {
+                        return Err(ProviderError::InvalidRequest);
+                    }
+                    Ok(json!({
+                        "type": "function",
+                        "function": {
+                            "name": call.provider_name,
+                            "arguments": call.arguments
+                        }
+                    }))
+                })
+                .collect::<Result<Vec<_>, ProviderError>>()?;
+            Ok(json!({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": calls
+            }))
+        }
+        ModelConversationMessage::Tool {
+            tool_id,
+            provider_name,
+            output,
+            ..
+        } => {
+            let definition = definitions
+                .get(tool_id.as_str())
+                .ok_or(ProviderError::InvalidRequest)?;
+            if definition.provider_name != *provider_name {
+                return Err(ProviderError::InvalidRequest);
+            }
+            Ok(json!({
+                "role": "tool",
+                "tool_name": provider_name,
+                "content": output.to_string()
+            }))
+        }
+    }
+}
+
+fn normalized_stream(
+    response: reqwest::Response,
+    expected_model: String,
+    offered_tools: BTreeMap<String, String>,
+) -> ProviderEventStream {
     Box::pin(async_stream::try_stream! {
         let mut chunks = response.bytes_stream();
         let mut buffer = Vec::new();
         let mut started = false;
         let mut completed = false;
+        let mut tool_call_count = 0usize;
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
             buffer.extend_from_slice(&chunk);
@@ -279,7 +438,14 @@ fn normalized_stream(response: reqwest::Response, expected_model: String) -> Pro
                 }
                 let value: Value = serde_json::from_slice(&line)
                     .map_err(|_| ProviderError::Rejected)?;
-                for event in normalize_chunk(&value, &expected_model, &mut started, &mut completed)? {
+                for event in normalize_chunk(
+                    &value,
+                    &expected_model,
+                    &offered_tools,
+                    &mut started,
+                    &mut completed,
+                    &mut tool_call_count,
+                )? {
                     yield event;
                 }
             }
@@ -293,7 +459,14 @@ fn normalized_stream(response: reqwest::Response, expected_model: String) -> Pro
             }
             let value: Value = serde_json::from_slice(&buffer)
                 .map_err(|_| ProviderError::Rejected)?;
-            for event in normalize_chunk(&value, &expected_model, &mut started, &mut completed)? {
+            for event in normalize_chunk(
+                &value,
+                &expected_model,
+                &offered_tools,
+                &mut started,
+                &mut completed,
+                &mut tool_call_count,
+            )? {
                 yield event;
             }
         }
@@ -306,8 +479,10 @@ fn normalized_stream(response: reqwest::Response, expected_model: String) -> Pro
 fn normalize_chunk(
     value: &Value,
     expected_model: &str,
+    offered_tools: &BTreeMap<String, String>,
     started: &mut bool,
     completed: &mut bool,
+    tool_call_count: &mut usize,
 ) -> Result<Vec<ProviderEvent>, ProviderError> {
     if value.get("error").is_some() || *completed {
         return Err(ProviderError::Rejected);
@@ -326,13 +501,11 @@ fn normalize_chunk(
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return Err(ProviderError::Rejected);
     }
-    if message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
-    {
-        return Err(ProviderError::Unsupported);
-    }
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(calls)) => calls.as_slice(),
+        Some(_) => return Err(ProviderError::Rejected),
+    };
     if message
         .get("thinking")
         .is_some_and(|thinking| !thinking.is_string())
@@ -356,6 +529,36 @@ fn normalize_chunk(
         events.push(ProviderEvent::TextDelta {
             text: content.to_owned(),
         });
+    }
+    for call in tool_calls {
+        *tool_call_count = tool_call_count
+            .checked_add(1)
+            .ok_or(ProviderError::Rejected)?;
+        if *tool_call_count > 64 {
+            return Err(ProviderError::Rejected);
+        }
+        let function = call
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or(ProviderError::Rejected)?;
+        let provider_name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::Rejected)?;
+        let tool_id = offered_tools
+            .get(provider_name)
+            .ok_or(ProviderError::Rejected)?;
+        let arguments = function
+            .get("arguments")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or(ProviderError::Rejected)?;
+        let call_id = format!("ollama-{}", uuid::Uuid::new_v4());
+        events.push(ProviderEvent::ToolCallStarted {
+            call_id: call_id.clone(),
+            tool_id: tool_id.clone(),
+        });
+        events.push(ProviderEvent::ToolCallCompleted { call_id, arguments });
     }
     if done {
         let input_tokens = value
@@ -454,6 +657,7 @@ mod tests {
                 text: "synthetic hello".to_owned(),
             }],
             continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
             output_schema: None,
@@ -532,7 +736,97 @@ mod tests {
                 .with_resolved_attachments(request, vec![attachment])
                 .expect("image bytes should bind");
         }
+        let historical_tool_results = request
+            .continuation
+            .as_ref()
+            .into_iter()
+            .flat_map(|continuation| match continuation {
+                ModelContinuation::StatelessConversation { messages, .. } => messages.as_slice(),
+                ModelContinuation::ProviderResponse { .. } => &[],
+            })
+            .filter(|message| matches!(message, ModelConversationMessage::Tool { .. }))
+            .count();
+        let current_tool_results = request
+            .input
+            .iter()
+            .filter(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+            .count();
+        for index in 0..historical_tool_results + current_tool_results {
+            let mut tool_manifest = manifest(
+                model,
+                session_id,
+                run_id,
+                AiEgressCapability::ToolResult,
+                request,
+            );
+            tool_manifest.sources = vec![AiDataSourceRef {
+                kind: "application_tool_result".to_owned(),
+                reference: uuid::Uuid::new_v4().to_string(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::ResolverResult,
+            }];
+            tool_manifest.purpose = format!("test-tool-result-{index}");
+            let tool_proof = AiEgressDecision::allow(&tool_manifest, "test", "test-user")
+                .authorize(&tool_manifest)
+                .expect("tool manifest should authorize");
+            context = context
+                .with_authorized_transfer(tool_manifest, tool_proof)
+                .expect("tool transfer should bind");
+        }
         context
+    }
+
+    fn tool_definition() -> ModelToolDefinition {
+        ModelToolDefinition {
+            tool_id: "records.read".to_owned(),
+            provider_name: "records_read".to_owned(),
+            fingerprint: "records-read-v1".to_owned(),
+            description: "Read one authorized record".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            strict: true,
+        }
+    }
+
+    fn stateless_tool_request(model: &str) -> ModelRequest {
+        ModelRequest {
+            model: model.to_owned(),
+            instructions: Vec::new(),
+            input: vec![ModelInputBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+                output: json!({"records": [54]}),
+            }],
+            continuation: Some(ModelContinuation::StatelessConversation {
+                instructions: vec!["Use only offered tools.".to_owned()],
+                messages: vec![
+                    ModelConversationMessage::User {
+                        content: vec![ModelInputBlock::Text {
+                            text: "Find record 54".to_owned(),
+                        }],
+                    },
+                    ModelConversationMessage::Assistant {
+                        content: String::new(),
+                        tool_calls: vec![crate::ModelConversationToolCall {
+                            call_id: "call-1".to_owned(),
+                            tool_id: "records.read".to_owned(),
+                            provider_name: "records_read".to_owned(),
+                            tool_fingerprint: "records-read-v1".to_owned(),
+                            arguments: json!({"id": 54}),
+                        }],
+                    },
+                ],
+            }),
+            continuation_mode: ModelContinuationMode::StatelessReplay,
+            tools: vec![tool_definition()],
+            builtin_tools: Vec::new(),
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        }
     }
 
     fn manifest(
@@ -660,9 +954,12 @@ mod tests {
         let capabilities = provider.capabilities();
         assert!(capabilities.streaming);
         assert!(capabilities.image_input);
+        assert!(capabilities.custom_tools);
+        assert!(capabilities.parallel_tool_calls);
         assert!(capabilities.structured_output);
+        assert!(capabilities.stateless_continuation);
         assert!(capabilities.local);
-        assert!(!capabilities.custom_tools);
+        assert!(!capabilities.provider_retained_continuation);
         assert!(!format!("{provider:?}").contains("127.0.0.1"));
 
         assert!(matches!(
@@ -696,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn request_mapping_supports_schema_and_exact_images_but_rejects_tools() {
+    fn request_mapping_supports_schema_and_exact_images_but_rejects_stateful_tools() {
         let provider = provider("http://127.0.0.1:11434");
         let image_bytes = b"synthetic-png".to_vec();
         let image_block = ModelInputBlock::Attachment {
@@ -740,18 +1037,31 @@ mod tests {
             Err(ProviderError::EgressDenied)
         ));
 
-        model_request.tools.push(ModelToolDefinition {
-            tool_id: "records.read".to_owned(),
-            provider_name: "records_read".to_owned(),
-            fingerprint: "fingerprint".to_owned(),
-            description: "Read records".to_owned(),
-            parameters: json!({"type": "object"}),
-            strict: true,
-        });
+        model_request.tools.push(tool_definition());
         assert!(matches!(
             provider.request_body(&model_request, &provider_context),
             Err(ProviderError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn stateless_request_maps_exact_native_tool_history() {
+        let provider = provider("http://127.0.0.1:11434");
+        let model_request = stateless_tool_request("local-test");
+        let provider_context = context("local-test", &model_request, None);
+        let body = provider
+            .request_body(&model_request, &provider_context)
+            .expect("stateless request should map");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["name"],
+            "records_read"
+        );
+        assert_eq!(body["messages"][3]["role"], "tool");
+        assert_eq!(body["messages"][3]["tool_name"], "records_read");
+        assert_eq!(body["tools"][0]["function"]["name"], "records_read");
+        assert!(body.get("format").is_none());
     }
 
     #[tokio::test]
@@ -839,5 +1149,43 @@ mod tests {
                 ProviderEvent::ResponseCompleted { response_id: None }
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn ndjson_native_tool_call_is_bounded_and_mapped_to_local_tool_id() {
+        let ndjson = concat!(
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"records_read\",\"arguments\":{\"id\":55}}}]},\"done\":false}\n",
+            "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":12,\"eval_count\":4}\n"
+        );
+        let (base_url, request_receiver, server) = mock_server(ndjson).await;
+        let provider = provider(&base_url);
+        let mut model_request = request("local-test");
+        model_request.continuation_mode = ModelContinuationMode::StatelessReplay;
+        model_request.tools = vec![tool_definition()];
+        let events = provider
+            .stream(
+                model_request.clone(),
+                context("local-test", &model_request, None),
+            )
+            .await
+            .expect("tool stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("tool stream should normalize");
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server should finish");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted { call_id: started, tool_id },
+                ProviderEvent::ToolCallCompleted { call_id: completed, arguments },
+                ProviderEvent::Usage { input_tokens: 12, output_tokens: 4, cached_input_tokens: 0 },
+                ProviderEvent::ResponseCompleted { response_id: None }
+            ] if started == completed
+                && started.starts_with("ollama-")
+                && tool_id == "records.read"
+                && arguments == &json!({"id": 55})
+        ));
     }
 }

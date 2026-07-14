@@ -33,11 +33,19 @@ plan the next provider turn, the checkpoint writer protects the provider result,
 ordered tool results, their exact egress manifests, and the continuation as one
 bounded payload.
 
-The same state-machine transaction verifies that every referenced tool row and
-run step belongs to the current run/generation and preceding provider response,
-has a protected result, has completed unambiguously, and has an exact persisted
-egress decision and manifest hash. Missing, reordered, duplicated, denied, or
-partially executing calls fail closed.
+The same generated-ORM state-machine transaction verifies that every referenced
+tool row and run step belongs to the current run/generation and preceding
+provider turn, has a protected result, has completed unambiguously, and has an
+exact persisted egress decision and manifest hash. For stateless continuation,
+the payload also binds the complete bounded visible conversation and one unique
+manifest per historical result. Missing, reordered, duplicated, denied, or
+partially executing calls fail closed. No raw SQL participates in this path.
+
+A stateless checkpoint is consumed before the next provider transport by the
+same fenced generation. If the lease is lost first, expired-run recovery
+validates the hash, budget, completed tool rows, and finished steps but moves
+the run to `RecoveryRequired`; it does not reconstruct or replay local model
+state across generations.
 
 ## Exact completed-batch adoption
 
@@ -46,7 +54,8 @@ GraphQL reads. The checkpoint hash binds the run, attempt, generation, kind,
 provider/model/response, budget reservation, checkpoint ID, and protected
 envelope hash.
 
-Expired recovery may requeue one `tool_batch_persisted` checkpoint only after
+Expired recovery may requeue one provider-retained `tool_batch_persisted`
+checkpoint only after
 its redacted hash, committed/reconciled budget, complete protected tool rows,
 and finished run steps validate under the old fence. The replacement lease
 retains the immutable checkpoint ID but receives a new attempt and generation.
@@ -67,10 +76,11 @@ that consume can be reconsidered within the retry ceiling; a crash after it is
 conservative external-boundary recovery. The append-only checkpoint remains in
 history, but no longer grants adoption eligibility.
 
-Provider-turn checkpoints, incomplete batches, consequential mutations,
-missing/denied egress, malformed protected state, retry exhaustion, and any
-changed current access/policy remain `RecoveryRequired`. Operators must never
-manually relink a checkpoint or reconstruct a continuation.
+Provider-turn checkpoints, stateless checkpoints after lease loss, incomplete
+batches, consequential mutations, missing/denied egress, malformed protected
+state, retry exhaustion, and any changed current access/policy remain
+`RecoveryRequired`. Operators must never manually relink a checkpoint or
+reconstruct a continuation.
 
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already

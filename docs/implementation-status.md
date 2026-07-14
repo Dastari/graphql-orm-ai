@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.20.0`) and 39 private records
+- AI schema-module identity (currently version `0.21.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -107,6 +107,12 @@ production-ready behavior.
   opaque call ID, durable model-visible result, and immutable egress manifest.
   The OpenAI adapter requires explicit retained-response configuration and
   matching retention manifests for stateful continuation.
+- Provider-independent bounded stateless continuation for native Ollama and
+  reviewed installed harnesses. It retains only trusted instructions, visible
+  text/JSON, exact assistant calls, and disclosure-validated tool output;
+  requires one unique freshly authorized manifest per replayed result; and
+  protects checkpoints for same-generation consumption without claiming
+  cross-generation replay safety.
 - Top-level read-only coordinator with host-owned exact initial/continuation
   planning, periodic fenced provider heartbeats, bounded loop/tool sequencing,
   protected output persistence, safe terminal classification, and conservative
@@ -275,8 +281,8 @@ production-ready behavior.
   ordinary transactional reservation/reconciliation, and authenticated usage
   reporting are implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
-  application-tool checkpoints and provider-independent stateless
-  continuation. Exact completed read-only tool-batch adoption, the bounded
+  application-tool checkpoints and stateless continuation. Exact completed
+  provider-retained read-only tool-batch adoption, the bounded
   coordinator, protected stateful checkpoints/continuation, protected live
   output, and final-output crash reconciliation are implemented; all other
   ambiguous resume remains closed.
@@ -289,21 +295,19 @@ production-ready behavior.
   transports. The generic exact-binding adapter is implemented; credential
   format, fixed destination mapping, network isolation, and application audit
   integration intentionally remain host-owned.
-- Ollama custom-tool/stateless-continuation support, OpenAI-compatible local
-  provider profiles, a production OS/container implementation of the trusted
-  local-harness launcher, and optional ACP framing. The immutable registry,
-  safe JSON-lines driver, and fake-process suite are implemented; no model may
-  choose command, arguments, working directory, environment, mount, or network
-  authority.
+- OpenAI-compatible local provider profiles, a production OS/container
+  implementation of the trusted local-harness launcher, and optional ACP
+  framing. Ollama custom tools and JSON-lines v2 harness tools now use the
+  bounded stateless contract; no model may choose command, arguments, working
+  directory, environment, mount, or network authority.
 - Any consumer integration testing or migration. That work is explicitly left
   to each consumer project/agent.
 
 ## Next implementation slice
 
-1. Add provider-independent stateless conversation checkpoints for safe Ollama
-   and installed-harness tool continuation, then a separately reviewed
-   production OS/container launcher; provider-persistent file lifecycle
-   remains gated.
+1. Add cross-generation validation for every historical row in a stateless
+   checkpoint, then a separately reviewed production OS/container harness
+   launcher; provider-persistent file lifecycle remains gated.
 2. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 
@@ -320,8 +324,7 @@ production-ready behavior.
   `graphql-case-pascal`.
 - PascalCase SDL contract test passed with no camelCase aliases.
 - `cargo check --no-default-features --features postgres`: passed, compile-only.
-- `cargo check --no-default-features --features mssql`: passed, schema-only;
-  existing dependency warnings remain in `graphql-orm`.
+- `cargo check --no-default-features --features mssql`: passed, schema-only.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

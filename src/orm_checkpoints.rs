@@ -128,8 +128,9 @@ impl AiCoordinatorCheckpointLimits {
 /// the same current row-version fence. Provider usage must already be
 /// authoritatively committed. Tool-batch checkpoints additionally verify every
 /// referenced protected tool row and its egress decision in that transaction.
-/// These records make later adoption review possible; this writer alone does
-/// not authorize a new generation to resume them.
+/// Provider-retained records make later adoption review possible; stateless
+/// records are intentionally consumable only by the same fenced generation.
+/// This writer alone never authorizes a new generation to resume either form.
 pub struct OrmAiCoordinatorCheckpointService {
     run_service: OrmAiRunService,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
@@ -195,7 +196,6 @@ impl OrmAiCoordinatorCheckpointService {
             "tool_batch_persisted"
                 if !completed_tools.is_empty()
                     && continuation.is_some()
-                    && result.provider_response_id().is_some()
                     && completed_tools.len() == result.tool_calls().len() => {}
             _ => return Err(AiError::Conflict),
         }
@@ -212,6 +212,7 @@ impl OrmAiCoordinatorCheckpointService {
         let mut prepared_tools = Vec::with_capacity(completed_tools.len());
         let mut unique_ids = BTreeSet::new();
         let mut unique_provider_calls = BTreeSet::new();
+        let mut unique_manifest_hashes = BTreeSet::new();
         for (expected, persisted) in result.tool_calls().iter().zip(completed_tools) {
             let manifest = persisted
                 .egress_manifest()
@@ -237,6 +238,7 @@ impl OrmAiCoordinatorCheckpointService {
                 })
                 || !unique_ids.insert(persisted.id())
                 || !unique_provider_calls.insert(persisted.provider_call_id())
+                || !unique_manifest_hashes.insert(manifest.stable_hash())
             {
                 return Err(AiError::Conflict);
             }
@@ -247,6 +249,23 @@ impl OrmAiCoordinatorCheckpointService {
                 tool_id: expected.tool_id().as_str().to_owned(),
                 result_egress_manifest_hash: manifest.stable_hash(),
             });
+        }
+        if let Some(continuation) = continuation {
+            for transfer in continuation.replay_transfers() {
+                if !route.matches_manifest(
+                    transfer,
+                    lease,
+                    scope,
+                    result.provider_kind().as_str(),
+                    result.provider_model(),
+                ) || transfer.sources.len() != 1
+                    || transfer.sources[0].kind != "application_tool_result"
+                    || Uuid::parse_str(&transfer.sources[0].reference).is_err()
+                    || !unique_manifest_hashes.insert(transfer.stable_hash())
+                {
+                    return Err(AiError::EgressDenied);
+                }
+            }
         }
         let payload = json!({
             "formatVersion": 1,
@@ -515,7 +534,7 @@ impl OrmAiCoordinatorCheckpointService {
         let continuation = AiAgentContinuation::from_checkpoint_value(
             payload.continuation.ok_or(AiError::Conflict)?,
         )?;
-        if continuation.previous_response_id() != provider_response_id
+        if continuation.provider_response_id() != Some(provider_response_id)
             || continuation.input().len() != payload.completed_tools.len()
             || continuation.transfers().len() != payload.completed_tools.len()
         {
