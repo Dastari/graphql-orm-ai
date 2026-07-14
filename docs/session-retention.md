@@ -1,14 +1,15 @@
 # Bounded Session Retention
 
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
-for three narrowly defined classes of protected chat data:
+for four narrowly defined classes of protected chat data:
 
 - expired provisional `provider_live_delta` session events;
 - expired preview/block content from finalized messages whose producing run is
-  terminal and which have no linked attachment; and
-- after a deleting-session cutoff, every bounded protected session event plus
-  the same safely detachable terminal message content, even when ordinary
-  message retention is disabled.
+  terminal and which have no linked attachment;
+- after a deleting-session cutoff, every bounded protected session event;
+- after that cutoff, protected context-summary checkpoints, followed only on a
+  later pass by the same safely detachable terminal message content, even when
+  ordinary message retention is disabled.
 
 It does not expose a GraphQL mutation and does not issue SQL. All reads, CAS
 updates, deletes, audit appends, keyset cursors, and transactions use generated
@@ -18,7 +19,9 @@ responsibility of `graphql-orm`.
 ## Scheduling
 
 Construct the service with the AI ORM database, a trusted `agql-auth::Clock`,
-and validated `AiSessionRetentionLimits`. Start a complete scan cycle by
+and validated `AiSessionRetentionLimits`. Use
+`new_with_context_checkpoints` when context summaries need a limit distinct
+from the message-row limit. Start a complete scan cycle by
 calling `prune_session_content(None)`. If the report contains
 `next_session_cursor`, pass that opaque value unchanged to the next call.
 Continue until the cursor is absent, then begin a later scheduled cycle from
@@ -51,6 +54,14 @@ Before the cutoff, only ordinary expired live deltas are eligible. A malformed
 state/timestamp pair or arithmetic overflow fails closed without deleting
 content.
 
+At the deleting-session cutoff, the worker also selects a bounded page of
+protected context-summary checkpoints. If that page is nonempty, it deletes
+the exact rows but skips every message body in the same pass. Repeated passes
+must exhaust context summaries before message scrubbing can begin. Event and
+context deletion may share one transaction and one redacted audit, but a
+summary can never remain after this worker has scrubbed content it could
+cover.
+
 Message content is scrubbed only when all of these are true:
 
 - either `message_retention_seconds` is configured and the finalized timestamp
@@ -82,13 +93,17 @@ retention never requires loading the complete transcript into the DOM.
 ## Deliberate limits
 
 This worker does not delete session or message metadata, attachments or blob
-objects, runs, tool calls/results, proposals, approvals, provider raw payloads,
-provider-persistent files, usage, egress decisions, audit facts, fencing, or
-restore evidence. It therefore starts but does not complete the `deleting`
-session lifecycle. Unsafe message dependencies remain in place and are counted
-as blocked. The remaining resources require separate workers with their own
-dependency ordering, external delete confirmation, fencing, restore
-reconciliation, and audit contracts.
+objects, runs, run/coordinator checkpoints, tool calls/results, proposals,
+approvals, provider raw payloads, provider-persistent files, usage, egress
+decisions, audit facts, fencing, or restore evidence. It therefore starts but
+does not complete the `deleting` session lifecycle. Unsafe message dependencies
+remain in place and are counted as blocked. The remaining resources require
+separate workers with their own dependency ordering, external delete
+confirmation, fencing, restore reconciliation, and audit contracts.
+
+Ordinary message-retention expiry does not yet delete context checkpoints. The
+context-compaction producer remains unimplemented and must stay disabled until
+its ordinary-retention invalidation and exact source-coverage contract lands.
 
 Restore collectors must distinguish validated retention gaps from corruption
 and must validate the tombstone invariant. A nonzero

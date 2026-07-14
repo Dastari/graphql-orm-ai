@@ -4,6 +4,42 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: context-first deleting-session retention (crate 0.35.0 to 0.36.0; schema 0.33.0 to 0.34.0)
+
+Apply AI schema module `0.34.0` while session writers, context workers,
+retention workers, subscriptions, and restore callbacks are closed. Do not run
+0.36.0 code against a module still registered as 0.33.0. The generated
+migration adds no table, column, index, constraint, or entity and still owns 39
+private records. It advances the module because existing session,
+context-checkpoint, message/block, retention-policy, and audit records now have
+a context-before-content deletion meaning. No data copy, protected-payload
+rewrite, consumer table, or application SQL is required.
+
+After the existing deleting-session cutoff, each
+`OrmAiSessionRetentionService` transaction now loads at most the configured
+context-checkpoint bound. A nonempty page is validated and deleted atomically,
+and all message scrubbing is deferred for that session until a later pass.
+Hosts must repeat complete bounded scan cycles until all protected context
+summaries are gone; only then can eligible terminal unattached message content
+be scrubbed. Protected event deletion may progress in the same earlier passes.
+This order prevents a retained summary from outliving message content it may
+cover.
+
+The existing four-argument `AiSessionRetentionLimits::new` remains compatible
+and uses `maximum_messages_per_session` as the context-checkpoint bound. Hosts
+that need an independent limit should migrate to
+`new_with_context_checkpoints`. `AiSessionRetentionReport` adds the public
+`deleting_session_context_checkpoints_deleted` field; downstream exhaustive
+struct literals must initialize it or use `..Default::default()`.
+
+This slice deletes only deleting-session context-summary rows. Ordinary
+message-retention invalidation, context-summary production/selection, run and
+coordinator checkpoints, tool/proposal payloads, attachment/external content,
+append-only facts, and final session-shell deletion remain closed. The context
+producer must stay disabled until exact source coverage and ordinary-retention
+invalidation are implemented. This is a pre-1.0 public Rust API and persistent
+behavior change with no GraphQL SDL or data migration.
+
 ## Unreleased: deleting-session content cutoff (crate 0.34.0 to 0.35.0; schema 0.32.0 to 0.33.0)
 
 Apply AI schema module `0.33.0` while session writers, retention workers,

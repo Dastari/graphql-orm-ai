@@ -37,11 +37,12 @@ waits without polling, resuming, or executing them.
   and a GraphQL-policy-driven bounded pruning worker.
 - A host-only bounded session-retention worker that uses generated ORM
   transactions to remove expired provisional deltas, purge all bounded
-  protected session events after the deleting-session cutoff, and scrub
-  eligible terminal message content under the exact current GraphQL-managed
-  scope policy. Message metadata remains as an explicit tombstone, sequence
-  gaps force bounded client reset, and attachments or nonterminal work stay
-  closed.
+  protected session events after the deleting-session cutoff, delete bounded
+  protected context-summary checkpoints before they can outlive covered
+  content, and then scrub eligible terminal message content under the exact
+  current GraphQL-managed scope policy. Message metadata remains as an explicit
+  tombstone, sequence gaps force bounded client reset, and attachments or
+  nonterminal work stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.

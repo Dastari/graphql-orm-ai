@@ -83,8 +83,9 @@ camelCase to PascalCase.
    Start a scan cycle with no cursor and continue its bounded keyset pages until
    `next_session_cursor` is absent. This prunes eligible provisional deltas;
    after a deleting-session cutoff it also removes bounded protected session
-   events and eligible terminal unattached message content. It does not erase
-   attachments, append-only facts, or the session shell; see the
+   events, then protected context-summary checkpoints, then eligible terminal
+   unattached message content. It does not erase attachments, append-only
+   facts, or the session shell; see the
    [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;

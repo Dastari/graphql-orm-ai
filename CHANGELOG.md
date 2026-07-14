@@ -5,13 +5,23 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.35.0` and the
-AI schema module to `0.33.0`. No table, column, index, constraint, or entity is
-added; the module version changes because existing session, protected event,
-message/block, run, attachment, retention-policy, and audit records now
-participate in the deleting-session content-cutoff contract.
+This development line advances the pre-1.0 crate version to `0.36.0` and the
+AI schema module to `0.34.0`. No table, column, index, constraint, or entity is
+added; the module version changes because existing session, context-checkpoint,
+message/block, retention-policy, and audit records now participate in a
+context-before-content deleting-session retention contract.
 
 ### Added
+
+- Deleting-session retention now removes protected context-summary checkpoints
+  in independently bounded pages before it can scrub any message content.
+  `AiSessionRetentionLimits::new_with_context_checkpoints` configures that
+  independent hard bound, while the existing constructor safely reuses its
+  message-row bound.
+- `AiSessionRetentionReport::deleting_session_context_checkpoints_deleted`
+  reports exact summary rows removed by one pass. The cutoff test proves
+  context-first ordering across multiple one-row transactions, no early
+  message scrub, same-transaction audit, and final replay idempotency.
 
 - `OrmAiSessionRetentionService` now applies the current
   `deleted_content_purge_seconds` policy to exact `deleting` sessions. After
@@ -179,6 +189,12 @@ participate in the deleting-session content-cutoff contract.
   not yet represented by the authoritative pricing ledger.
 
 ### Security
+
+- A deleting-session message body is not scrubbed while any bounded page of
+  protected context summaries remains. The worker validates each checkpoint's
+  session/sequence/provider/hash metadata, deletes only exact ORM rows, and
+  requires a later transaction to scrub messages, preventing retained
+  summaries from outliving content they may cover.
 
 - Deleting-session content pruning reloads and validates the exact current
   scope policy and the `deleting`/`deleted_at` invariant in each state-machine

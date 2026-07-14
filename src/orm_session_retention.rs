@@ -1,4 +1,4 @@
-//! ORM-only bounded pruning of protected session events and message content.
+//! ORM-only bounded pruning of protected session event, context, and message content.
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
@@ -28,26 +28,52 @@ const MAXIMUM_RETENTION_SECONDS: i64 = 315_576_000;
 pub struct AiSessionRetentionLimits {
     maximum_sessions: usize,
     maximum_live_delta_events_per_session: usize,
+    maximum_context_checkpoints_per_session: usize,
     maximum_messages_per_session: usize,
     maximum_message_blocks_per_session: usize,
 }
 
 impl AiSessionRetentionLimits {
-    /// Creates validated per-pass bounds.
+    /// Creates validated per-pass bounds, using the message bound for context
+    /// checkpoints as well.
     ///
     /// # Errors
     ///
     /// Returns [`AiError::InvalidConfiguration`] unless sessions are in
-    /// `1..=256`, live deltas and messages are each in `1..=5_000`, and the
-    /// total message-block bound is in `1..=20_000`.
+    /// `1..=256`, protected events, context checkpoints, and messages are each
+    /// in `1..=5_000`, and the total message-block bound is in `1..=20_000`.
     pub fn new(
         maximum_sessions: usize,
         maximum_live_delta_events_per_session: usize,
         maximum_messages_per_session: usize,
         maximum_message_blocks_per_session: usize,
     ) -> Result<Self, AiError> {
+        Self::new_with_context_checkpoints(
+            maximum_sessions,
+            maximum_live_delta_events_per_session,
+            maximum_messages_per_session,
+            maximum_messages_per_session,
+            maximum_message_blocks_per_session,
+        )
+    }
+
+    /// Creates validated per-pass bounds with an independent context limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless sessions are in
+    /// `1..=256`, protected events, context checkpoints, and messages are each
+    /// in `1..=5_000`, and the total message-block bound is in `1..=20_000`.
+    pub fn new_with_context_checkpoints(
+        maximum_sessions: usize,
+        maximum_live_delta_events_per_session: usize,
+        maximum_context_checkpoints_per_session: usize,
+        maximum_messages_per_session: usize,
+        maximum_message_blocks_per_session: usize,
+    ) -> Result<Self, AiError> {
         if !(1..=256).contains(&maximum_sessions)
             || !(1..=5_000).contains(&maximum_live_delta_events_per_session)
+            || !(1..=5_000).contains(&maximum_context_checkpoints_per_session)
             || !(1..=5_000).contains(&maximum_messages_per_session)
             || !(1..=20_000).contains(&maximum_message_blocks_per_session)
         {
@@ -58,6 +84,7 @@ impl AiSessionRetentionLimits {
         Ok(Self {
             maximum_sessions,
             maximum_live_delta_events_per_session,
+            maximum_context_checkpoints_per_session,
             maximum_messages_per_session,
             maximum_message_blocks_per_session,
         })
@@ -77,6 +104,11 @@ impl AiSessionRetentionLimits {
         self.maximum_live_delta_events_per_session
     }
 
+    /// Maximum protected context-summary checkpoints deleted for one session.
+    pub const fn maximum_context_checkpoints_per_session(self) -> usize {
+        self.maximum_context_checkpoints_per_session
+    }
+
     /// Maximum unpurged message rows inspected for one session.
     pub const fn maximum_messages_per_session(self) -> usize {
         self.maximum_messages_per_session
@@ -93,6 +125,7 @@ impl Default for AiSessionRetentionLimits {
         Self {
             maximum_sessions: 50,
             maximum_live_delta_events_per_session: 500,
+            maximum_context_checkpoints_per_session: 100,
             maximum_messages_per_session: 100,
             maximum_message_blocks_per_session: 5_000,
         }
@@ -103,9 +136,10 @@ impl Default for AiSessionRetentionLimits {
 ///
 /// The worker never opens or copies protected payloads. It deletes expired
 /// provisional delta rows and, after the deleting-session cutoff, all bounded
-/// protected session event rows. It scrubs eligible finalized message blocks
-/// while retaining an explicit metadata tombstone. Messages tied to
-/// nonterminal runs or any attachment remain untouched and are reported as
+/// protected session event rows. Protected context-summary checkpoints are
+/// deleted in bounded pages before eligible finalized message blocks are
+/// scrubbed, retaining an explicit message metadata tombstone. Messages tied
+/// to nonterminal runs or any attachment remain untouched and are reported as
 /// blocked. Append-only audit/usage/fence facts are never deleted.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
@@ -161,6 +195,10 @@ impl OrmAiSessionRetentionService {
     ) -> Result<SessionPruneOutcome, AiError> {
         let event_limit = i64::try_from(self.limits.maximum_live_delta_events_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid event limit".to_owned()))?;
+        let context_checkpoint_limit =
+            i64::try_from(self.limits.maximum_context_checkpoints_per_session).map_err(|_| {
+                AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
+            })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
         let maximum_blocks = self.limits.maximum_message_blocks_per_session;
@@ -262,10 +300,49 @@ impl OrmAiSessionRetentionService {
                         event_ids.len()
                     };
 
+                    let context_checkpoint_rows = if deletion_cutoff_reached {
+                        tx.query::<AiContextCheckpointRecord>()
+                            .filter(AiContextCheckpointRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(context_checkpoint_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                    } else {
+                        Vec::new()
+                    };
+                    let mut context_checkpoint_ids = Vec::new();
+                    for checkpoint in context_checkpoint_rows {
+                        if checkpoint.id.is_nil()
+                            || checkpoint.session_id != session.id
+                            || checkpoint.through_sequence <= 0
+                            || checkpoint.through_sequence > session.message_head
+                            || checkpoint.source_hash.trim().is_empty()
+                            || checkpoint.source_hash.len() > 512
+                            || checkpoint.token_estimate < 0
+                            || checkpoint.provider_kind.trim().is_empty()
+                            || checkpoint.provider_model.trim().is_empty()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        context_checkpoint_ids.push(checkpoint.id);
+                    }
+                    let deleting_session_context_checkpoints_deleted = context_checkpoint_ids.len();
+
                     let mut messages_purged = 0usize;
                     let mut blocks_deleted = 0usize;
                     let mut messages_blocked = 0usize;
-                    let message_cutoff = if deletion_cutoff_reached {
+                    let message_cutoff = if deletion_cutoff_reached
+                        && !context_checkpoint_ids.is_empty()
+                    {
+                        None
+                    } else if deletion_cutoff_reached {
                         Some(now)
                     } else {
                         policy
@@ -422,7 +499,19 @@ impl OrmAiSessionRetentionService {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                     }
-                    if event_ids.is_empty() && messages_purged == 0 {
+                    for checkpoint_id in &context_checkpoint_ids {
+                        if !tx
+                            .delete_by_id::<AiContextCheckpointRecord>(checkpoint_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                    }
+                    if event_ids.is_empty()
+                        && context_checkpoint_ids.is_empty()
+                        && messages_purged == 0
+                    {
                         return Ok(SessionPruneOutcome::Noop { messages_blocked });
                     }
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
@@ -446,6 +535,7 @@ impl OrmAiSessionRetentionService {
                     Ok(SessionPruneOutcome::Changed {
                         live_delta_events_deleted,
                         deleting_session_events_deleted,
+                        deleting_session_context_checkpoints_deleted,
                         messages_purged,
                         blocks_deleted,
                         messages_blocked,
@@ -481,6 +571,7 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 SessionPruneOutcome::Changed {
                     live_delta_events_deleted,
                     deleting_session_events_deleted,
+                    deleting_session_context_checkpoints_deleted,
                     messages_purged,
                     blocks_deleted,
                     messages_blocked,
@@ -491,6 +582,10 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.deleting_session_events_deleted = add_count(
                         report.deleting_session_events_deleted,
                         deleting_session_events_deleted,
+                    )?;
+                    report.deleting_session_context_checkpoints_deleted = add_count(
+                        report.deleting_session_context_checkpoints_deleted,
+                        deleting_session_context_checkpoints_deleted,
                     )?;
                     report.message_contents_purged =
                         add_count(report.message_contents_purged, messages_purged)?;
@@ -518,6 +613,7 @@ enum SessionPruneOutcome {
     Changed {
         live_delta_events_deleted: usize,
         deleting_session_events_deleted: usize,
+        deleting_session_context_checkpoints_deleted: usize,
         messages_purged: usize,
         blocks_deleted: usize,
         messages_blocked: usize,
@@ -947,6 +1043,26 @@ mod tests {
         }
     }
 
+    async fn seed_context_checkpoints(database: &Database<SqliteBackend>, session_id: Uuid) {
+        for index in 0..2 {
+            AiContextCheckpointRecord::insert(
+                database,
+                CreateAiContextCheckpointRecordInput {
+                    session_id,
+                    through_sequence: 1,
+                    source_hash: format!("context-source-{index}"),
+                    token_estimate: 10,
+                    provider_kind: "mock".to_owned(),
+                    provider_model: "retention-test".to_owned(),
+                    protected_summary: serde_json::json!({"protected": true}),
+                    invalidated_at: None,
+                },
+            )
+            .await
+            .expect("context checkpoint should seed");
+        }
+    }
+
     #[tokio::test]
     async fn expired_delta_and_terminal_message_content_are_pruned_atomically() {
         let database = database().await;
@@ -1077,19 +1193,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_session_cutoff_purges_all_protected_events_and_terminal_message_content() {
+    async fn deleting_session_cutoff_orders_context_before_events_and_message_content() {
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy_with_message_retention(&database, &scope, None).await;
         let session_id = seed_session(&database, &scope).await;
         let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
         seed_events(&database, session_id).await;
+        seed_context_checkpoints(&database, session_id).await;
         mark_session_deleting(&database, session_id, 30).await;
         let clock = Arc::new(FixedClock::new(now()));
         let service = OrmAiSessionRetentionService::new(
             database.clone(),
             clock.clone(),
-            AiSessionRetentionLimits::new(50, 1, 100, 5_000)
+            AiSessionRetentionLimits::new_with_context_checkpoints(50, 1, 1, 100, 5_000)
                 .expect("deleting-session retention limits should validate"),
         );
 
@@ -1098,6 +1215,10 @@ mod tests {
             .await
             .expect("pre-cutoff deleting-session pass should succeed");
         assert_eq!(before_cutoff.deleting_session_events_deleted, 0);
+        assert_eq!(
+            before_cutoff.deleting_session_context_checkpoints_deleted,
+            0
+        );
         assert_eq!(before_cutoff.message_contents_purged, 0);
         let retained_message = AiMessageRecord::find_by_id(&database, &message_id)
             .await
@@ -1113,8 +1234,9 @@ mod tests {
         assert_eq!(report.sessions_changed, 1);
         assert_eq!(report.live_delta_events_deleted, 0);
         assert_eq!(report.deleting_session_events_deleted, 1);
-        assert_eq!(report.message_contents_purged, 1);
-        assert_eq!(report.message_blocks_deleted, 1);
+        assert_eq!(report.deleting_session_context_checkpoints_deleted, 1);
+        assert_eq!(report.message_contents_purged, 0);
+        assert_eq!(report.message_blocks_deleted, 0);
 
         let next_page = service
             .prune_session_content(None)
@@ -1122,7 +1244,18 @@ mod tests {
             .expect("next bounded deleting-session retention pass should succeed");
         assert_eq!(next_page.sessions_changed, 1);
         assert_eq!(next_page.deleting_session_events_deleted, 1);
+        assert_eq!(next_page.deleting_session_context_checkpoints_deleted, 1);
         assert_eq!(next_page.message_contents_purged, 0);
+
+        let content_page = service
+            .prune_session_content(None)
+            .await
+            .expect("post-checkpoint deleting-session retention pass should succeed");
+        assert_eq!(content_page.sessions_changed, 1);
+        assert_eq!(content_page.deleting_session_events_deleted, 0);
+        assert_eq!(content_page.deleting_session_context_checkpoints_deleted, 0);
+        assert_eq!(content_page.message_contents_purged, 1);
+        assert_eq!(content_page.message_blocks_deleted, 1);
 
         let message = AiMessageRecord::find_by_id(&database, &message_id)
             .await
@@ -1134,7 +1267,7 @@ mod tests {
             message.content_purged_at,
             Some((now() + time::Duration::seconds(31)).unix_timestamp())
         );
-        let (events, audits) = database
+        let (events, context_checkpoints, audits) = database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     let events = tx
@@ -1156,13 +1289,27 @@ mod tests {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    Ok((events, audits))
+                    let context_checkpoints = tx
+                        .query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    Ok((events, context_checkpoints, audits))
                 })
             })
             .await
             .expect("deleting-session retention facts should load");
         assert!(events.is_empty());
-        assert_eq!(audits.len(), 3);
+        assert!(context_checkpoints.is_empty());
+        assert_eq!(audits.len(), 4);
         assert_eq!(
             audits
                 .iter()
@@ -1175,7 +1322,7 @@ mod tests {
                 .iter()
                 .filter(|audit| audit.reason_code == "session_deletion_retention_expired")
                 .count(),
-            2
+            3
         );
 
         let replay = service

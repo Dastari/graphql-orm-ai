@@ -13,12 +13,14 @@ use crate::AiError;
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
     pub sessions_scanned: u32,
-    /// Sessions whose protected event or message content changed.
+    /// Sessions whose protected event, context, or message content changed.
     pub sessions_changed: u32,
     /// Protected provisional `provider_live_delta` event rows deleted.
     pub live_delta_events_deleted: u32,
     /// Protected event rows deleted after a session-deletion retention cutoff.
     pub deleting_session_events_deleted: u32,
+    /// Protected context-summary checkpoints deleted before message scrubbing.
+    pub deleting_session_context_checkpoints_deleted: u32,
     /// Finalized message previews scrubbed after a retention cutoff.
     pub message_contents_purged: u32,
     /// Protected message-block rows deleted with those previews.
@@ -52,7 +54,7 @@ pub trait AiSessionRetentionService: Send + Sync {
     /// # Errors
     ///
     /// Returns a safe error for a malformed cursor, corrupt session/message/
-    /// event state, unsafe dependency binding, arithmetic overflow, or
+    /// event/context state, unsafe dependency binding, arithmetic overflow, or
     /// persistence failure. Missing policies and safe per-message blockers are
     /// counted without deleting affected content.
     async fn prune_session_content(
