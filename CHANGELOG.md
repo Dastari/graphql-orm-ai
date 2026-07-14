@@ -5,8 +5,8 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.21.0` and the AI
-schema module to `0.21.0`.
+This development line advances the pre-1.0 crate version to `0.22.0` and the AI
+schema module to `0.22.0`.
 
 ### Added
 
@@ -25,10 +25,14 @@ schema module to `0.21.0`.
   restricted to server-offered IDs. Registrations may opt into custom tools
   only together with stateless continuation; filesystem, network, shell,
   credential, built-in, and provider-retained authority remain unavailable.
-- Protected stateless tool-batch checkpoints using the existing generated ORM
-  entities. They are consumable only under the same run fence; lease loss or
-  restart remains `RecoveryRequired` until full cross-generation historical
-  row adoption is implemented.
+- Protected stateless tool-batch checkpoints and cross-generation adoption
+  using the existing generated ORM entities. A replacement fence can continue
+  only after reopening the protected conversation and proving every historical
+  and current tool call against its original attempt/generation, committed
+  budget, run step, protected arguments/result, disclosure classification,
+  immutable egress decision, and unique replay manifest. Resolver calls are
+  never rerun during adoption, and any missing, swapped, duplicated, tampered,
+  or newly denied evidence remains closed for recovery.
 
 - A host-only `AiSessionRetentionService` and generated-ORM
   `OrmAiSessionRetentionService` for bounded keyset scan cycles. Each session

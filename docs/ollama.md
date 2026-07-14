@@ -32,10 +32,11 @@ text/JSON user blocks. Each later request replays ordered assistant function
 calls and separately authorized tool messages. Attachments, output schemas,
 provider built-ins, and hidden thinking cannot enter a stateless tool history.
 Every historical and current tool result needs its own unique `ToolResult`
-manifest and fresh egress decision. The protected checkpoint is consumable by
-the same fenced generation; lease loss remains `RecoveryRequired` rather than
-replaying Ollama or an application resolver. Cross-generation stateless
-adoption is not implemented.
+manifest and fresh egress decision. An exact completed protected checkpoint
+may cross a lease generation only after current-authority adoption proves every
+historical budget, step, protected argument/result, disclosure classification,
+and immutable egress decision. Adoption never replays Ollama or an application
+resolver; incomplete or ambiguous work remains `RecoveryRequired`.
 
 The protocol behavior follows Ollama's official
 [`/api/chat` reference](https://docs.ollama.com/api/chat),

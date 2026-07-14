@@ -14,10 +14,10 @@ output/provider-turn/tool-batch checkpoints, supervised consequential-tool, and
 private remote GraphQL adapter foundations compile and are tested. Protected
 proposal review and exact one-shot approval lifecycles also compile and are
 tested. Exact completed read-only tool batches with provider-retained response
-IDs can also be adopted across a new fenced generation under current
-authority. Provider-turn/partial-batch/stateless adoption, a top-level
-approval-wait coordinator, and several operational adapters listed below are
-still being implemented.
+IDs or bounded stateless history can also be adopted across a new fenced
+generation under current authority. Provider-turn/partial-batch adoption, a
+top-level approval-wait coordinator, and several operational adapters listed
+below are still being implemented.
 
 ## What it provides
 
@@ -103,13 +103,13 @@ still being implemented.
 - Provider-independent stateless continuation for Ollama and reviewed local
   harnesses. Only bounded visible text/JSON, exact assistant calls, and
   disclosure-validated tool outputs are retained; every replayed output has a
-  unique freshly authorized egress proof. Stateless checkpoints continue only
-  under the same fence and become `RecoveryRequired` after lease loss.
-- One-shot cross-generation adoption for an exact completed provider-retained
-  read-only tool batch. Recovery preserves only a hash- and budget-bound complete batch; the
-  new worker freshly reauthorizes, reopens and validates every durable result
-  and egress proof, reconstructs bounded continuation state, and consumes the
-  checkpoint before the next provider transport.
+  unique freshly authorized egress proof.
+- One-shot cross-generation adoption for exact completed provider-retained and
+  stateless read-only tool batches. Recovery preserves only a hash- and
+  budget-bound complete batch; the new worker freshly reauthorizes, reopens
+  and validates every current and historical durable result, budget, step, and
+  egress proof, reconstructs bounded continuation state without rerunning a
+  resolver, and consumes the checkpoint before the next provider transport.
 - Optional protected durable provisional output. Only visible text and
   reasoning summaries are UTF-8-coalesced within 50 ms / 4 KiB; each batch is
   freshly authorized, protected, exact-fence/budget validated, and committed
@@ -257,8 +257,7 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 
-Production blockers include provider-turn, partial-tool-batch, and
-cross-generation stateless-checkpoint adoption, a
+Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, complete deleting-session/raw-payload/audit retention workflows,

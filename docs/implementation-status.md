@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.21.0`) and 39 private records
+- AI schema-module identity (currently version `0.22.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -36,9 +36,10 @@ production-ready behavior.
   encoded inline without creating provider-persistent file IDs.
 - Native feature-gated Ollama `/api/chat` adapter with deployment-authorized
   fixed root endpoint, redirects disabled, bounded NDJSON normalization,
-  exact PNG/JPEG/WebP image reopening, JSON-schema output, and authoritative
+  exact PNG/JPEG/WebP image reopening, JSON-schema output, registered custom
+  and parallel application tools, bounded stateless replay, and authoritative
   prompt/evaluation token usage. It explicitly omits thinking and rejects
-  tools, files, built-ins, and continuation until stateless checkpoints land.
+  files, built-ins, provider-retained continuation, and arbitrary tool IDs.
 - Feature-gated installed local-harness foundation with immutable logical-model
   registry, fixed executable/arguments/digest/version/sandbox/resource
   registration, a trusted process-tree launcher seam, strict bounded
@@ -111,8 +112,8 @@ production-ready behavior.
   reviewed installed harnesses. It retains only trusted instructions, visible
   text/JSON, exact assistant calls, and disclosure-validated tool output;
   requires one unique freshly authorized manifest per replayed result; and
-  protects checkpoints for same-generation consumption without claiming
-  cross-generation replay safety.
+  protects checkpoints for same-generation consumption or exact
+  cross-generation current-authority adoption.
 - Top-level read-only coordinator with host-owned exact initial/continuation
   planning, periodic fenced provider heartbeats, bounded loop/tool sequencing,
   protected output persistence, safe terminal classification, and conservative
@@ -125,11 +126,12 @@ production-ready behavior.
   current principal/policy revalidation, bounded protected state, committed
   budget verification, complete tool/result/egress transaction checks, and
   coordinator-required persistence before phase handoff.
-- Cross-generation adoption for exact completed read-only tool batches. The
-  ORM adopter reopens and validates original protected arguments/results,
-  budget, ordered tool/step rows, disclosure blocks and immutable egress allow
-  audits under current authority, reconstructs bounded continuation state, and
-  consumes the checkpoint before provider transport.
+- Cross-generation adoption for exact completed provider-retained and bounded
+  stateless read-only tool batches. The ORM adopter reopens and validates every
+  current and historical protected argument/result, committed budget, ordered
+  tool/step row, disclosure classification, and immutable egress allow audit
+  under current authority, reconstructs bounded continuation state without
+  rerunning a resolver, and consumes the checkpoint before provider transport.
 - Optional protected durable visible provider output. UTF-8-safe coalescing
   enforces a maximum 50 ms / 4 KiB batch and excludes structured/tool events;
   the ORM sink freshly validates authority and protection policy, then commits
@@ -281,11 +283,10 @@ production-ready behavior.
   ordinary transactional reservation/reconciliation, and authenticated usage
   reporting are implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
-  application-tool checkpoints and stateless continuation. Exact completed
-  provider-retained read-only tool-batch adoption, the bounded
-  coordinator, protected stateful checkpoints/continuation, protected live
-  output, and final-output crash reconciliation are implemented; all other
-  ambiguous resume remains closed.
+  application-tool checkpoints. Exact completed provider-retained and bounded
+  stateless read-only tool-batch adoption, the bounded coordinator, protected
+  checkpoints/continuation, protected live output, and final-output crash
+  reconciliation are implemented; all ambiguous resume remains closed.
 - Backup adapter execution and applied restore transactions.
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
@@ -305,9 +306,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add cross-generation validation for every historical row in a stateless
-   checkpoint, then a separately reviewed production OS/container harness
-   launcher; provider-persistent file lifecycle remains gated.
+1. Add a separately reviewed production OS/container harness launcher;
+   provider-persistent file lifecycle remains gated.
 2. Add Docker-owned PostgreSQL parity tests only after the harness can prove it
    created the exact disposable database handle.
 

@@ -178,6 +178,9 @@ terminate; and dropping a partial stream exercises the required
 kill-on-drop path. The suite starts no subprocess, contacts no model/provider,
 and opens no database.
 
-ACP framing, general mediated callbacks, cross-generation stateless adoption,
-resumable process sessions, and any separately sandboxed coding workspace
-remain future adapters. They must not widen this safe registration implicitly.
+ACP framing, general mediated callbacks, resumable process sessions, and any
+separately sandboxed coding workspace remain future adapters. Exact completed
+stateless tool batches can cross a worker generation through protected ORM
+adoption; this revalidates stored history and never resumes or reconstructs a
+process session. Future adapters must not widen this safe registration
+implicitly.

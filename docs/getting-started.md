@@ -76,8 +76,9 @@ The adapter supports streaming text, exact PNG/JPEG/WebP input, structured
 output, and exact registered application tools through
 `ModelContinuationMode::StatelessReplay`. Every replayed tool result needs its
 own fresh manifest. Provider-retained continuation, built-ins, and hidden
-thinking remain rejected; lease loss closes stateless checkpoints for recovery
-rather than cross-generation replay. See the [Ollama guide](ollama.md).
+thinking remain rejected. An exact completed checkpoint may cross a lease
+generation only after the adopter revalidates every historical durable row;
+ambiguous work remains closed. See the [Ollama guide](ollama.md).
 
 For installed programs, build an immutable `AiLocalHarnessRegistry`, implement
 `AiLocalHarnessProcessLauncher` at a reviewed OS/container sandbox boundary,
@@ -163,9 +164,10 @@ shorter than the run-service lease TTL. Also supply an
 principal/access/protection boundaries as transcript persistence. A successful coordinator outcome means
 the terminal/recovery state was durably committed; a lost fence returns an
 error and must not be followed by another write from that worker. Only an exact
-completed read-only tool-batch checkpoint has cross-generation adoption
-authority, and only after fresh protected validation; see the [checkpoint
-guide](coordinator-checkpoints.md).
+completed provider-retained or bounded stateless read-only tool-batch
+checkpoint has cross-generation adoption authority, and only after fresh
+protected validation of every current and historical durable proof; see the
+[checkpoint guide](coordinator-checkpoints.md).
 
 If transport or streaming becomes ambiguous, do not finish or release the
 reservation. It remains uncertain and expired-run reconciliation moves the run

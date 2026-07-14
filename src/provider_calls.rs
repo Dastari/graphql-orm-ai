@@ -1723,8 +1723,10 @@ mod tests {
         SessionContext, SystemClock,
     };
     use async_trait::async_trait;
-    use graphql_orm::graphql::errors::OrmPublicError;
-    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule, TransactionMode};
+    use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use graphql_orm::graphql::orm::{
+        ApplyOptions, ConditionalUpdateOutcome, OrmSchemaModule, TransactionMode,
+    };
     use graphql_orm::prelude::{Database, SqliteBackend};
     use serde_json::json;
     use sha2::Digest;
@@ -1998,6 +2000,16 @@ mod tests {
     }
 
     async fn fixture(events: Vec<ProviderEvent>) -> Fixture {
+        fixture_with_provider(MockProvider::new(events)).await
+    }
+
+    async fn fixture_with_event_batches(
+        batches: impl IntoIterator<Item = Vec<ProviderEvent>>,
+    ) -> Fixture {
+        fixture_with_provider(MockProvider::new(Vec::new()).with_event_batches(batches)).await
+    }
+
+    async fn fixture_with_provider(mock: MockProvider) -> Fixture {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -2132,7 +2144,6 @@ mod tests {
             budget_limits,
         ));
         let audit = Arc::new(OrmAiEgressDecisionAudit::new(database.clone()));
-        let mock = MockProvider::new(events);
         let document =
             "query Record($recordId: ID!) { record(id: $recordId) { recordId subject } }";
         let disclosure = AiDisclosureSchema::new(
@@ -3402,10 +3413,13 @@ mod tests {
             .expect("checkpoint lookup should succeed")
             .expect("checkpoint should exist");
         assert_eq!(checkpoint.provider_response_id, None);
-        assert!(matches!(
-            checkpoint_service.adopt_tool_batch(&lease).await,
-            Err(AiError::Conflict)
-        ));
+        let adopted = checkpoint_service
+            .adopt_tool_batch(&lease)
+            .await
+            .expect("stateless batch should validate for adoption")
+            .expect("linked stateless batch should be adoptable");
+        assert_eq!(adopted.provider_turns(), 1);
+        assert_eq!(adopted.total_tool_calls(), 1);
         let consumed = checkpoint_service
             .consume_before_provider(&lease, checkpoint_id)
             .await
@@ -3463,6 +3477,360 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn stateless_checkpoint_adoption_validates_every_historical_tool_turn() {
+        let fixture = fixture_with_event_batches([
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: "stateless-history-call-1".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: "stateless-history-call-1".to_owned(),
+                    arguments: json!({"recordId": "54"}),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 18,
+                    output_tokens: 5,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
+            vec![
+                ProviderEvent::ResponseStarted { response_id: None },
+                ProviderEvent::ToolCallStarted {
+                    call_id: "stateless-history-call-2".to_owned(),
+                    tool_id: "records.read".to_owned(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    call_id: "stateless-history-call-2".to_owned(),
+                    arguments: json!({"recordId": "55"}),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 28,
+                    output_tokens: 6,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted { response_id: None },
+            ],
+        ])
+        .await;
+        let provider_executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate"),
+        );
+        let tool_service = OrmAiApplicationToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8_192,
+                16_384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .expect("test tool limits should validate"),
+        );
+        let route = AiToolResultEgressRoute::new(
+            "mock-profile",
+            "local-mock",
+            AiDestinationTrust::Local,
+            "continue_authorized_tool_result",
+            "none",
+            "egress-v1",
+        )
+        .expect("tool-result route should validate");
+        let checkpoint_service = OrmAiCoordinatorCheckpointService::new(
+            fixture.run_service.clone(),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(SystemClock),
+            AiCoordinatorCheckpointLimits::new(256 * 1_024, Duration::seconds(30))
+                .expect("checkpoint limits should validate"),
+        );
+        let mut guard = AiAgentLoopGuard::new(
+            &fixture.lease,
+            AiAgentLoopLimits::new(4, 4).expect("test loop limits should validate"),
+        );
+
+        let first_result = provider_executor
+            .execute(&fixture.lease, stateless_tool_plan(&fixture))
+            .await
+            .expect("first stateless provider turn should normalize");
+        assert_eq!(
+            guard
+                .observe_provider_turn(&first_result)
+                .expect("first stateless tool turn should bind"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 0,
+                call_count: 1,
+            }
+        );
+        let first_lease = checkpoint_service
+            .persist_provider_turn(
+                &fixture.lease,
+                &first_result,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("first stateless provider turn should checkpoint");
+        let first_tool = tool_service
+            .execute_read_only(
+                &first_lease,
+                &first_result,
+                AiApplicationToolCallContext::new(
+                    0,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-history",
+                    "stateless-history-provider-turn-1",
+                )
+                .expect("first tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("first historical tool should execute through the resolver");
+        guard
+            .observe_tool_result(&first_tool)
+            .expect("first historical output should match");
+        let first_continuation = guard
+            .continuation()
+            .expect("first stateless batch should continue");
+        let first_batch_lease = checkpoint_service
+            .persist_tool_batch(
+                first_tool.lease(),
+                &first_result,
+                std::slice::from_ref(&first_tool),
+                &first_continuation,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("first stateless batch should checkpoint");
+        let first_checkpoint_id = first_batch_lease
+            .latest_checkpoint_id()
+            .expect("first stateless checkpoint should link");
+        let first_consumed_lease = checkpoint_service
+            .consume_before_provider(&first_batch_lease, first_checkpoint_id)
+            .await
+            .expect("first stateless batch should consume exactly once");
+
+        let descriptor = fixture
+            .runtime
+            .tool_catalog()
+            .descriptor(&AiToolId::parse("records.read").expect("tool ID should parse"))
+            .expect("tool should remain registered");
+        let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+        policy.bind(AiToolPolicyBinding {
+            tool_id: descriptor.id.clone(),
+            fingerprint: descriptor.fingerprint.clone(),
+            enabled: true,
+        });
+        let next_request = ModelRequest {
+            model: "mock-model".to_owned(),
+            instructions: Vec::new(),
+            input: Vec::new(),
+            continuation: None,
+            continuation_mode: ModelContinuationMode::StatelessReplay,
+            tools: vec![ModelToolDefinition {
+                tool_id: descriptor.id.as_str().to_owned(),
+                provider_name: "records_read".to_owned(),
+                fingerprint: descriptor.fingerprint.clone(),
+                description: descriptor.description.clone(),
+                parameters: descriptor.argument_schema.clone(),
+                strict: true,
+            }],
+            builtin_tools: Vec::new(),
+            output_schema: None,
+            maximum_output_tokens: Some(100),
+        };
+        let mut next_base = plan(&fixture);
+        next_base.budget.idempotency_key = format!("provider:{}:2", fixture.lease.attempt_id());
+        let mut second_plan = AiProviderCallPlan::new_continuation_with_tools(
+            next_base.provider_kind,
+            next_request,
+            next_base.budget,
+            next_base.transfers,
+            "stateless-history-provider-turn-2",
+            first_continuation,
+            fixture.runtime.tool_catalog(),
+            &policy,
+        )
+        .expect("second stateless plan should bind historical output");
+        second_plan.transfers[0].estimated_bytes = second_plan.request.conservative_egress_bytes();
+        let second_result = provider_executor
+            .execute(&first_consumed_lease, second_plan)
+            .await
+            .expect("second stateless provider turn should reauthorize replay");
+        assert_eq!(
+            guard
+                .observe_provider_turn(&second_result)
+                .expect("second stateless tool turn should bind"),
+            AiAgentLoopTurn::ToolCalls {
+                provider_turn_index: 1,
+                call_count: 1,
+            }
+        );
+        let second_lease = checkpoint_service
+            .persist_provider_turn(
+                &first_consumed_lease,
+                &second_result,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("second stateless provider turn should checkpoint");
+        let second_tool = tool_service
+            .execute_read_only(
+                &second_lease,
+                &second_result,
+                AiApplicationToolCallContext::new(
+                    1,
+                    0,
+                    fixture.scope.clone(),
+                    "stateless-history",
+                    "stateless-history-provider-turn-2",
+                )
+                .expect("second tool context should validate"),
+                route.clone(),
+            )
+            .await
+            .expect("second historical tool should execute through the resolver");
+        guard
+            .observe_tool_result(&second_tool)
+            .expect("second historical output should match");
+        let second_continuation = guard
+            .continuation()
+            .expect("second stateless batch should continue");
+        assert_eq!(second_continuation.replay_transfers().len(), 1);
+        let second_batch_lease = checkpoint_service
+            .persist_tool_batch(
+                second_tool.lease(),
+                &second_result,
+                std::slice::from_ref(&second_tool),
+                &second_continuation,
+                &fixture.scope,
+                "stateless-history",
+                &route,
+                guard.provider_turns(),
+                guard.total_tool_calls(),
+            )
+            .await
+            .expect("second stateless batch should checkpoint full history");
+        let adopted = checkpoint_service
+            .adopt_tool_batch(&second_batch_lease)
+            .await
+            .expect("every protected historical binding should validate")
+            .expect("complete stateless history should be adoptable");
+        assert_eq!(adopted.provider_turns(), 2);
+        assert_eq!(adopted.total_tool_calls(), 2);
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&second_batch_lease.run_id().0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &run.id,
+                            run.row_version,
+                            AiRunRecordWhereInput::default(),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should expire the recovery fixture");
+        let recovery = fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("stateless checkpoint should reconcile");
+        assert_eq!(recovery.checkpoint_requeued, 1);
+        assert_eq!(recovery.recovery_required, 0);
+        let replacement = fixture
+            .run_service
+            .claim_next("stateless-history-adopter")
+            .await
+            .expect("replacement claim should succeed")
+            .expect("stateless checkpoint should be immediately eligible");
+        assert_eq!(replacement.lease_generation(), 2);
+        let restored = checkpoint_service
+            .adopt_tool_batch(&replacement)
+            .await
+            .expect("new fence should revalidate all stateless history")
+            .expect("restored stateless checkpoint should be adoptable");
+        assert_eq!(restored.provider_turns(), 2);
+        assert_eq!(restored.total_tool_calls(), 2);
+        fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    let call = tx
+                        .find_by_id::<AiToolCallRecord>(&first_tool.id().0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &call.id,
+                            call.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                result_egress_manifest_hash: Some(Some("0".repeat(64))),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should mutate the adversarial fixture");
+        assert!(matches!(
+            checkpoint_service.adopt_tool_batch(&replacement).await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(fixture.mock.request_count(), 2);
     }
 
     #[tokio::test]

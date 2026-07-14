@@ -4,6 +4,44 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: stateless checkpoint adoption (crate/schema 0.21.0 to 0.22.0)
+
+Apply AI schema module `0.22.0` while provider/coordinator workers, backups,
+and restore callbacks are closed. Do not run 0.22.0 code against a module
+registered as 0.21.0. The generated migration has no table, column, index, or
+consumer-data rewrite and the module still owns 39 private entities. The
+module version advances because the protected checkpoint and restore semantic
+contract now permits a fully proven stateless tool history to cross a lease
+generation.
+
+Expired-run recovery may now requeue an exact completed stateless
+`tool_batch_persisted` checkpoint instead of classifying lease loss as
+`RecoveryRequired`. The replacement worker must use
+`AiAgentCheckpointAdopter`; it cannot read or reconstruct checkpoint JSON
+itself. Adoption rehydrates current authority, opens the protected payload,
+and validates every historical and current tool against its original
+attempt/generation, committed budget reservation, finished run step,
+canonical arguments, protected result, disclosure classification, immutable
+allow audit, and unique tool-result manifest. It then rechecks authority and
+the protection policy. No application resolver or previous provider turn is
+rerun. The linked checkpoint is still atomically consumed through the new
+fence before the next provider transport.
+
+Existing 0.21.0 stateless version-2 checkpoints need no rewrite or backfill.
+They become eligible only when all durable evidence satisfies the stricter
+adopter; missing provider-name metadata, stale policy, malformed history,
+tampering, duplicate identities, incomplete work, or denied egress fails
+closed. Existing provider-retained checkpoint behavior is unchanged. No
+consumer-owned application/domain data is read or changed by migration.
+
+There is no new public Rust item, feature/default change, or GraphQL SDL
+change. This is a pre-1.0 persistence-semantic, restore, and behavioral
+contract change. Hosts that intentionally treated every stateless lease loss
+as permanently non-resumable should update operator runbooks: exact completed
+batches can now be safely requeued, while provider-turn, partial-batch,
+consequential, and otherwise ambiguous checkpoints remain
+`RecoveryRequired`.
+
 ## Unreleased: stateless local tool continuation (crate/schema 0.20.0 to 0.21.0)
 
 Apply AI schema module `0.21.0` while provider workers, coordinator workers,

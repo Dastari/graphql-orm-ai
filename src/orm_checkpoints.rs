@@ -2,7 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use agql_auth::{Clock, CurrentPrincipalResolver, PrincipalReferenceKind, ResolvedPrincipal};
@@ -63,6 +63,8 @@ struct ProviderResultSnapshot {
 struct ProviderToolSnapshot {
     call_id: String,
     tool_id: String,
+    #[serde(default)]
+    provider_name: Option<String>,
     tool_fingerprint: String,
     arguments: serde_json::Value,
 }
@@ -128,9 +130,10 @@ impl AiCoordinatorCheckpointLimits {
 /// the same current row-version fence. Provider usage must already be
 /// authoritatively committed. Tool-batch checkpoints additionally verify every
 /// referenced protected tool row and its egress decision in that transaction.
-/// Provider-retained records make later adoption review possible; stateless
-/// records are intentionally consumable only by the same fenced generation.
-/// This writer alone never authorizes a new generation to resume either form.
+/// Provider-retained and bounded stateless records make later adoption review
+/// possible. This writer alone never authorizes a new generation to resume:
+/// the adopter must reopen and validate every current and historical durable
+/// proof under current authority first.
 pub struct OrmAiCoordinatorCheckpointService {
     run_service: OrmAiRunService,
     principal_resolver: Arc<dyn CurrentPrincipalResolver>,
@@ -429,16 +432,16 @@ impl OrmAiCoordinatorCheckpointService {
         };
         validate_session_binding(&session, lease, &scope)?;
         let (principal, policy) = self.current_policy(lease, &scope).await?;
+        let principal_kind = principal_reference_kind(lease.principal_reference());
         let checkpoint =
             AiRunCheckpointRecord::find_by_id(self.run_service.database(), &checkpoint_id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
-        let provider_response_id = checkpoint
-            .provider_response_id
-            .as_deref()
-            .filter(|value| valid_reference(value))
-            .ok_or(AiError::Conflict)?;
+        let provider_response_id = checkpoint.provider_response_id.as_deref();
+        if provider_response_id.is_some_and(|value| !valid_reference(value)) {
+            return Err(AiError::Conflict);
+        }
         let budget_reservation_id = checkpoint.budget_reservation_id.ok_or(AiError::Conflict)?;
         let protected_state = checkpoint
             .protected_state
@@ -458,16 +461,16 @@ impl OrmAiCoordinatorCheckpointService {
         .await
         .map_err(|error| map_orm(OrmPublicError::from(error)))?
         .ok_or(AiError::NotFound)?;
-        if reservation.session_id != lease.session_id().0
-            || reservation.run_id != lease.run_id().0
-            || reservation.attempt_id != checkpoint.attempt_id
-            || reservation.lease_generation != checkpoint.lease_generation
-            || reservation.state != "committed"
-            || reservation.actual_runs != Some(1)
-            || reservation.reconciled_at.is_none()
-            || reservation.provider_kind.trim().is_empty()
-            || reservation.provider_model.trim().is_empty()
-        {
+        if !checkpoint_budget_matches(
+            &reservation,
+            lease,
+            checkpoint.attempt_id,
+            checkpoint.lease_generation,
+            &scope,
+            &principal_kind,
+            &reservation.provider_kind,
+            &reservation.provider_model,
+        ) {
             return Err(AiError::Conflict);
         }
         let expected_hash = coordinator_checkpoint_hash(
@@ -478,7 +481,7 @@ impl OrmAiCoordinatorCheckpointService {
             &checkpoint.checkpoint_kind,
             &reservation.provider_kind,
             &reservation.provider_model,
-            Some(provider_response_id),
+            provider_response_id,
             budget_reservation_id,
             protected_state,
         )?;
@@ -520,7 +523,7 @@ impl OrmAiCoordinatorCheckpointService {
             || provider.lease_generation != checkpoint.lease_generation
             || provider.provider_kind.as_str() != reservation.provider_kind
             || provider.provider_model != reservation.provider_model
-            || provider.provider_response_id.as_deref() != Some(provider_response_id)
+            || provider.provider_response_id.as_deref() != provider_response_id
             || provider.budget_reservation_id != budget_reservation_id
             || provider.tool_calls.is_empty()
             || provider
@@ -534,11 +537,27 @@ impl OrmAiCoordinatorCheckpointService {
         let continuation = AiAgentContinuation::from_checkpoint_value(
             payload.continuation.ok_or(AiError::Conflict)?,
         )?;
-        if continuation.provider_response_id() != Some(provider_response_id)
+        let stateless_evidence = continuation.stateless_evidence()?;
+        if continuation.provider_response_id() != provider_response_id
             || continuation.input().len() != payload.completed_tools.len()
             || continuation.transfers().len() != payload.completed_tools.len()
         {
             return Err(AiError::Conflict);
+        }
+        match (&stateless_evidence, provider_response_id) {
+            (None, Some(_)) => {}
+            (Some(evidence), None)
+                if provider.previous_response_id.is_none()
+                    && evidence.provider_turns == payload.provider_turns
+                    && u32::try_from(evidence.tools.len()).ok()
+                        == Some(payload.total_tool_calls)
+                    && evidence.current_tool_count == payload.completed_tools.len()
+                    && evidence.tools.len()
+                        == continuation
+                            .replay_transfers()
+                            .len()
+                            .saturating_add(continuation.transfers().len()) => {}
+            _ => return Err(AiError::Conflict),
         }
         let expected_turn_index = i64::from(
             payload
@@ -548,6 +567,11 @@ impl OrmAiCoordinatorCheckpointService {
         );
         let mut durable_ids = BTreeSet::new();
         let mut provider_call_ids = BTreeSet::new();
+        let mut historical_turn_budgets = BTreeMap::new();
+        let mut unique_historical_budgets = BTreeSet::new();
+        let current_stateless_evidence = stateless_evidence
+            .as_ref()
+            .map(|evidence| &evidence.tools[evidence.tools.len() - evidence.current_tool_count..]);
         for (index, (((tool, provider_tool), input), transfer)) in payload
             .completed_tools
             .iter()
@@ -572,7 +596,17 @@ impl OrmAiCoordinatorCheckpointService {
             else {
                 return Err(AiError::Conflict);
             };
-            if call_id != &provider_tool.call_id
+            if current_stateless_evidence.is_some_and(|evidence| {
+                evidence.get(index).is_none_or(|item| {
+                    item.call_id != provider_tool.call_id
+                        || item.tool_id != provider_tool.tool_id
+                        || provider_tool.provider_name.as_deref()
+                            != Some(item.provider_name.as_str())
+                        || item.tool_fingerprint != provider_tool.tool_fingerprint
+                        || item.arguments != provider_tool.arguments
+                        || item.output != *output
+                })
+            }) || call_id != &provider_tool.call_id
                 || tool_id != &provider_tool.tool_id
                 || !route.matches_manifest(
                     transfer,
@@ -602,7 +636,7 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.provider_call_id != provider_tool.call_id
                 || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
                 || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
-                || call.provider_response_id.as_deref() != Some(provider_response_id)
+                || call.provider_response_id.as_deref() != provider_response_id
                 || call.budget_reservation_id != Some(budget_reservation_id)
                 || call.provider_turn_index != expected_turn_index
                 || usize::try_from(call.tool_call_index).ok() != Some(index)
@@ -673,6 +707,164 @@ impl OrmAiCoordinatorCheckpointService {
                 || u64::try_from(event.estimated_tokens).ok() != Some(transfer.estimated_tokens)
             {
                 return Err(AiError::EgressDenied);
+            }
+        }
+        if let Some(evidence) = &stateless_evidence {
+            let historical_count = evidence
+                .tools
+                .len()
+                .checked_sub(evidence.current_tool_count)
+                .ok_or(AiError::Conflict)?;
+            for (item, transfer) in evidence.tools[..historical_count]
+                .iter()
+                .zip(continuation.replay_transfers())
+            {
+                if !route.matches_manifest(
+                    transfer,
+                    lease,
+                    &scope,
+                    &reservation.provider_kind,
+                    &reservation.provider_model,
+                ) || transfer.sources.len() != 1
+                    || transfer.sources[0].kind != "application_tool_result"
+                {
+                    return Err(AiError::EgressDenied);
+                }
+                let tool_id = Uuid::parse_str(&transfer.sources[0].reference)
+                    .map_err(|_| AiError::Conflict)?;
+                if !durable_ids.insert(tool_id) || !provider_call_ids.insert(item.call_id.as_str())
+                {
+                    return Err(AiError::Conflict);
+                }
+                let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool_id)
+                    .await
+                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                    .ok_or(AiError::NotFound)?;
+                let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool_id)
+                    .await
+                    .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                    .ok_or(AiError::NotFound)?;
+                let historical_budget_id = call.budget_reservation_id.ok_or(AiError::Conflict)?;
+                let historical_budget = AiBudgetReservationRecord::find_by_id(
+                    self.run_service.database(),
+                    &historical_budget_id,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+                let manifest_hash = transfer.stable_hash();
+                let classification = classification_value(transfer.maximum_classification());
+                let turn_budget_matches =
+                    match historical_turn_budgets.entry(item.provider_turn_index) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            if historical_budget_id == budget_reservation_id
+                                || !unique_historical_budgets.insert(historical_budget_id)
+                            {
+                                false
+                            } else {
+                                entry.insert(historical_budget_id);
+                                true
+                            }
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry) => {
+                            *entry.get() == historical_budget_id
+                        }
+                    };
+                if !turn_budget_matches
+                    || !checkpoint_budget_matches(
+                        &historical_budget,
+                        lease,
+                        checkpoint.attempt_id,
+                        checkpoint.lease_generation,
+                        &scope,
+                        &principal_kind,
+                        &reservation.provider_kind,
+                        &reservation.provider_model,
+                    )
+                    || call.run_id != lease.run_id().0
+                    || call.lease_generation != checkpoint.lease_generation
+                    || call.provider_call_id != item.call_id
+                    || call.provider_kind.as_deref() != Some(reservation.provider_kind.as_str())
+                    || call.provider_model.as_deref() != Some(reservation.provider_model.as_str())
+                    || call.provider_response_id.is_some()
+                    || call.provider_turn_index != item.provider_turn_index
+                    || usize::try_from(call.tool_call_index).ok() != Some(item.tool_call_index)
+                    || call.tool_id != item.tool_id
+                    || call.tool_fingerprint != item.tool_fingerprint
+                    || call.argument_hash != canonical_json_hash(&item.arguments)?
+                    || !matches!(call.state.as_str(), "completed" | "execution_failed")
+                    || call.result_egress_manifest_hash.as_deref() != Some(manifest_hash.as_str())
+                    || call.result_egress_decision_id.is_none()
+                    || call.authorization_code.is_none()
+                    || call.disclosure_schema_fingerprint.is_none()
+                    || call.result_classification.as_deref() != Some(classification)
+                    || (call.state == "completed"
+                        && (call.authorization_policy_version.is_none()
+                            || call.authorization_state_digest.is_none()))
+                    || call.completed_at.is_none()
+                    || call
+                        .correlation_id
+                        .as_deref()
+                        .is_none_or(|value| !valid_reference(value))
+                    || step.run_id != lease.run_id().0
+                    || step.lease_generation != checkpoint.lease_generation
+                    || step.state != call.state
+                    || step.finished_at.is_none()
+                {
+                    return Err(AiError::Conflict);
+                }
+                let arguments = self
+                    .open(
+                        &policy,
+                        ContentProtectionContext {
+                            entity: "graphql_orm_ai_tool_calls".to_owned(),
+                            row_id: tool_id.to_string(),
+                            field: "protected_arguments".to_owned(),
+                            scope: scope.clone(),
+                        },
+                        &call.protected_arguments,
+                    )
+                    .await?;
+                let result = self
+                    .open(
+                        &policy,
+                        ContentProtectionContext {
+                            entity: "graphql_orm_ai_tool_calls".to_owned(),
+                            row_id: tool_id.to_string(),
+                            field: "protected_result".to_owned(),
+                            scope: scope.clone(),
+                        },
+                        call.protected_result.as_ref().ok_or(AiError::Conflict)?,
+                    )
+                    .await?;
+                if arguments != item.arguments || result != item.output {
+                    return Err(AiError::Conflict);
+                }
+                let decision_id = call.result_egress_decision_id.ok_or(AiError::Conflict)?;
+                let event =
+                    AiEgressEventRecord::find_by_id(self.run_service.database(), &decision_id)
+                        .await
+                        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                        .ok_or(AiError::NotFound)?;
+                if event.run_id != Some(lease.run_id().0)
+                    || event.principal_subject != lease.principal_reference().subject
+                    || event.scope_kind != scope.kind
+                    || event.scope_id != scope.id
+                    || event.manifest_hash != manifest_hash
+                    || event.destination != transfer.destination
+                    || event.capability != "tool_result"
+                    || event.classification != classification
+                    || event.outcome != "allow"
+                    || u64::try_from(event.estimated_bytes).ok() != Some(transfer.estimated_bytes)
+                    || u64::try_from(event.estimated_tokens).ok() != Some(transfer.estimated_tokens)
+                {
+                    return Err(AiError::EgressDenied);
+                }
+            }
+            if historical_turn_budgets.len()
+                != usize::try_from(payload.provider_turns.saturating_sub(1)).unwrap_or(usize::MAX)
+            {
+                return Err(AiError::Conflict);
             }
         }
         let (current, current_policy) = self.current_policy(lease, &scope).await?;
@@ -819,12 +1011,7 @@ fn validate_session_binding(
     lease: &AiRunLease,
     scope: &AiScope,
 ) -> Result<(), AiError> {
-    let expected_kind = match &lease.principal_reference().kind {
-        PrincipalReferenceKind::UserSession => "user".to_owned(),
-        PrincipalReferenceKind::ApiToken { principal_kind } => {
-            format!("api_token:{principal_kind}")
-        }
-    };
+    let expected_kind = principal_reference_kind(lease.principal_reference());
     if session.id != lease.session_id().0
         || session.state != "active"
         || session.deleted_at.is_some()
@@ -842,6 +1029,74 @@ fn validate_session_binding(
         return Err(AiError::Forbidden);
     }
     Ok(())
+}
+
+fn principal_reference_kind(reference: &agql_auth::PrincipalReference) -> String {
+    match &reference.kind {
+        PrincipalReferenceKind::UserSession => "user".to_owned(),
+        PrincipalReferenceKind::ApiToken { principal_kind } => {
+            format!("api_token:{principal_kind}")
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checkpoint_budget_matches(
+    budget: &AiBudgetReservationRecord,
+    lease: &AiRunLease,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    scope: &AiScope,
+    principal_kind: &str,
+    provider_kind: &str,
+    provider_model: &str,
+) -> bool {
+    budget.session_id == lease.session_id().0
+        && budget.run_id == lease.run_id().0
+        && budget.attempt_id == attempt_id
+        && budget.lease_generation == lease_generation
+        && budget.scope_kind == scope.kind
+        && budget.scope_id == scope.id
+        && budget.tenant_id == scope.tenant_id
+        && budget.principal_kind == principal_kind
+        && budget.principal_subject == lease.principal_reference().subject
+        && budget.provider_kind == provider_kind
+        && budget.provider_model == provider_model
+        && !budget.pricing_policy_version.trim().is_empty()
+        && budget.state == "committed"
+        && budget.reserved_input_tokens >= 0
+        && budget.reserved_output_tokens >= 0
+        && budget.reserved_tool_units >= 0
+        && budget.reserved_image_units >= 0
+        && budget.reserved_cost_microunits >= 0
+        && budget.reserved_runs == 1
+        && matches!(
+            (
+                budget.actual_input_tokens,
+                budget.actual_cached_input_tokens,
+                budget.actual_output_tokens,
+                budget.actual_tool_units,
+                budget.actual_image_units,
+                budget.actual_cost_microunits,
+                budget.actual_runs,
+            ),
+            (
+                Some(input),
+                Some(cached),
+                Some(output),
+                Some(tools),
+                Some(images),
+                Some(cost),
+                Some(1),
+            ) if input >= 0
+                && cached >= 0
+                && cached <= input
+                && output >= 0
+                && tools >= 0
+                && images >= 0
+                && cost >= 0
+        )
+        && budget.reconciled_at.is_some()
 }
 
 fn valid_reference(value: &str) -> bool {

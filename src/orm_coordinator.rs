@@ -359,8 +359,8 @@ impl AiAdoptedReadOnlyToolBatch {
 }
 
 /// Current-authority adoption and one-shot consumption of protected tool
-/// checkpoints. Stateless checkpoints can be consumed by the same fenced
-/// generation but fail closed on generation adoption.
+/// checkpoints, including bounded stateless histories whose every original
+/// tool, budget, protected payload, and egress row remains exact.
 #[async_trait]
 pub trait AiAgentCheckpointAdopter: Send + Sync {
     /// Opens and validates the linked completed tool batch, when present.
@@ -451,9 +451,9 @@ pub enum AiReadOnlyAgentRunOutcome {
 /// through the protected ORM tool service, constructs exact continuations,
 /// persists final output, and commits a terminal outcome. It can adopt only an
 /// opaque, freshly validated complete read-only tool batch with a
-/// provider-retained continuation and consumes that checkpoint before provider
-/// transport. Stateless batches remain usable within the same fenced
-/// generation and become `RecoveryRequired` after lease loss. Any ambiguous
+/// provider-retained or bounded stateless continuation and consumes that
+/// checkpoint before provider transport. Stateless adoption revalidates every
+/// historical durable result and never reruns a resolver. Any ambiguous
 /// provider/tool/output handoff is similarly closed; the coordinator never
 /// reconstructs or silently replays uncertain state.
 pub struct AiReadOnlyAgentCoordinator {

@@ -65,6 +65,23 @@ pub struct AiAgentContinuation {
     replay_transfers: Vec<AiEgressManifest>,
 }
 
+pub(crate) struct AiStatelessToolEvidence {
+    pub(crate) provider_turn_index: i64,
+    pub(crate) tool_call_index: usize,
+    pub(crate) call_id: String,
+    pub(crate) tool_id: String,
+    pub(crate) provider_name: String,
+    pub(crate) tool_fingerprint: String,
+    pub(crate) arguments: serde_json::Value,
+    pub(crate) output: serde_json::Value,
+}
+
+pub(crate) struct AiStatelessConversationEvidence {
+    pub(crate) provider_turns: u32,
+    pub(crate) current_tool_count: usize,
+    pub(crate) tools: Vec<AiStatelessToolEvidence>,
+}
+
 impl AiAgentContinuation {
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
@@ -141,12 +158,25 @@ impl AiAgentContinuation {
                 }
             }
         }
-        Ok(Self {
+        let continuation = Self {
             continuation: snapshot.continuation,
             input: snapshot.input,
             transfers: snapshot.transfers,
             replay_transfers: snapshot.replay_transfers,
-        })
+        };
+        if let Some(evidence) = continuation.stateless_evidence()? {
+            let historical_count = evidence
+                .tools
+                .len()
+                .checked_sub(evidence.current_tool_count)
+                .ok_or(AiError::Conflict)?;
+            if historical_count != continuation.replay_transfers.len()
+                || evidence.current_tool_count != continuation.transfers.len()
+            {
+                return Err(AiError::Conflict);
+            }
+        }
+        Ok(continuation)
     }
 
     pub(crate) fn chain_reference(&self) -> Result<String, AiError> {
@@ -172,6 +202,145 @@ impl AiAgentContinuation {
 
     pub(crate) fn replay_transfers(&self) -> &[AiEgressManifest] {
         &self.replay_transfers
+    }
+
+    pub(crate) fn stateless_evidence(
+        &self,
+    ) -> Result<Option<AiStatelessConversationEvidence>, AiError> {
+        let ModelContinuation::StatelessConversation {
+            instructions,
+            messages,
+        } = &self.continuation
+        else {
+            return Ok(None);
+        };
+        if instructions.len() > 32
+            || instructions
+                .iter()
+                .any(|instruction| instruction.len() > 1024 * 1024)
+            || messages.len() < 2
+            || messages.len() > 256
+        {
+            return Err(AiError::Conflict);
+        }
+        let mut provider_turns = 0_u32;
+        let mut pending: Vec<(usize, &crate::ModelConversationToolCall)> = Vec::new();
+        let mut tools = Vec::new();
+        let mut call_ids = BTreeSet::new();
+        let mut expecting_assistant = false;
+        for (message_index, message) in messages.iter().enumerate() {
+            match message {
+                crate::ModelConversationMessage::User { content }
+                    if message_index == 0
+                        && !content.is_empty()
+                        && content.len() <= 256
+                        && content.iter().all(valid_stateless_user_block) =>
+                {
+                    expecting_assistant = true;
+                }
+                crate::ModelConversationMessage::Assistant {
+                    content,
+                    tool_calls,
+                } if expecting_assistant
+                    && content.len() <= 16 * 1024 * 1024
+                    && !tool_calls.is_empty()
+                    && tool_calls.len() <= 64 =>
+                {
+                    provider_turns = provider_turns.checked_add(1).ok_or(AiError::Conflict)?;
+                    for (call_index, call) in tool_calls.iter().enumerate() {
+                        if !valid_provider_reference(&call.call_id)
+                            || call.tool_id.trim().is_empty()
+                            || call.tool_id.len() > 200
+                            || call.provider_name.trim().is_empty()
+                            || call.provider_name.len() > 200
+                            || call.tool_fingerprint.trim().is_empty()
+                            || call.tool_fingerprint.len() > 512
+                            || !call.arguments.is_object()
+                            || serde_json::to_vec(&call.arguments)
+                                .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024)
+                            || !call_ids.insert(call.call_id.as_str())
+                        {
+                            return Err(AiError::Conflict);
+                        }
+                        pending.push((call_index, call));
+                    }
+                    expecting_assistant = false;
+                }
+                crate::ModelConversationMessage::Tool {
+                    call_id,
+                    tool_id,
+                    provider_name,
+                    output,
+                } if !expecting_assistant && !pending.is_empty() => {
+                    let (tool_call_index, expected) = pending.remove(0);
+                    if call_id != &expected.call_id
+                        || tool_id != &expected.tool_id
+                        || provider_name != &expected.provider_name
+                        || serde_json::to_vec(output)
+                            .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024)
+                    {
+                        return Err(AiError::Conflict);
+                    }
+                    tools.push(AiStatelessToolEvidence {
+                        provider_turn_index: i64::from(
+                            provider_turns.checked_sub(1).ok_or(AiError::Conflict)?,
+                        ),
+                        tool_call_index,
+                        call_id: expected.call_id.clone(),
+                        tool_id: expected.tool_id.clone(),
+                        provider_name: expected.provider_name.clone(),
+                        tool_fingerprint: expected.tool_fingerprint.clone(),
+                        arguments: expected.arguments.clone(),
+                        output: output.clone(),
+                    });
+                    if pending.is_empty() {
+                        expecting_assistant = true;
+                    }
+                }
+                _ => return Err(AiError::Conflict),
+            }
+        }
+        if expecting_assistant || pending.is_empty() || self.input.len() != pending.len() {
+            return Err(AiError::Conflict);
+        }
+        let current_tool_count = pending.len();
+        for ((tool_call_index, expected), input) in pending.into_iter().zip(&self.input) {
+            let ModelInputBlock::ToolResult {
+                call_id,
+                tool_id,
+                output,
+            } = input
+            else {
+                return Err(AiError::Conflict);
+            };
+            if call_id != &expected.call_id
+                || tool_id != &expected.tool_id
+                || serde_json::to_vec(output)
+                    .map_or(true, |encoded| encoded.len() > 16 * 1024 * 1024)
+            {
+                return Err(AiError::Conflict);
+            }
+            tools.push(AiStatelessToolEvidence {
+                provider_turn_index: i64::from(
+                    provider_turns.checked_sub(1).ok_or(AiError::Conflict)?,
+                ),
+                tool_call_index,
+                call_id: expected.call_id.clone(),
+                tool_id: expected.tool_id.clone(),
+                provider_name: expected.provider_name.clone(),
+                tool_fingerprint: expected.tool_fingerprint.clone(),
+                arguments: expected.arguments.clone(),
+                output: output.clone(),
+            });
+        }
+        if tools.len() > 256 {
+            return Err(AiError::Conflict);
+        }
+        Ok(Some(AiStatelessConversationEvidence {
+            provider_turns,
+            current_tool_count,
+            tools,
+        }))
     }
 
     pub(crate) fn apply_with_transfers(
@@ -443,4 +612,14 @@ fn valid_provider_reference(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 1_024
         && value.bytes().all(|byte| !byte.is_ascii_control())
+}
+
+fn valid_stateless_user_block(block: &ModelInputBlock) -> bool {
+    match block {
+        ModelInputBlock::Text { text } => text.len() <= 16 * 1024 * 1024,
+        ModelInputBlock::Json { value } => {
+            serde_json::to_vec(value).is_ok_and(|encoded| encoded.len() <= 16 * 1024 * 1024)
+        }
+        ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => false,
+    }
 }

@@ -949,14 +949,12 @@ impl OrmAiRunService {
                                         ));
                                     }
                                 }
-                                // Stateless checkpoints contain the complete
-                                // protected conversation but deliberately have
-                                // no provider response ID. They are safe for
-                                // same-generation consumption, while an
-                                // expired lease remains closed for privileged
-                                // recovery until cross-generation replay
-                                // validation is implemented.
-                                (None, provider_response_id.is_some())
+                                // Both provider-retained and stateless batches
+                                // have complete durable tool/step/budget proof
+                                // here. The adopter still opens and validates
+                                // every protected historical row under current
+                                // authority before transport.
+                                (None, true)
                             } else {
                                 (None, false)
                             }
@@ -3062,8 +3060,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recovery_requeues_and_preserves_an_exact_completed_tool_batch() {
+    async fn assert_recovery_requeues_completed_tool_batch(provider_response_id: Option<&str>) {
         let fixture = fixture().await;
         let run_id = seed_queued(&fixture).await;
         let lease = fixture
@@ -3077,7 +3074,6 @@ mod tests {
             .start(&lease)
             .await
             .expect("claim should start");
-        let provider_response_id = "response-tool-checkpoint";
         let reservation = AiBudgetReservationRecord::insert(
             &fixture.database,
             CreateAiBudgetReservationRecordInput {
@@ -3141,7 +3137,7 @@ mod tests {
                 provider_call_id: "call-tool-checkpoint".to_owned(),
                 provider_kind: Some("openai".to_owned()),
                 provider_model: Some("checkpoint-test".to_owned()),
-                provider_response_id: Some(provider_response_id.to_owned()),
+                provider_response_id: provider_response_id.map(str::to_owned),
                 budget_reservation_id: Some(reservation.id),
                 provider_turn_index: 0,
                 tool_call_index: 0,
@@ -3184,7 +3180,7 @@ mod tests {
             "tool_batch_persisted",
             "openai",
             "checkpoint-test",
-            Some(provider_response_id),
+            provider_response_id,
             reservation.id,
             &protected_state,
         )
@@ -3198,7 +3194,7 @@ mod tests {
                     checkpoint_kind: "tool_batch_persisted".to_owned(),
                     provider_kind: "openai".to_owned(),
                     provider_model: "checkpoint-test".to_owned(),
-                    provider_response_id: Some(provider_response_id.to_owned()),
+                    provider_response_id: provider_response_id.map(str::to_owned),
                     budget_reservation_id: reservation.id,
                     protected_state,
                     checkpoint_hash,
@@ -3238,6 +3234,12 @@ mod tests {
             .expect("checkpoint retry should be eligible");
         assert_eq!(replacement.lease_generation(), 2);
         assert_eq!(replacement.latest_checkpoint_id(), Some(checkpoint_id));
+    }
+
+    #[tokio::test]
+    async fn recovery_requeues_stateful_and_stateless_completed_tool_batches() {
+        assert_recovery_requeues_completed_tool_batch(Some("response-tool-checkpoint")).await;
+        assert_recovery_requeues_completed_tool_batch(None).await;
     }
 
     #[tokio::test]

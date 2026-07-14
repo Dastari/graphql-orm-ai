@@ -104,13 +104,14 @@ plan. Checkpoint persistence failure after either external boundary closes the
 run for recovery and never replays the provider or resolver.
 
 Do not reconstruct a guard yourself. Cross-generation recovery can retain only
-an exact complete provider-retained tool-batch checkpoint; the adopter must
-freshly authorize, open and validate all durable evidence, construct the opaque
-proof, and consume the checkpoint before the following transport. A stateless
-checkpoint is consumed normally by the same fenced generation, but lease loss
-makes it `RecoveryRequired`. A provider-turn checkpoint, partially completed
-batch, consumed link, unknown response, or malformed restore state likewise
-stays closed for reconciliation/operator review.
+an exact complete provider-retained or stateless tool-batch checkpoint; the
+adopter must freshly authorize, open and validate all durable evidence,
+construct the opaque proof, and consume the checkpoint before the following
+transport. Stateless adoption validates each historical protected result,
+arguments, committed budget, finished step, disclosure classification, and
+immutable allow audit and never reruns a resolver. A provider-turn checkpoint,
+partially completed batch, consumed link, unknown response, malformed history,
+or unprovable restore state stays closed for reconciliation/operator review.
 
 ## OpenAI continuation and retention
 
@@ -137,8 +138,9 @@ or turn retention on.
   [supervised service](supervised-tool-loop.md) for exact one-shot application
   mutations; it is not yet owned by this coordinator.
 - Cross-generation adoption is intentionally limited to exact completed
-  provider-retained read-only tool batches. Provider-turn, partial-batch,
-  consequential, and stateless continuation adoption remain unimplemented.
+  provider-retained or bounded stateless read-only tool batches. Provider-turn,
+  partial-batch, and consequential continuation adoption remain
+  unimplemented.
 - Optional protected live persistence is implemented for visible text and
   reasoning summaries. It excludes structured/tool events and validates fresh
   authority, protection policy, the exact run fence, and uncertain budget for

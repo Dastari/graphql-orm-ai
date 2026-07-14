@@ -41,11 +41,13 @@ the payload also binds the complete bounded visible conversation and one unique
 manifest per historical result. Missing, reordered, duplicated, denied, or
 partially executing calls fail closed. No raw SQL participates in this path.
 
-A stateless checkpoint is consumed before the next provider transport by the
-same fenced generation. If the lease is lost first, expired-run recovery
-validates the hash, budget, completed tool rows, and finished steps but moves
-the run to `RecoveryRequired`; it does not reconstruct or replay local model
-state across generations.
+A stateless checkpoint is consumed before the next provider transport. If the
+lease is lost first, expired-run recovery may requeue only an exact completed
+batch. The replacement worker must reopen the protected conversation and
+validate every historical and current tool against its original committed
+budget, finished step, protected arguments/result, disclosure classification,
+immutable allow audit, and unique replay manifest. It never reruns an
+application resolver or a preceding local-model turn.
 
 ## Exact completed-batch adoption
 
@@ -54,19 +56,21 @@ GraphQL reads. The checkpoint hash binds the run, attempt, generation, kind,
 provider/model/response, budget reservation, checkpoint ID, and protected
 envelope hash.
 
-Expired recovery may requeue one provider-retained `tool_batch_persisted`
-checkpoint only after
-its redacted hash, committed/reconciled budget, complete protected tool rows,
-and finished run steps validate under the old fence. The replacement lease
-retains the immutable checkpoint ID but receives a new attempt and generation.
+Expired recovery may requeue one provider-retained or stateless
+`tool_batch_persisted` checkpoint only after its redacted hash,
+committed/reconciled current-turn budget, complete protected tool rows, and
+finished run steps validate under the old fence. The replacement lease retains
+the immutable checkpoint ID but receives a new attempt and generation.
 
 `AiAgentCheckpointAdopter` then rehydrates the current principal, rechecks
 session/scope access, resolves the current ready protection policy, and opens
 the checkpoint plus every protected argument/result. The ORM implementation
 compares the original provider result, ordered calls, canonical arguments,
 descriptor fingerprints, disclosure-validated model blocks, exact manifests,
-immutable allow-audit records, counters, scope, and response chain. It resolves
-the principal/policy again after opening before returning the opaque
+immutable allow-audit records, counters, scope, and continuation chain. For a
+stateless checkpoint it repeats those checks for every historical result and
+its original budget/step rows, not just the current batch. It resolves the
+principal/policy again after opening before returning the opaque
 `AiAdoptedReadOnlyToolBatch`.
 
 The host planner must build a fresh continuation plan, including new budget and
@@ -76,11 +80,11 @@ that consume can be reconsidered within the retry ceiling; a crash after it is
 conservative external-boundary recovery. The append-only checkpoint remains in
 history, but no longer grants adoption eligibility.
 
-Provider-turn checkpoints, stateless checkpoints after lease loss, incomplete
-batches, consequential mutations, missing/denied egress, malformed protected
-state, retry exhaustion, and any changed current access/policy remain
-`RecoveryRequired`. Operators must never manually relink a checkpoint or
-reconstruct a continuation.
+Provider-turn checkpoints, incomplete batches, consequential mutations,
+missing/denied egress, malformed or unprovable stateless history, retry
+exhaustion, and any changed current access/policy remain `RecoveryRequired`.
+Operators must never manually relink a checkpoint or reconstruct a
+continuation.
 
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already

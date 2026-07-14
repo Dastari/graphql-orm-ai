@@ -167,12 +167,12 @@ The top-level read-only coordinator owns fenced provider heartbeats, bounded
 turn/tool sequencing, exact continuation, output persistence, and safe
 terminal/recovery classification. Accepted provider results and complete
 model-visible tool batches are protected through the current run fence before
-the next phase consumes them. An exact complete provider-retained read-only
-tool batch can be adopted across one new generation only after
-current-authority protected-state validation and is consumed before provider
-transport. Provider-independent stateless tool history is supported for
-Ollama and installed harnesses only within the same fence; lease loss,
-provider-turn, and partially completed batches remain closed. Mutations,
+the next phase consumes them. An exact complete provider-retained or bounded
+stateless read-only tool batch can be adopted across one new generation only
+after current-authority validation of every current and historical protected
+result, budget, step, and egress decision, and is consumed before provider
+transport. Adoption never reruns a resolver or preceding provider turn.
+Provider-turn and partially completed batches remain closed. Mutations,
 approval-required/non-idempotent tools, other ambiguous resume, and stateless
 reasoning continuation require their complete preview, approval,
 fresh-authorization, persistence, and reconciliation contracts before
