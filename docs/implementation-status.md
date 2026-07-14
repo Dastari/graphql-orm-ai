@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.24.0`) and 39 private records
+- AI schema-module identity (currently version `0.25.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -230,6 +230,12 @@ production-ready behavior.
 - Default-deny logical UI-intent catalog with bounded JSON Schema 2020-12
   validation and exact descriptor fingerprints. Validated values are frontend
   suggestions only and contain no route or executable authority.
+- Fenced `OrmAiUiIntentDeliveryService`: exact completed tool-free provider
+  envelopes, ordered response/usage identity checks, exact schema binding,
+  current authority before and after protection, matching committed budget,
+  atomic protected session/principal-inbox events, redacted audit, renewed
+  fence, idempotent retry, and fatal restore evidence. It performs no route or
+  resource action.
 - Canonical host request-context/executor contracts and current-principal tool
   bridge. Registered tool execution now returns a bounded
   `AiToolExecutionResult` only after fresh tool policy, ordinary resolver
@@ -288,9 +294,6 @@ production-ready behavior.
   and provider-persistent-file retention workflows. Principal-inbox pruning
   and bounded per-session provisional-delta/message-content pruning are
   implemented; their reports do not claim complete erasure.
-- Durable validated UI-intent session-event persistence and delivery. The
-  exact registry/schema validation contract is implemented; hosts must not
-  deliver unvalidated model output in the meantime.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
@@ -341,9 +344,8 @@ production-ready behavior.
 
 1. Continue the bounded deleting-session/raw-payload/audit retention workers
    without exposing private ORM records or accepting generic database URLs.
-2. Add durable validated UI-intent event delivery and hierarchical rule
-   narrowing without allowing lower scopes to widen tool, egress, or budget
-   policy.
+2. Add hierarchical rule narrowing without allowing lower scopes to widen
+   tool, egress, provider, approval, or budget policy.
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image

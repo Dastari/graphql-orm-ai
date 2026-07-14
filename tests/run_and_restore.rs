@@ -59,6 +59,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_budget_policy_count: 0,
         invalid_pricing_policy_count: 0,
         invalid_skill_catalog_count: 0,
+        invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
         stream_gap_count: 1,
@@ -105,11 +106,15 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_budget_policy_count: 1,
         invalid_pricing_policy_count: 1,
         invalid_skill_catalog_count: 1,
+        invalid_ui_intent_event_count: 1,
         invalid_session_retention_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 9);
-    assert_eq!(plan.readiness_report_after_apply(true).fatal_issue_count, 9);
+    assert_eq!(plan.fatal_issue_count(), 10);
+    assert_eq!(
+        plan.readiness_report_after_apply(true).fatal_issue_count,
+        10
+    );
 }

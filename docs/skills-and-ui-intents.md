@@ -108,20 +108,51 @@ For example, a consumer might privately register
 logical idea differently without changing this crate. Product-specific type
 names and route mappings belong only in the consumer.
 
-Validated intent persistence and delivery through durable session events are
-not yet implemented. Until that lands, hosts must not serialize unvalidated
-model output into chat events or frontend commands.
+`OrmAiUiIntentDeliveryService` persists a provider-produced suggestion only
+when all of the following remain true:
+
+- the result belongs to the exact running session/run/attempt/generation and
+  contains no application-tool call;
+- its normalized events form one ordered response-start, visible-text, usage,
+  and response-completion sequence with exact response and usage identity;
+- the complete visible text is one bounded, deny-unknown-field camelCase
+  envelope containing only `formatVersion`, `intentType`, and `payload`;
+- the immutable catalog still contains the exact type and descriptor
+  fingerprint, and the payload passes that JSON Schema;
+- the session is active and bound to the exact owner, scope, and tenant;
+- current session/scope write authority and the exact protection policy pass
+  both before and after content protection;
+- the provider usage has an exact committed budget reservation for the same
+  provider, model, run, attempt, generation, principal, scope, and usage; and
+- the worker lease remains current at the committing transaction.
+
+Success atomically advances the session stream and run fence, appends a
+protected `ui_intent_suggested` session event, appends a protected event to the
+owner's principal inbox, and records a redacted audit fact. The source-bound
+event IDs make an exact retry idempotent. Reasoning, tools, built-ins,
+citations, unknown events, extra envelope fields, missing budget evidence, and
+stale/swapped bindings fail closed.
+
+The normal orchestration order is: persist protected assistant output, pass
+its renewed lease to UI-intent delivery, and pass the delivery result's
+renewed lease to completion or the next fenced write. The returned
+`AiPersistedUiIntent` proves schema validation and durable persistence only.
+It does not authorize a referenced resource or frontend action.
 
 ## Persistent format and restore
 
 AI schema module `0.24.0` gives the existing skill/version fields strict v1
-meaning. The format uses deny-unknown-field JSON wrappers and a canonical
+meaning. Module `0.25.0` additionally gives existing session/inbox event rows
+the strict protected UI-intent delivery meaning described above. The skill
+format uses deny-unknown-field JSON wrappers and a canonical
 SHA-256 checksum over plaintext instructions plus all security-relevant
 metadata and provenance. The protected envelope itself is also bound to the
 exact version row, field, and scope by the content-protection contract.
 
 Restore validation must keep the runtime closed when a skill row or its
 current version is malformed, missing, mismatched, or uses an unsupported
-format. Skill selection must not resume until reconciliation succeeds. See
-the [migration guide](../MIGRATION.md) for handling private rows created before
-the strict catalog service existed.
+format, or when a UI-intent event pair cannot prove its exact protected
+payload, source binding, committed budget, owner/scope, and audit linkage.
+Skill selection and event delivery must not resume until reconciliation
+succeeds. See the [migration guide](../MIGRATION.md) for handling private rows
+created before these strict services existed.

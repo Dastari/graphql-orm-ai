@@ -75,6 +75,8 @@ mod orm_subscriptions;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_tools;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_ui_intents;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_usage;
 mod persistence;
 mod pricing;
@@ -151,6 +153,8 @@ pub use orm_subscriptions::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_tools::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_ui_intents::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_usage::*;
 pub use persistence::{
     AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
@@ -205,12 +209,13 @@ pub mod prelude {
         AiProviderCallLimits, AiProviderOutputLimits, AiProviderUsageAccounting,
         AiReadOnlyAgentCoordinator, AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan,
         AiReadOnlyAgentTurnPlanner, AiRequestedConsequentialToolCall, AiRunServiceLimits,
-        AiSessionRetentionLimits, OrmAiApplicationToolCallService, OrmAiApprovalService,
-        OrmAiAttachmentService, OrmAiBudgetService, OrmAiConsequentialToolCallService,
-        OrmAiCoordinatorCheckpointService, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
-        OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
+        AiSessionRetentionLimits, AiUiIntentDeliveryLimits, AiUiIntentDeliveryService,
+        OrmAiApplicationToolCallService, OrmAiApprovalService, OrmAiAttachmentService,
+        OrmAiBudgetService, OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
+        OrmAiEgressDecisionAudit, OrmAiInboxPruningService, OrmAiInboxService,
+        OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
         OrmAiProviderOutputService, OrmAiRunService, OrmAiSessionRetentionService,
-        OrmAiSkillCatalogService, OrmAiUsageService,
+        OrmAiSkillCatalogService, OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

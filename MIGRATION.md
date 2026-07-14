@@ -4,6 +4,53 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: durable validated UI-intent suggestions (crate 0.26.0 to 0.27.0; schema 0.24.0 to 0.25.0)
+
+Apply AI schema module `0.25.0` while AI workers, subscriptions, backups, and
+restore callbacks are closed. Do not run 0.27.0 code against a module still
+registered as 0.24.0. The generated migration adds no table, column, index,
+constraint, or entity and still owns 39 private records. It advances the
+module because existing session/inbox event rows now have a strict protected
+`ui_intent_suggested` semantic bound to an exact provider result, descriptor,
+committed budget reservation, owner/scope, audit fact, and run fence. No raw
+SQL or consumer-owned data access is introduced.
+
+New public Rust APIs are `AiPersistedUiIntent`,
+`AiUiIntentDeliveryService`, `AiUiIntentDeliveryLimits`, and
+`OrmAiUiIntentDeliveryService`. Construct the ORM service with the same fenced
+run service, current-principal resolver, session/scope access policy,
+content-protection policy/protector, trusted clock, and immutable UI-intent
+catalog used by the worker. Delivery consumes an exact
+`AiUiIntentTypeBinding`; catalog registration alone is not enablement or
+authorization.
+
+For a provider turn that returns a UI-intent envelope, persist the ordinary
+protected assistant output first, pass its renewed lease to UI-intent delivery,
+then pass the delivery result's renewed lease to the next fenced write or run
+completion. The provider-visible text must be exactly one camelCase object:
+`{"formatVersion":1,"intentType":"…","payload":{…}}`. The normalized
+event stream must contain one ordered start, usage, and completion; hidden
+reasoning, tool calls, built-ins, citations, unknown events, extra envelope
+fields, stale fingerprints, schema-invalid payloads, mismatched response/usage
+evidence, or absent committed budget proof fail closed. Exact retries return
+the existing event without advancing either stream or fence twice.
+
+Restore snapshot producers must populate the new
+`AiRestoreSnapshotFacts::invalid_ui_intent_event_count`. Validate protected
+session/inbox event pairs, deterministic source and descriptor evidence,
+owner/scope linkage, the matching committed budget fact, and redacted audit.
+Any nonzero value emits fatal `AI_RESTORE_UI_INTENT_EVENT_INVALID` evidence and
+keeps the runtime closed. This additional public struct field is a pre-1.0
+source-breaking change for struct-literal producers.
+
+Existing 0.26.0 deployments have no crate-created UI-intent events because the
+delivery service did not exist. They need no row rewrite or consumer-data
+migration. If a private integration previously reused the
+`ui_intent_suggested` event name, treat those rows as unsupported legacy data
+and keep the runtime closed until its controlled restore/migration process has
+removed or replaced them; do not repair protected event payloads with
+application raw SQL. GraphQL SDL is unchanged.
+
 ## Unreleased: protected skills and typed UI intents (crate 0.25.0 to 0.26.0; schema 0.23.0 to 0.24.0)
 
 Apply AI schema module `0.24.0` while AI workers, backups, and restore callbacks

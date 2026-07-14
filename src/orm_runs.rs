@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
 use crate::persistence::*;
-use crate::{AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup};
+use crate::{AiBudgetAmounts, AiError, AiRunId, AiRunState, AiSessionId, AiSessionWakeup};
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
 const MAXIMUM_SAFE_CODE_BYTES: usize = 200;
@@ -341,6 +341,25 @@ pub(crate) struct PreparedLiveDeltaEvent {
     pub provider_kind: String,
     pub provider_model: String,
     pub budget_reservation_id: Uuid,
+    pub expected_owner_principal_kind: String,
+    pub expected_owner_subject: String,
+    pub expected_scope_kind: String,
+    pub expected_scope_id: String,
+    pub expected_tenant_id: Option<String>,
+}
+
+pub(crate) struct PreparedUiIntentEvent {
+    pub id: Uuid,
+    pub inbox_event_id: Uuid,
+    pub protected_payload: serde_json::Value,
+    pub protected_inbox_payload: serde_json::Value,
+    pub correlation_id: String,
+    pub provider_kind: String,
+    pub provider_model: String,
+    pub provider_response_id: Option<String>,
+    pub budget_reservation_id: Uuid,
+    pub usage: AiBudgetAmounts,
+    pub cached_input_tokens: u64,
     pub expected_owner_principal_kind: String,
     pub expected_owner_subject: String,
     pub expected_scope_kind: String,
@@ -1595,6 +1614,263 @@ impl OrmAiRunService {
             .map_err(map_transaction)
     }
 
+    pub(crate) async fn append_ui_intent_event(
+        &self,
+        lease: &AiRunLease,
+        event: PreparedUiIntentEvent,
+    ) -> Result<(AiRunLease, i64), AiError> {
+        if !valid_provider_kind(&event.provider_kind)
+            || !valid_provider_reference(&event.provider_model)
+            || event
+                .provider_response_id
+                .as_deref()
+                .is_some_and(|value| !valid_provider_reference(value))
+            || !valid_provider_reference(&event.correlation_id)
+            || event.expected_owner_principal_kind.trim().is_empty()
+            || event.expected_owner_subject.trim().is_empty()
+            || event.expected_scope_kind.trim().is_empty()
+            || event.expected_scope_id.trim().is_empty()
+        {
+            return Err(AiError::InvalidInput(
+                "invalid protected UI intent event".to_owned(),
+            ));
+        }
+        let now = canonical_second(self.clock.now());
+        let lease_ttl = self.limits.lease_ttl;
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiRunRecord>(&lease.run_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let stored_reference: PrincipalReference =
+                        serde_json::from_value(current.principal_reference.clone())
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || current.session_id != lease.session_id.0
+                        || current.input_message_id != lease.input_message_id
+                        || stored_reference != lease.principal_reference
+                        || current.attempt_id != Some(lease.attempt_id)
+                        || current.lease_owner.as_deref() != Some(lease.worker_id.as_str())
+                        || current.lease_generation != lease.lease_generation
+                        || current.retry_count != i64::from(lease.retry_count)
+                        || current.latest_checkpoint_id != lease.latest_checkpoint_id
+                        || current
+                            .lease_expires_at
+                            .is_none_or(|expiry| expiry <= now.unix_timestamp())
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    let checkpoint_id = current
+                        .latest_checkpoint_id
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let checkpoint = tx
+                        .query::<AiRunCheckpointRecord>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(checkpoint_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_one()
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    if checkpoint.run_id != lease.run_id.0
+                        || checkpoint.attempt_id != lease.attempt_id
+                        || checkpoint.lease_generation != lease.lease_generation
+                        || checkpoint.checkpoint_kind != "assistant_output_persisted"
+                        || checkpoint.provider_response_id != event.provider_response_id
+                        || checkpoint.budget_reservation_id != Some(event.budget_reservation_id)
+                        || checkpoint.assistant_message_id != Some(checkpoint_id)
+                        || checkpoint.protected_state.is_some()
+                        || checkpoint.checkpoint_hash
+                            != final_output_checkpoint_hash(
+                                lease.run_id,
+                                lease.attempt_id,
+                                lease.lease_generation,
+                                checkpoint_id,
+                                event.provider_response_id.as_deref(),
+                                event.budget_reservation_id,
+                            )
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    if let Some(existing) = tx
+                        .find_by_id::<AiSessionEventRecord>(&event.id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        let inbox = tx
+                            .find_by_id::<AiInboxEventRecord>(&event.inbox_event_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if lease.row_version.checked_add(1) != Some(current.row_version)
+                            || existing.session_id != lease.session_id.0
+                            || existing.event_type != "ui_intent_suggested"
+                            || existing.run_id != Some(lease.run_id.0)
+                            || existing.correlation_id != event.correlation_id
+                            || inbox.session_id != Some(lease.session_id.0)
+                            || inbox.event_type != "ui_intent_suggested"
+                            || inbox.principal_kind != event.expected_owner_principal_kind
+                            || inbox.principal_subject != event.expected_owner_subject
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        return Ok((lease_from_record(&current)?, existing.sequence));
+                    }
+                    if current.row_version != lease.row_version {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    let reservation = tx
+                        .find_by_id::<AiBudgetReservationRecord>(&event.budget_reservation_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if reservation.scope_kind != event.expected_scope_kind
+                        || reservation.scope_id != event.expected_scope_id
+                        || reservation.tenant_id != event.expected_tenant_id
+                        || reservation.principal_kind != event.expected_owner_principal_kind
+                        || reservation.principal_subject != event.expected_owner_subject
+                        || reservation.session_id != lease.session_id.0
+                        || reservation.run_id != lease.run_id.0
+                        || reservation.attempt_id != lease.attempt_id
+                        || reservation.lease_generation != lease.lease_generation
+                        || reservation.provider_kind != event.provider_kind
+                        || reservation.provider_model != event.provider_model
+                        || reservation.state != "committed"
+                        || reservation.reconciled_at.is_none()
+                        || !reservation_usage_matches(
+                            &reservation,
+                            event.usage,
+                            event.cached_input_tokens,
+                        )?
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if session.state != "active"
+                        || session.deleted_at.is_some()
+                        || session.owner_principal_kind != event.expected_owner_principal_kind
+                        || session.owner_subject != event.expected_owner_subject
+                        || session.scope_kind != event.expected_scope_kind
+                        || session.scope_id != event.expected_scope_id
+                        || session.tenant_id != event.expected_tenant_id
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let event_sequence = session
+                        .stream_head
+                        .checked_add(1)
+                        .filter(|sequence| *sequence <= i64::from(i32::MAX))
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if !matches!(
+                        tx.compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput::default(),
+                            UpdateAiSessionRecordInput {
+                                stream_head: Some(event_sequence),
+                                last_activity_at: Some(now.unix_timestamp()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?,
+                        ConditionalUpdateOutcome::Updated(_)
+                    ) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let expiry = now
+                        .checked_add(lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let updated_run = match tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(AiRunState::Running.as_str()),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                        id: event.id,
+                        session_id: session.id,
+                        sequence: event_sequence,
+                        event_type: "ui_intent_suggested".to_owned(),
+                        run_id: Some(lease.run_id.0),
+                        causation_id: Some(lease.input_message_id.to_string()),
+                        correlation_id: event.correlation_id.clone(),
+                        protected_payload: event.protected_payload,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.queue_event(AiSessionWakeup {
+                        session_id: session.id,
+                        sequence: event_sequence,
+                    });
+                    append_inbox_event(
+                        tx,
+                        PreparedAiInboxEvent {
+                            id: event.inbox_event_id,
+                            principal_kind: event.expected_owner_principal_kind,
+                            principal_subject: event.expected_owner_subject.clone(),
+                            scope: crate::AiScope {
+                                kind: event.expected_scope_kind,
+                                id: event.expected_scope_id,
+                                tenant_id: event.expected_tenant_id,
+                            },
+                            session_id: session.id,
+                            event_type: "ui_intent_suggested".to_owned(),
+                            protected_payload: event.protected_inbox_payload,
+                            created_at: now.unix_timestamp(),
+                        },
+                    )
+                    .await?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: reservation.principal_kind,
+                        actor_subject: event.expected_owner_subject,
+                        action: "ai.ui_intent.persist".to_owned(),
+                        resource_kind: "ai_ui_intent".to_owned(),
+                        resource_reference: event.id.to_string(),
+                        outcome: "allowed".to_owned(),
+                        reason_code: "validated_ui_intent_suggested".to_owned(),
+                        correlation_id: event.correlation_id,
+                        causation_id: Some(lease.input_message_id.to_string()),
+                        policy_version: None,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok((lease_from_record(&updated_run)?, event_sequence))
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
     pub(crate) async fn begin_tool_call(
         &self,
         lease: &AiRunLease,
@@ -2538,6 +2814,25 @@ fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmPublicError>
 fn persisted_state(record: &AiRunRecord) -> Result<AiRunState, OrmPublicError> {
     AiRunState::from_persisted(&record.state)
         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))
+}
+
+fn reservation_usage_matches(
+    reservation: &AiBudgetReservationRecord,
+    usage: AiBudgetAmounts,
+    cached_input_tokens: u64,
+) -> Result<bool, OrmPublicError> {
+    let as_i64 = |value: u64| {
+        i64::try_from(value).map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))
+    };
+    Ok(
+        reservation.actual_input_tokens == Some(as_i64(usage.input_tokens)?)
+            && reservation.actual_cached_input_tokens == Some(as_i64(cached_input_tokens)?)
+            && reservation.actual_output_tokens == Some(as_i64(usage.output_tokens)?)
+            && reservation.actual_tool_units == Some(as_i64(usage.tool_units)?)
+            && reservation.actual_image_units == Some(as_i64(usage.image_units)?)
+            && reservation.actual_cost_microunits == Some(as_i64(usage.cost_microunits)?)
+            && reservation.actual_runs == Some(as_i64(usage.runs)?),
+    )
 }
 
 async fn append_attempt_outcome(

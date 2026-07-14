@@ -1003,6 +1003,63 @@ impl AiProviderCallResult {
             replay_tool_transfers: Vec::new(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_ui_intent_result(
+        lease: &AiRunLease,
+        budget_reservation_id: AiBudgetReservationId,
+        envelope: serde_json::Value,
+    ) -> Self {
+        let model = "ui-intent-test-model".to_owned();
+        Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind: ProviderKind::OpenAi,
+            provider_model: model.clone(),
+            events: vec![
+                ProviderEvent::ResponseStarted {
+                    response_id: Some("ui-intent-response".to_owned()),
+                },
+                ProviderEvent::TextDelta {
+                    text: envelope.to_string(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("ui-intent-response".to_owned()),
+                },
+            ],
+            usage: AiBudgetAmounts {
+                input_tokens: 1,
+                output_tokens: 1,
+                runs: 1,
+                ..AiBudgetAmounts::default()
+            },
+            cached_input_tokens: 0,
+            provider_response_id: Some("ui-intent-response".to_owned()),
+            budget_reservation_id,
+            previous_response_id: None,
+            previous_continuation_reference: None,
+            tool_calls: Vec::new(),
+            request_snapshot: ModelRequest {
+                model,
+                instructions: Vec::new(),
+                input: Vec::new(),
+                continuation: None,
+                continuation_mode: ModelContinuationMode::StatelessReplay,
+                tools: Vec::new(),
+                builtin_tools: Vec::new(),
+                output_schema: None,
+                maximum_output_tokens: Some(256),
+            },
+            replay_tool_transfers: Vec::new(),
+        }
+    }
 }
 
 /// Security-ordered executor for one provider turn.

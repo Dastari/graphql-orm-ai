@@ -5,10 +5,10 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.26.0` and the
-AI schema module to `0.24.0`. No table, column, index, constraint, or entity is
-added; the module version changes because existing skill/version fields now
-have a strict protected publication, checksum, policy, and restore meaning.
+This development line advances the pre-1.0 crate version to `0.27.0` and the
+AI schema module to `0.25.0`. No table, column, index, constraint, or entity is
+added; the module version changes because existing session/inbox event fields
+now carry a strict fenced UI-intent suggestion and restore meaning.
 
 ### Added
 
@@ -25,6 +25,14 @@ have a strict protected publication, checksum, policy, and restore meaning.
   display metadata, and exact skill bindings. Validated intents are suggestions
   only; the crate contains no route, URL, component, callback, or navigation
   implementation.
+- `AiUiIntentDeliveryService` and `OrmAiUiIntentDeliveryService` for durable
+  provider-produced logical suggestions. Delivery accepts one strict visible
+  JSON envelope from an exact completed tool-free provider result, validates
+  its registered type/schema/fingerprint, rehydrates current scope/session
+  authority before and after protection, proves exact committed usage, and
+  atomically appends protected session and principal-inbox events, redacted
+  audit, and a renewed run fence. Exact retries are idempotent and still grant
+  no route, resource, or navigation authority.
 
 - A feature-gated, explicitly profiled OpenAI-compatible Responses/SSE
   adapter. Construction fixes one normalized endpoint, provider-profile ID,
@@ -73,9 +81,10 @@ have a strict protected publication, checksum, policy, and restore meaning.
   Unknown stored fields/formats, duplicate bindings, swapped scope/current
   version/provenance, checksum mismatch, stale UI-intent fingerprints, and
   schema-invalid intent payloads fail closed. Restore facts now classify an
-  invalid skill catalog as fatal start-gate evidence. Durable intent event
-  delivery is not yet enabled, so unvalidated model output must not be sent to
-  frontends.
+  invalid skill catalog or UI-intent event pair as fatal start-gate evidence.
+  UI-intent delivery additionally rejects reasoning, tool/built-in/citation/
+  unknown events, malformed event order, mismatched usage/response identity,
+  missing budget proof, stale authority, and stale fences.
 
 - Compatible endpoints remain behind the deployment-owned endpoint policy;
   URL syntax validation and redirect denial do not claim DNS-rebinding or

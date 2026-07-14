@@ -54,6 +54,9 @@ below are still being implemented.
 - A default-deny logical UI-intent registry with JSON Schema 2020-12 payload
   validation and exact descriptor fingerprints. Validated intents are
   suggestions only; consumers own resource reauthorization and route mapping.
+  Exact provider envelopes can be durably delivered as protected session and
+  principal-inbox events only after current authority, committed usage, and
+  the current worker fence are all re-proven.
 - Fresh `agql-auth` principal rehydration before application tools, with the
   host's ordinary GraphQL context, resolver authorization, row policy,
   assurance, rate limits, and audit remaining authoritative.
@@ -268,8 +271,8 @@ planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
 implemented through authenticated, optionally PascalCase GraphQL roots.
 Protected immutable skill publication/resolution and exact schema-fingerprinted
-logical UI-intent validation are implemented as separately composable,
-project-neutral contracts; durable intent event delivery remains pending.
+logical UI-intent validation and fenced durable delivery are implemented as
+separately composable, project-neutral contracts.
 
 Production blockers include provider-turn and partial-tool-batch adoption, a
 top-level supervised approval-wait coordinator, authoritative built-in-tool

@@ -130,6 +130,17 @@ client data. Retention is recent-MFA/CAS/audit managed and deletes only a
 contiguous prefix under current scope policies. A missing policy, cursor gap,
 or concurrent stream change fails closed instead of guessing.
 
+A UI intent is a protected logical suggestion, never frontend authority. The
+durable delivery service accepts only an exact registered descriptor binding
+and one strict visible provider JSON envelope after the ordinary assistant
+output checkpoint has committed. It rehydrates current write authority before
+and after protection, proves the exact committed budget usage and checkpoint
+hash, then advances session/inbox streams and the worker fence atomically.
+Hidden reasoning, tools, built-ins, citations, unknown or misordered events,
+stale schemas, and response/usage mismatches are rejected. The frontend must
+still reauthorize referenced resources and map logical types through its own
+code; no event grants navigation or application mutation authority.
+
 Session retention is not a user capability and does not execute application
 resolvers. The trusted worker uses only generated ORM repositories, validates
 deployment hard bounds, and reloads the exact current GraphQL-managed scope

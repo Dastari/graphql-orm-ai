@@ -2,12 +2,16 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AiError;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::{AiProviderCallResult, AiRunLease};
 
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_INTENT_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -200,6 +204,73 @@ pub struct ValidatedAiUiIntent {
     pub binding: AiUiIntentTypeBinding,
     /// Validated structured payload.
     pub payload: serde_json::Value,
+}
+
+/// Durable result of one fenced UI-intent suggestion event.
+///
+/// The returned value proves schema validation and durable event persistence,
+/// not resource authorization or frontend navigation permission.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[derive(Clone, Debug)]
+pub struct AiPersistedUiIntent {
+    intent: ValidatedAiUiIntent,
+    event_sequence: i64,
+    lease: AiRunLease,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+impl AiPersistedUiIntent {
+    /// Returns the schema-validated logical suggestion.
+    pub fn intent(&self) -> &ValidatedAiUiIntent {
+        &self.intent
+    }
+
+    /// Returns its durable per-session event sequence.
+    pub const fn event_sequence(&self) -> i64 {
+        self.event_sequence
+    }
+
+    /// Returns the renewed run lease required for the next fenced write.
+    pub fn lease(&self) -> &AiRunLease {
+        &self.lease
+    }
+
+    /// Consumes the result and returns the renewed lease.
+    pub fn into_lease(self) -> AiRunLease {
+        self.lease
+    }
+
+    pub(crate) fn new(intent: ValidatedAiUiIntent, event_sequence: i64, lease: AiRunLease) -> Self {
+        Self {
+            intent,
+            event_sequence,
+            lease,
+        }
+    }
+}
+
+/// Fenced backend delivery for an exact provider-produced UI-intent envelope.
+///
+/// Implementations must parse only the exact visible provider output, validate
+/// it against the registered descriptor and binding, reauthorize the current
+/// principal, protect the payload, and commit through the current run fence.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[async_trait]
+pub trait AiUiIntentDeliveryService: Send + Sync {
+    /// Persists one exact provider-produced logical suggestion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale/swapped provider result or lease,
+    /// unregistered/stale descriptor binding, malformed or schema-invalid
+    /// output, denied current authority, unready protection, missing committed
+    /// budget proof, stale fence, or persistence failure.
+    async fn persist_provider_suggestion(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        binding: &AiUiIntentTypeBinding,
+    ) -> Result<AiPersistedUiIntent, AiError>;
 }
 
 /// Immutable host registry for logical UI-intent schemas.
