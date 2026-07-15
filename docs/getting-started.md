@@ -102,19 +102,28 @@ camelCase to PascalCase.
    uncertain tool authority, ambiguous artifact/provider files, other
    append-only facts, runs, or the session shell; see the
    [retention guide](session-retention.md).
-13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
+13. Construct `OrmAiContextCompactionService` from the same fenced run,
+   current-principal, owner/scope access, content-protection, and clock
+   dependencies. Call `prepare` only for a running lease and a boundary that
+   leaves the configured recent tail. Build the ordinary provider-call plan
+   from its exact request and `Restricted` `egress_sources` with purpose
+   `context_compaction`; execute through `AiProviderCallExecutor`, then pass
+   that exact result to `persist` and carry the renewed lease. Treat a loaded
+   summary as untrusted model content. See
+   [protected context compaction](context-compaction.md).
+14. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;
    exact-scope reporting needs separate administrative authorization.
-14. Opt into budget-policy mutations with
+15. Opt into budget-policy mutations with
    `OrmAiConfigurationService::with_budget_policy_management`, using deployment
    ceilings no broader than operational spend policy. Authorize reads and
    writes independently; writes require recent MFA.
-15. Construct `OrmAiPricingService` with an independent configuration access
+16. Construct `OrmAiPricingService` with an independent configuration access
    policy, recent-MFA policy, trusted clock, and
    `AiPricingCatalogManagementLimits`. Install the same instance as
    `Arc<dyn AiPricingCatalogService>`, `Arc<dyn AiPricingQuoteService>`, and
    `Arc<dyn AiProviderUsageAccounting>` when using its token-only accounting.
-16. Apply/validate migrations and restore reconciliation, then open the runtime
+17. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
 For Ollama, configure one fixed root origin, apply host/DNS/network isolation,

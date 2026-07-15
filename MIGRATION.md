@@ -4,6 +4,79 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: protected context compaction (crate 0.43.0 to 0.44.0; schema 0.41.0 to 0.42.0)
+
+Apply AI schema module `0.42.0` while session, run, provider, compaction,
+retention, backup/restore, and runtime workers are closed. Do not run 0.44.0
+code against a module still registered as 0.41.0. The generated migration
+keeps 39 private entities and adds no table, column, index, constraint, or row
+rewrite. It changes private generated insert metadata so the trusted context-
+checkpoint writer supplies the primary key before protecting its payload, and
+advances the module because exact checkpoint coverage and ordinary-retention
+invalidation are new persistent semantics. No consumer schema, application
+SQL, protected-value copy, or data migration is required.
+
+The new `OrmAiContextCompactionService::prepare` operation requires a current
+running `AiRunLease`, rehydrates its principal, rechecks owner/session/scope
+write access, resolves current content protection, and renews the fence. The
+requested boundary must advance the latest valid checkpoint, cover a complete
+contiguous message range within hard message/block/byte bounds, and leave at
+least `minimum_recent_messages` verbatim. A subsequent checkpoint may use the
+latest protected summary as its parent and adds only the next exact contiguous
+message segment. The prepared provider request contains sensitive opened
+content and must remain inside the trusted backend.
+
+Hosts construct the ordinary `AiProviderCallPlan` from
+`AiPreparedContextCompaction::model_request`. Its single model-inference
+manifest must use purpose `context_compaction`, the exact
+`egress_sources`, the returned session/run/scope/provider/model, and byte/token
+estimates no smaller than the prepared values. All message blocks and parent
+summaries are conservatively classified `Restricted`; user messages retain
+`UserProvided` trust and assistant/summary sources remain
+`ExternalUntrusted`. The ordinary provider executor still supplies fresh
+principal authorization, exact egress decision/audit, atomic budget
+reservation, transport uncertainty, and authoritative usage settlement.
+
+Pass only that executor's `AiProviderCallResult` to `persist`. Persistence
+rejects a swapped fence/request/provider/model/manifest, custom or built-in
+tools, non-visible event kinds, empty/oversized summary text, nonpositive
+committed output usage, stale parent lineage, changed message/block rows, and
+checkpoint lookahead overflow. The final state-machine transaction re-proves
+every source and the current running lease before inserting a protected
+payload containing the chained source hash, direct message/block provenance,
+parent reference, and run/attempt/budget evidence. Carry the returned renewed
+lease into the next run operation. `load_latest` likewise renews and
+reauthorizes before opening the latest valid summary; loaded summary text is
+untrusted model output and never grants tool, resolver, egress, or replay
+authority.
+
+Ordinary message retention now invalidates coverage by physically deleting
+every checkpoint whose `through_sequence` could include an eligible expiring
+message before scrubbing the message in the same transaction. The checkpoint
+query uses one-row lookahead; an over-bound set blocks the message without any
+partial deletion. Deleting-session retention keeps its stronger existing
+context-before-content page ordering. `AiSessionRetentionReport` adds
+`context_checkpoints_invalidated`; downstream exhaustive literals must
+initialize it or use `..Default::default()`.
+
+`AiRestoreSnapshotFacts` adds the serde-defaulted but Rust-source-breaking
+`invalid_context_checkpoint_count`. Restore collectors must validate exact
+prefix and parent lineage, 64-character lowercase source hashes, protected
+payload associated identity, direct provenance ordering, positive token
+observation, provider/model metadata, run/attempt/generation and committed
+budget evidence, plus retention-invalidated rows. Any invalid row increments
+that count and keeps readiness closed. Existing serialized restore facts
+default the new count to zero, but trusted collectors must populate it after
+upgrading.
+
+Existing private checkpoint rows were never produced by a supported service.
+The new reader refuses legacy or malformed payloads; deployments that contain
+such rows must classify them through restore preflight and remove/rebuild them
+under their reviewed maintenance process before opening the runtime. This is a
+pre-1.0 public Rust API, private schema-metadata, restore, provider-orchestration,
+and retention-behavior change. It changes no public GraphQL SDL, Cargo feature
+or default, table/entity count, append-only policy, or dependency revision.
+
 ## Unreleased: attachment-artifact retention (crate 0.42.0 to 0.43.0; schema 0.40.0 to 0.41.0)
 
 Apply AI schema module `0.41.0` while session-retention, attachment-cleanup,

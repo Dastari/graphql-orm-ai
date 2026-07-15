@@ -31,6 +31,11 @@ waits without polling, resuming, or executing them.
 - Multiple owner-isolated, archivable chat sessions per principal with
   protected message blocks, stable pagination, idempotent send, and resumable
   session-event subscriptions designed for virtualized frontends.
+- Protected bounded context compaction that renews the run fence, rehydrates
+  authority, opens only a contiguous prefix segment, binds exact
+  message/block/parent provenance and a chained source hash, and persists only
+  an exact ordinary-provider result with committed budget and exact egress
+  evidence. Recent messages remain verbatim and summary text stays untrusted.
 - A durable per-principal cross-session inbox with atomic lifecycle/message/
   assistant-output notifications, bounded catch-up, resumable subscriptions,
   periodic current-principal reauthorization, explicit retention-gap reset,
@@ -42,7 +47,9 @@ waits without polling, resuming, or executing them.
   final-output/tool dependency, and current-pointer proof. After the deleting-
   session cutoff it purges all bounded protected session events and deletes
   bounded protected context-summary checkpoints before they can outlive
-  covered content, tombstones only terminal
+  covered content. Ordinary message retention also physically invalidates
+  every covering checkpoint before scrubbing its source. The deleting flow
+  tombstones only terminal
   proposal/item payloads under whole-session bounds, tombstone only exactly
   linked terminal tool/approval payloads after a complete bounded authority
   proof, coordinate attachment artifacts before their parents through
@@ -351,6 +358,8 @@ See [session retention](docs/session-retention.md) for the bounded deletion and
 tombstone contract. See [protected live streaming](docs/live-streaming.md) for
 the opt-in sink, provisional-event contract, client reconciliation rules, and
 failure model.
+See [protected context compaction](docs/context-compaction.md) for exact source,
+provider, budget, persistence, retention, and restore binding.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 

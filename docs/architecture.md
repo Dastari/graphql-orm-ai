@@ -195,6 +195,33 @@ reasoning continuation require their complete preview, approval,
 fresh-authorization, persistence, and reconciliation contracts before
 exposure.
 
+## Context compaction
+
+Context compaction is a narrow client of the same provider-turn boundary, not
+a second model transport. `OrmAiContextCompactionService::prepare` renews a
+running lease, rehydrates owner/scope authority, opens one exact contiguous
+message segment after the latest valid protected checkpoint, and returns a
+sensitive fixed-instruction request plus an exact conservative source set.
+The host builds the ordinary provider plan, egress manifest, and budget request
+and executes them through `AiProviderCallExecutor`.
+
+Persistence compares the private provider result to the complete prepared
+request, source manifest, provider/model, and run fence. It accepts visible
+summary text only. One final state-machine transaction compares every parent,
+message, and ordered block to the prepared snapshot before inserting a
+protected summary with chained SHA-256 coverage, direct provenance, and
+run/attempt/generation/budget evidence. A competing checkpoint, retention
+pass, lease change, or source mutation fails closed.
+
+Later context assembly may use only the latest valid opened checkpoint, then
+append recent verbatim messages and the current user input. Summary text and
+assistant sources retain `ExternalUntrusted` trust and do not become runtime
+instructions. Ordinary retention physically deletes all checkpoints whose
+prefix could cover an expiring message in the same transaction before source
+scrubbing; deleting-session retention deletes checkpoint pages first. Restore
+preflight treats malformed coverage, lineage, protection, provider/budget, or
+retention state as fatal.
+
 ## Proposal and approval staging
 
 The ORM proposal service accepts only catalog-validated structured output and

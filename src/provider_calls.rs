@@ -822,6 +822,7 @@ pub struct AiProviderCallResult {
     previous_continuation_reference: Option<String>,
     tool_calls: Vec<AiProviderToolCall>,
     request_snapshot: ModelRequest,
+    model_inference_manifest: AiEgressManifest,
     replay_tool_transfers: Vec<AiEgressManifest>,
 }
 
@@ -1024,6 +1025,14 @@ impl AiProviderCallResult {
         &self.replay_tool_transfers
     }
 
+    pub(crate) fn request_snapshot(&self) -> &ModelRequest {
+        &self.request_snapshot
+    }
+
+    pub(crate) fn model_inference_manifest(&self) -> &AiEgressManifest {
+        &self.model_inference_manifest
+    }
+
     pub(crate) fn uses_stateless_continuation(&self) -> bool {
         self.request_snapshot.continuation_mode == ModelContinuationMode::StatelessReplay
     }
@@ -1218,6 +1227,10 @@ impl AiProviderCallResult {
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
+            model_inference_manifest: test_model_inference_manifest(
+                lease,
+                "coordinator-test-model",
+            ),
             replay_tool_transfers: Vec::new(),
         }
     }
@@ -1275,8 +1288,87 @@ impl AiProviderCallResult {
                 output_schema: None,
                 maximum_output_tokens: Some(256),
             },
+            model_inference_manifest: test_model_inference_manifest(lease, "ui-intent-test-model"),
             replay_tool_transfers: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_context_compaction_result(
+        lease: &AiRunLease,
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        model_inference_manifest: AiEgressManifest,
+        summary: impl Into<String>,
+    ) -> Self {
+        let provider_model = request.model.clone();
+        Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind,
+            provider_model,
+            events: vec![
+                ProviderEvent::ResponseStarted {
+                    response_id: Some("context-compaction-test-response".to_owned()),
+                },
+                ProviderEvent::TextDelta {
+                    text: summary.into(),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cached_input_tokens: 0,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("context-compaction-test-response".to_owned()),
+                },
+            ],
+            usage: AiBudgetAmounts {
+                input_tokens: 100,
+                output_tokens: 20,
+                runs: 1,
+                ..AiBudgetAmounts::default()
+            },
+            cached_input_tokens: 0,
+            provider_response_id: Some("context-compaction-test-response".to_owned()),
+            budget_reservation_id: AiBudgetReservationId::new(),
+            previous_response_id: None,
+            previous_continuation_reference: None,
+            tool_calls: Vec::new(),
+            request_snapshot: request,
+            model_inference_manifest,
+            replay_tool_transfers: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressManifest {
+    AiEgressManifest {
+        provider_profile_id: "test-profile".to_owned(),
+        provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+        model: model.to_owned(),
+        destination: "test-destination".to_owned(),
+        destination_trust: crate::AiDestinationTrust::ManagedProvider,
+        capability: AiEgressCapability::ModelInference,
+        scope: AiScope {
+            kind: "test".to_owned(),
+            id: "test".to_owned(),
+            tenant_id: None,
+        },
+        session_id: Some(lease.session_id()),
+        run_id: Some(lease.run_id()),
+        sources: Vec::new(),
+        estimated_bytes: 0,
+        estimated_tokens: 0,
+        attachment_count: 0,
+        purpose: "test".to_owned(),
+        retention: "test".to_owned(),
+        residency: None,
+        policy_version: "test".to_owned(),
+        consent_reference: None,
     }
 }
 
@@ -1561,6 +1653,12 @@ impl AiProviderCallExecutor {
         let live_provider_kind = plan.provider_kind.clone();
         let builtin_tools = plan.request.builtin_tools.clone();
         let request_snapshot = plan.request.clone();
+        let model_inference_manifest = plan
+            .transfers
+            .iter()
+            .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+            .cloned()
+            .ok_or(AiError::EgressDenied)?;
         let previous_response_id =
             plan.request
                 .continuation
@@ -1839,6 +1937,7 @@ impl AiProviderCallExecutor {
             previous_continuation_reference,
             tool_calls,
             request_snapshot,
+            model_inference_manifest,
             replay_tool_transfers,
         })
     }

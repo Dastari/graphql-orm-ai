@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.41.0`) and 39 private records
+- AI schema-module identity (currently version `0.42.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -284,7 +284,9 @@ production-ready behavior.
   `deleting`/`deleted_at` session reaches
   `deleted_content_purge_seconds`, bounded passes delete every
   protected session event kind, then exhaust independently bounded protected
-  context-summary checkpoint pages. A whole-session lookahead proof then
+  context-summary checkpoint pages. Ordinary message retention first
+  physically invalidates every covering context checkpoint under a complete
+  lookahead proof. A whole-session lookahead proof then
   tombstones protected proposal/item content only for terminal outcomes and
   terminal owning runs; accepted proposals without a trusted applied outcome
   stay blocked. A later whole-session proof tombstones protected tool
@@ -307,6 +309,18 @@ production-ready behavior.
   event gaps request a client reset, ambiguous artifacts and unsafe
   dependencies remain blocked, and all other append-only security facts stay
   non-purgeable.
+- Protected context compaction under a current running lease. Preparation
+  rehydrates principal/owner/scope authority, renews the complete fence, opens
+  only one exact contiguous message segment after the latest valid checkpoint,
+  leaves a configured recent tail verbatim, and returns a sensitive provider
+  request plus exact `Restricted` source manifest. Persistence accepts only the
+  matching ordinary provider result with committed budget and exact
+  `context_compaction` egress evidence, rejects non-visible/tool output, and
+  transactionally re-proves every parent/message/block before inserting the
+  protected summary, chained hash, provenance, and fence/budget evidence.
+  Latest-valid loading reauthorizes and validates lineage; Debug is redacted,
+  stale sources/parents/fences and over-bound sets remain closed. Restore adds
+  a fatal context-checkpoint integrity count.
 - Project-neutral hierarchical rule management and runtime resolution through
   generated ORM operations. Host-derived application/tenant-project/user
   lineages intersect immutable deployment ceilings and every explicit exact
@@ -431,8 +445,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Implement protected bounded context-summary/compaction checkpoints with
-   exact source coverage/hash and invalidation after retention or deletion.
+1. Add remaining retention/telemetry contracts, including complete deletion-
+   lifecycle closure and reviewed operational telemetry sinks.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -460,7 +474,8 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  public PR base; the current crate/schema versions are `0.43.0`/`0.41.0`.
+  public PR base through 0.43.0; the working crate/schema versions are
+  `0.44.0`/`0.42.0` pending this slice's full verification.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

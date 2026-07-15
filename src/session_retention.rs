@@ -25,6 +25,9 @@ pub struct AiSessionRetentionReport {
     pub deleting_session_events_deleted: u32,
     /// Protected context-summary checkpoints deleted before message scrubbing.
     pub deleting_session_context_checkpoints_deleted: u32,
+    /// Context-summary checkpoints invalidated by physical deletion before an
+    /// ordinarily expired covered message is scrubbed.
+    pub context_checkpoints_invalidated: u32,
     /// Terminal proposal payloads scrubbed after their context dependencies.
     pub deleting_session_proposal_payloads_purged: u32,
     /// Terminal tool-call payloads scrubbed after proposal dependencies.

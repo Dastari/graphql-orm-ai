@@ -88,6 +88,11 @@ pub struct AiRestoreSnapshotFacts {
     /// Protected coordinator checkpoints with invalid v2 rule fingerprint,
     /// cumulative usage, scope, fence, or current-lineage binding.
     pub invalid_coordinator_checkpoint_count: u64,
+    /// Context-summary checkpoints with invalid exact prefix coverage, source
+    /// hash/provenance, parent lineage, protection envelope, provider/budget
+    /// evidence, or retention invalidation state.
+    #[serde(default)]
+    pub invalid_context_checkpoint_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
     pub invalid_ui_intent_event_count: u64,
@@ -262,6 +267,13 @@ impl AiRestoreReconciler {
         if facts.invalid_coordinator_checkpoint_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_COORDINATOR_CHECKPOINT_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_context_checkpoint_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_CONTEXT_CHECKPOINT_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

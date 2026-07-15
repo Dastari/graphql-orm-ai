@@ -222,11 +222,17 @@ Message content is scrubbed only when all of these are true:
   bounded set of ordered blocks;
 - the linked run belongs to the same session and is terminal;
 - no attachment row references the message; and
+- every context checkpoint whose exact prefix could cover the message fits the
+  independent checkpoint lookahead bound; and
 - the message CAS version still matches.
 
-The transaction clears the protected preview, deletes exact block rows, writes
-`content_purged_at`, sets `block_count` to zero, and appends a redacted audit
-fact. Any failure rolls back the whole session change.
+Before touching the message, ordinary retention physically deletes every
+checkpoint with `through_sequence >= message.sequence`. The query includes a
+one-row lookahead; an over-bound set blocks the message and deletes no
+checkpoint. The same transaction then clears the protected preview, deletes
+exact block rows, writes `content_purged_at`, sets `block_count` to zero, and
+appends a redacted audit fact. Any failure rolls back the whole session change.
+`context_checkpoints_invalidated` reports the exact covering rows removed.
 
 Run-checkpoint purge starts only in a later pass that proves no protected
 session event, context checkpoint, proposal/item payload, tool/approval
@@ -290,12 +296,18 @@ resources require separate workers with their own dependency ordering,
 external delete confirmation, fencing, restore reconciliation, and audit
 contracts.
 
-Ordinary message-retention expiry does not yet delete context checkpoints. The
-context-compaction producer remains unimplemented and must stay disabled until
-its ordinary-retention invalidation and exact source-coverage contract lands.
+Protected context compaction and latest-valid selection are implemented by
+`OrmAiContextCompactionService`. A producer may be enabled only when it uses
+the exact prepared request/source manifest through the ordinary provider
+executor and carries the returned renewed run lease. See
+[protected context compaction](context-compaction.md). Ordinary retention now
+physically invalidates covering checkpoints before deleting source content;
+deleting-session retention retains its stronger page-before-content order.
 
 Restore collectors must distinguish validated retention gaps from corruption
-and must validate message, proposal, tool, approval, attachment, and artifact
-tombstone invariants, including exact terminal call/step/approval linkage and
-every artifact parent/cleanup/reference state. A nonzero
-`invalid_session_retention_count` is fatal and keeps runtime readiness closed.
+and must validate message, context checkpoint, proposal, tool, approval,
+attachment, and artifact invariants, including exact checkpoint prefix/parent/
+source-hash/provenance/budget evidence, terminal call/step/approval linkage,
+and every artifact parent/cleanup/reference state. A nonzero
+`invalid_context_checkpoint_count` or `invalid_session_retention_count` is
+fatal and keeps runtime readiness closed.

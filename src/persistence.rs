@@ -1506,6 +1506,7 @@ pub(crate) struct AiProposalItemRecord {
 )]
 pub(crate) struct AiContextCheckpointRecord {
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     #[filterable(type = "uuid")]
@@ -1846,7 +1847,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.41.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.42.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

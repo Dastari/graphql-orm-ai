@@ -8,7 +8,7 @@ use std::sync::Arc;
 use agql_auth::{Clock, PrincipalReference};
 use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
+use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
 use graphql_orm::graphql::orm::{
     ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, TransactionError,
     TransactionMode,
@@ -363,6 +363,29 @@ pub(crate) struct PreparedProviderOutput {
     pub provider_response_id: Option<String>,
     pub budget_reservation_id: Uuid,
     pub checkpoint_hash: String,
+    pub expected_owner_principal_kind: String,
+    pub expected_owner_subject: String,
+    pub expected_scope_kind: String,
+    pub expected_scope_id: String,
+    pub expected_tenant_id: Option<String>,
+}
+
+pub(crate) struct PreparedContextCheckpointSource {
+    pub message: AiMessageRecord,
+    pub blocks: Vec<AiMessageBlockRecord>,
+}
+
+pub(crate) struct PreparedContextCheckpoint {
+    pub id: Uuid,
+    pub through_sequence: i64,
+    pub source_hash: String,
+    pub token_estimate: i64,
+    pub provider_kind: String,
+    pub provider_model: String,
+    pub protected_summary: serde_json::Value,
+    pub expected_parent: Option<AiContextCheckpointRecord>,
+    pub sources: Vec<PreparedContextCheckpointSource>,
+    pub maximum_checkpoints_per_session: usize,
     pub expected_owner_principal_kind: String,
     pub expected_owner_subject: String,
     pub expected_scope_kind: String,
@@ -1475,6 +1498,199 @@ impl OrmAiRunService {
                         },
                     )
                     .await?;
+                    lease_from_record(&updated_run)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn append_context_checkpoint(
+        &self,
+        lease: &AiRunLease,
+        checkpoint: PreparedContextCheckpoint,
+    ) -> Result<AiRunLease, AiError> {
+        let now = canonical_second(self.clock.now());
+        let lease_ttl = self.limits.lease_ttl;
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || checkpoint.id.is_nil()
+                        || checkpoint.through_sequence <= 0
+                        || checkpoint.source_hash.len() != 64
+                        || !checkpoint
+                            .source_hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                        || checkpoint.token_estimate <= 0
+                        || checkpoint.provider_kind.trim().is_empty()
+                        || checkpoint.provider_model.trim().is_empty()
+                        || checkpoint.sources.is_empty()
+                        || !(1..=5_000).contains(&checkpoint.maximum_checkpoints_per_session)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&lease.session_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    if session.state != "active"
+                        || session.deleted_at.is_some()
+                        || session.message_head < checkpoint.through_sequence
+                        || session.owner_principal_kind != checkpoint.expected_owner_principal_kind
+                        || session.owner_subject != checkpoint.expected_owner_subject
+                        || session.scope_kind != checkpoint.expected_scope_kind
+                        || session.scope_id != checkpoint.expected_scope_id
+                        || session.tenant_id != checkpoint.expected_tenant_id
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    let checkpoint_limit =
+                        i64::try_from(checkpoint.maximum_checkpoints_per_session.saturating_add(1))
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
+                    let existing = tx
+                        .query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session.id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(checkpoint_limit)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if existing.len() > checkpoint.maximum_checkpoints_per_session {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let current_parent = existing
+                        .iter()
+                        .find(|candidate| candidate.invalidated_at.is_none());
+                    if current_parent != checkpoint.expected_parent.as_ref()
+                        || current_parent.is_some_and(|parent| {
+                            parent.through_sequence >= checkpoint.through_sequence
+                        })
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+
+                    let expected_start = current_parent
+                        .map_or(1, |parent| parent.through_sequence.saturating_add(1));
+                    let expected_source_count = checkpoint
+                        .through_sequence
+                        .checked_sub(expected_start)
+                        .and_then(|value| value.checked_add(1))
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    if checkpoint.sources.len() != expected_source_count {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let start = i32::try_from(expected_start)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let through = i32::try_from(checkpoint.through_sequence)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let message_limit = i64::try_from(expected_source_count.saturating_add(1))
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    let messages = tx
+                        .query::<AiMessageRecord>()
+                        .filter(AiMessageRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session.id),
+                                ..Default::default()
+                            }),
+                            sequence: Some(IntFilter {
+                                gte: Some(start),
+                                lte: Some(through),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(message_limit)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if messages.len() != expected_source_count {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    for (offset, (message, expected)) in
+                        messages.iter().zip(&checkpoint.sources).enumerate()
+                    {
+                        let sequence = expected_start
+                            .checked_add(
+                                i64::try_from(offset)
+                                    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?,
+                            )
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        if message != &expected.message
+                            || message.sequence != sequence
+                            || message.content_purged_at.is_some()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let block_limit = i64::try_from(expected.blocks.len().saturating_add(1))
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let blocks = tx
+                            .query::<AiMessageBlockRecord>()
+                            .filter(AiMessageBlockRecordWhereInput {
+                                message_id: Some(UuidFilter {
+                                    eq: Some(message.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(block_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if blocks != expected.blocks {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
+
+                    let expiry = now
+                        .checked_add(lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let run_update = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state(AiRunState::Running.as_str()),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated_run = match run_update {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    tx.insert::<AiContextCheckpointRecord>(CreateAiContextCheckpointRecordInput {
+                        id: checkpoint.id,
+                        session_id: session.id,
+                        through_sequence: checkpoint.through_sequence,
+                        source_hash: checkpoint.source_hash,
+                        token_estimate: checkpoint.token_estimate,
+                        provider_kind: checkpoint.provider_kind,
+                        provider_model: checkpoint.provider_model,
+                        protected_summary: checkpoint.protected_summary,
+                        invalidated_at: None,
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
                     lease_from_record(&updated_run)
                 })
             })

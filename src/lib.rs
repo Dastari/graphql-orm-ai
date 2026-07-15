@@ -49,6 +49,8 @@ mod orm_checkpoints;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_context_compaction;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_coordinator;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_egress;
@@ -133,6 +135,8 @@ pub use orm_budget::*;
 pub use orm_checkpoints::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_configuration::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_context_compaction::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_coordinator::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -226,9 +230,11 @@ pub mod prelude {
         AiApprovalWaitReconciliationLimits, AiApprovalWaitReconciliationPolicy,
         AiApprovalWaitReconciliationReport, AiApprovedRunClaim, AiAttachmentCleanupLimits,
         AiAttachmentServiceLimits, AiBudgetServiceLimits, AiCanonicalActionPreviewBuilder,
-        AiConsequentialToolCallOutcome, AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits,
-        AiInboxPruningLimits, AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits,
-        AiLiveDeltaSink, AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
+        AiConsequentialToolCallOutcome, AiContextCompactionLimits, AiContextSourceMessage,
+        AiCoordinatorCheckpointLimits, AiCurrentRuleResolverLimits, AiInboxPruningLimits,
+        AiLiveDeltaPersistenceContext, AiLiveDeltaPersistenceLimits, AiLiveDeltaSink,
+        AiLoadedContextCheckpoint, AiPersistedContextCheckpoint, AiPreparedContextCompaction,
+        AiProposalServiceLimits, AiProtectedSupervisedToolBatch,
         AiProviderAttachmentResolutionLimits, AiProviderCallExecutor, AiProviderCallLimits,
         AiProviderOutputLimits, AiProviderUsageAccounting, AiReadOnlyAgentCoordinator,
         AiReadOnlyAgentCoordinatorLimits, AiReadOnlyAgentTurnPlan, AiReadOnlyAgentTurnPlanner,
@@ -238,10 +244,10 @@ pub mod prelude {
         AiSupervisedApprovalWait, AiSupervisedResumeOutcome, AiUiIntentDeliveryLimits,
         AiUiIntentDeliveryService, OrmAiApplicationToolCallService, OrmAiApprovalService,
         OrmAiApprovalWaitReconciliationService, OrmAiAttachmentService, OrmAiBudgetService,
-        OrmAiConsequentialToolCallService, OrmAiCoordinatorCheckpointService,
-        OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit, OrmAiInboxPruningService,
-        OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService, OrmAiProposalService,
-        OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
+        OrmAiConsequentialToolCallService, OrmAiContextCompactionService,
+        OrmAiCoordinatorCheckpointService, OrmAiCurrentRuleResolver, OrmAiEgressDecisionAudit,
+        OrmAiInboxPruningService, OrmAiInboxService, OrmAiLiveDeltaService, OrmAiPricingService,
+        OrmAiProposalService, OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
         OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
         OrmAiUiIntentDeliveryService, OrmAiUsageService,
     };

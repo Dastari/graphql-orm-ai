@@ -440,6 +440,10 @@ impl OrmAiSessionRetentionService {
             i64::try_from(self.limits.maximum_context_checkpoints_per_session).map_err(|_| {
                 AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
             })?;
+        let context_checkpoint_limit_with_lookahead =
+            context_checkpoint_limit.checked_add(1).ok_or_else(|| {
+                AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
+            })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
         let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
@@ -482,6 +486,7 @@ impl OrmAiSessionRetentionService {
             .checked_add(1)
             .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let maximum_blocks = self.limits.maximum_message_blocks_per_session;
+        let maximum_context_checkpoints = self.limits.maximum_context_checkpoints_per_session;
         let result = self
             .database
             .transaction(TransactionMode::StateMachine, move |tx| {
@@ -1315,6 +1320,7 @@ impl OrmAiSessionRetentionService {
                     let mut messages_purged = 0usize;
                     let mut blocks_deleted = 0usize;
                     let mut messages_blocked = 0usize;
+                    let mut context_checkpoints_invalidated = 0usize;
                     let message_cutoff = if deletion_cutoff_reached
                         && (!context_checkpoint_ids.is_empty()
                             || proposal_payloads_purged > 0
@@ -1430,6 +1436,52 @@ impl OrmAiSessionRetentionService {
                                 })
                             {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            let checkpoints = tx
+                                .query::<AiContextCheckpointRecord>()
+                                .filter(AiContextCheckpointRecordWhereInput {
+                                    session_id: Some(UuidFilter {
+                                        eq: Some(session.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .limit(context_checkpoint_limit_with_lookahead)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if checkpoints.len() > maximum_context_checkpoints {
+                                messages_blocked += 1;
+                                continue;
+                            }
+                            let mut invalidated_ids = Vec::new();
+                            for checkpoint in checkpoints {
+                                if checkpoint.id.is_nil()
+                                    || checkpoint.session_id != session.id
+                                    || checkpoint.through_sequence <= 0
+                                    || checkpoint.through_sequence > session.message_head
+                                    || checkpoint.source_hash.trim().is_empty()
+                                    || checkpoint.source_hash.len() > 512
+                                    || checkpoint.token_estimate < 0
+                                    || checkpoint.provider_kind.trim().is_empty()
+                                    || checkpoint.provider_model.trim().is_empty()
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                if checkpoint.through_sequence >= message.sequence {
+                                    invalidated_ids.push(checkpoint.id);
+                                }
+                            }
+                            for checkpoint_id in invalidated_ids {
+                                if !tx
+                                    .delete_by_id::<AiContextCheckpointRecord>(&checkpoint_id)
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                context_checkpoints_invalidated += 1;
                             }
                             let updated = tx
                                 .compare_and_swap::<AiMessageRecord>(
@@ -1696,6 +1748,7 @@ impl OrmAiSessionRetentionService {
                         && attachments_deleted == 0
                         && attachment_artifact_cleanups_requested == 0
                         && attachment_artifacts_deleted == 0
+                        && context_checkpoints_invalidated == 0
                         && messages_purged == 0
                         && run_checkpoint_references_cleared == 0
                     {
@@ -1731,6 +1784,7 @@ impl OrmAiSessionRetentionService {
                         live_delta_events_deleted,
                         deleting_session_events_deleted,
                         deleting_session_context_checkpoints_deleted,
+                        context_checkpoints_invalidated,
                         proposal_payloads_purged,
                         proposal_payload_purge_blocked,
                         deleting_tool_payloads_purged,
@@ -2928,6 +2982,7 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     live_delta_events_deleted,
                     deleting_session_events_deleted,
                     deleting_session_context_checkpoints_deleted,
+                    context_checkpoints_invalidated,
                     proposal_payloads_purged,
                     proposal_payload_purge_blocked,
                     deleting_tool_payloads_purged,
@@ -2959,6 +3014,10 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.deleting_session_context_checkpoints_deleted = add_count(
                         report.deleting_session_context_checkpoints_deleted,
                         deleting_session_context_checkpoints_deleted,
+                    )?;
+                    report.context_checkpoints_invalidated = add_count(
+                        report.context_checkpoints_invalidated,
+                        context_checkpoints_invalidated,
                     )?;
                     report.deleting_session_proposal_payloads_purged = add_count(
                         report.deleting_session_proposal_payloads_purged,
@@ -3099,6 +3158,7 @@ enum SessionPruneOutcome {
         live_delta_events_deleted: usize,
         deleting_session_events_deleted: usize,
         deleting_session_context_checkpoints_deleted: usize,
+        context_checkpoints_invalidated: usize,
         proposal_payloads_purged: usize,
         proposal_payload_purge_blocked: bool,
         deleting_tool_payloads_purged: usize,
@@ -4660,6 +4720,7 @@ mod tests {
             AiContextCheckpointRecord::insert(
                 database,
                 CreateAiContextCheckpointRecordInput {
+                    id: Uuid::new_v4(),
                     session_id,
                     through_sequence: 1,
                     source_hash: format!("context-source-{index}"),
@@ -4683,6 +4744,7 @@ mod tests {
         let session_id = seed_session(&database, &scope).await;
         let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
         seed_events(&database, session_id).await;
+        seed_context_checkpoints(&database, session_id).await;
         let service = OrmAiSessionRetentionService::new(
             database.clone(),
             Arc::new(FixedClock::new(now())),
@@ -4696,6 +4758,7 @@ mod tests {
         assert_eq!(report.sessions_scanned, 1);
         assert_eq!(report.sessions_changed, 1);
         assert_eq!(report.live_delta_events_deleted, 1);
+        assert_eq!(report.context_checkpoints_invalidated, 2);
         assert_eq!(report.message_contents_purged, 1);
         assert_eq!(report.message_blocks_deleted, 1);
         assert!(report.next_session_cursor.is_none());
@@ -4707,7 +4770,7 @@ mod tests {
         assert!(message.protected_preview.is_none());
         assert_eq!(message.block_count, 0);
         assert_eq!(message.content_purged_at, Some(now().unix_timestamp()));
-        let (events, blocks, audits) = database
+        let (events, contexts, blocks, audits) = database
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
                     let events = tx
@@ -4720,6 +4783,19 @@ mod tests {
                             ..Default::default()
                         })
                         .default_order()
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let contexts = tx
+                        .query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
                         .limit(10)
                         .fetch_all()
                         .await
@@ -4743,7 +4819,7 @@ mod tests {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
-                    Ok((events, blocks, audits))
+                    Ok((events, contexts, blocks, audits))
                 })
             })
             .await
@@ -4751,6 +4827,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "message_queued");
         assert_eq!(events[1].event_type, "run_completed");
+        assert!(contexts.is_empty());
         assert!(blocks.is_empty());
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action, "prune_session_content");
@@ -4802,6 +4879,57 @@ mod tests {
             .await
             .expect("retention replay should be idempotent");
         assert_eq!(replay.sessions_changed, 0);
+    }
+
+    #[tokio::test]
+    async fn overbound_context_set_blocks_ordinary_message_purge_without_partial_invalidation() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
+        seed_context_checkpoints(&database, session_id).await;
+        let limits = AiSessionRetentionLimits::new_with_context_checkpoints(10, 10, 1, 10, 100)
+            .expect("retention limits should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("overbound retention pass should remain safe");
+        assert_eq!(report.context_checkpoints_invalidated, 0);
+        assert_eq!(report.message_contents_purged, 0);
+        assert_eq!(report.messages_blocked, 1);
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should remain");
+        assert!(message.content_purged_at.is_none());
+        assert!(message.protected_preview.is_some());
+        let contexts = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(10)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("context rows should load");
+        assert_eq!(contexts.len(), 2);
     }
 
     #[tokio::test]

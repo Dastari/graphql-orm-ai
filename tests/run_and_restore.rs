@@ -90,6 +90,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_skill_catalog_count: 0,
         invalid_rule_policy_count: 0,
         invalid_coordinator_checkpoint_count: 0,
+        invalid_context_checkpoint_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
@@ -193,15 +194,47 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_skill_catalog_count: 1,
         invalid_rule_policy_count: 1,
         invalid_coordinator_checkpoint_count: 1,
+        invalid_context_checkpoint_count: 1,
         invalid_ui_intent_event_count: 1,
         invalid_session_retention_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 12);
+    assert_eq!(plan.fatal_issue_count(), 13);
     assert_eq!(
         plan.readiness_report_after_apply(true).fatal_issue_count,
-        12
+        13
     );
+}
+
+#[test]
+fn legacy_restore_facts_default_context_checkpoint_count_to_zero() {
+    let facts = AiRestoreSnapshotFacts {
+        module_fingerprint: "expected".to_owned(),
+        missing_key_versions: Vec::new(),
+        runs: Vec::new(),
+        pending_approval_count: 0,
+        pending_egress_consent_count: 0,
+        invalid_attachment_count: 0,
+        invalid_usage_fact_count: 0,
+        invalid_budget_policy_count: 0,
+        invalid_pricing_policy_count: 0,
+        invalid_skill_catalog_count: 0,
+        invalid_rule_policy_count: 0,
+        invalid_coordinator_checkpoint_count: 0,
+        invalid_context_checkpoint_count: 0,
+        invalid_ui_intent_event_count: 0,
+        invalid_session_retention_count: 0,
+        duplicate_stream_sequence_count: 0,
+        stream_gap_count: 0,
+    };
+    let mut value = serde_json::to_value(facts).expect("restore facts should serialize");
+    value
+        .as_object_mut()
+        .expect("restore facts should be an object")
+        .remove("invalid_context_checkpoint_count");
+    let decoded: AiRestoreSnapshotFacts =
+        serde_json::from_value(value).expect("legacy restore facts should decode");
+    assert_eq!(decoded.invalid_context_checkpoint_count, 0);
 }

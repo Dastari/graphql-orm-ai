@@ -5,12 +5,35 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.43.0` and the
-AI schema module to `0.41.0`. It keeps 39 private entities and adds a fenced,
-dependency-ordered deletion lifecycle for attachment artifacts and their exact
-local or provider-persistent object references.
+This development line advances the pre-1.0 crate version to `0.44.0` and the
+AI schema module to `0.42.0`. It keeps 39 private entities and adds protected,
+bounded context compaction with exact chained source coverage plus ordinary-
+retention invalidation.
 
 ### Added
+
+- `OrmAiContextCompactionService` prepares only a contiguous, bounded prefix
+  segment under a renewed running lease and fresh owner/scope authority. The
+  sensitive request binds an optional prior protected summary, exact message
+  and block identities, opened content, a domain-separated SHA-256 source
+  hash, fixed `Restricted` provenance, and a configured recent-message tail.
+  `AiPreparedContextCompaction` exposes the exact redacted source set and size
+  estimates needed by the ordinary provider-call plan; it grants no egress or
+  budget authority.
+- Context persistence accepts only the private `AiProviderCallResult` produced
+  by the exact prepared request, provider/model, run fence, committed budget,
+  and `context_compaction` model-inference manifest. It rejects tools,
+  built-ins, reasoning, citations, unknown events, empty/oversized summaries,
+  source drift, parent races, and checkpoint lookahead overflow. The final
+  state-machine transaction re-proves every parent/message/block before
+  protecting and inserting the summary, its direct provenance, and provider
+  evidence.
+- `load_latest` rehydrates authority, renews the fence, opens only the latest
+  valid checkpoint, and validates its exact prefix/parent/provenance envelope.
+  Prepared and loaded values redact source/summary content from `Debug`.
+- Restore preflight adds `invalid_context_checkpoint_count`; nonzero invalid
+  coverage, protection, lineage, provider/budget, or retention state keeps the
+  runtime start gate closed.
 
 - Deleting-session retention now proves the complete attachment-artifact set
   under an independent lookahead bound, requests artifact cleanup before its
@@ -31,6 +54,17 @@ local or provider-persistent object references.
   artifacts before parent attachments and appends only redacted audit facts.
 
 ### Changed
+
+- Ordinary message retention now physically deletes every context checkpoint
+  whose prefix could cover an eligible message before scrubbing that message
+  in the same transaction. A one-row lookahead proves the complete checkpoint
+  set; over-bound sets block the message without partial invalidation.
+  `AiSessionRetentionReport::context_checkpoints_invalidated` reports the exact
+  rows removed.
+- The private context-checkpoint primary key is now explicitly supplied by the
+  trusted writer so its content-protection associated identity is fixed before
+  persistence. This changes generated private metadata but adds no table,
+  column, index, constraint, or public GraphQL operation.
 
 - `AiAttachmentArtifactRecord` adds nullable cleanup state, generation, lease,
   retry, and backoff fields plus stable created-time/ID keyset ordering. The
