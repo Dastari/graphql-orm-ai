@@ -5,13 +5,27 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.38.0` and the
-AI schema module to `0.36.0`. No table, column, index, constraint, or entity is
-added; the module version changes because existing session, attachment,
-message, retention-policy, and audit rows gain an ordered, externally verified
-attachment-cleanup meaning after session deletion.
+This development line advances the pre-1.0 crate version to `0.39.0` and the
+AI schema module to `0.37.0`. It keeps 39 private entities, adds a nullable
+proposal-payload purge timestamp, and makes the proposal and proposal-item
+protected payload/source columns nullable so deleting-session retention can
+leave durable non-content review/provenance metadata after exact tombstoning.
 
 ### Added
+
+- Deleting-session retention now tombstones protected proposal and optional
+  proposal-item content only after context summaries are exhausted, the whole
+  proposal/item set fits configured lookahead bounds, every owning run is
+  terminal, and every proposal is rejected, applied, expired, or an expired
+  pending review. Expired pending reviews become durably `expired`; accepted or
+  accepted-edited proposals remain blocked until a trusted application outcome
+  is recorded. Attachment cleanup and message scrubbing wait for a later pass.
+- `AiSessionRetentionLimits::with_proposal_limits` and proposal/item getters
+  configure independent whole-session proof bounds. The report now counts exact
+  proposal payload tombstones and deleting sessions blocked by bounds,
+  nonterminal runs, or an unresolved accepted outcome. Proposal identity,
+  schema, review decision, creator/reviewer, application outcome/audit links,
+  timestamps, and row versions remain as non-content metadata.
 
 - Deleting-session retention now moves bounded, artifact-free attachment rows
   into a dedicated cleanup state only after reloading the exact current scope

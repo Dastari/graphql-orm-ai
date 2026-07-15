@@ -1408,10 +1408,12 @@ pub(crate) struct AiProposalRecord {
     pub item_count: i64,
     /// Protected/ciphertext structured payload envelope.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_payload: serde_json::Value,
+    pub protected_payload: Option<serde_json::Value>,
     /// Redacted source references.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub source_references: serde_json::Value,
+    pub source_references: Option<serde_json::Value>,
+    /// Timestamp when deleting-session retention removed protected content.
+    pub payload_purged_at: Option<i64>,
     /// Lifecycle state.
     #[filterable(type = "string")]
     pub state: String,
@@ -1460,11 +1462,11 @@ pub(crate) struct AiProposalItemRecord {
     pub item_index: i64,
     pub stable_path: String,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_suggested_value: serde_json::Value,
+    pub protected_suggested_value: Option<serde_json::Value>,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_rationale: Option<serde_json::Value>,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub source_references: serde_json::Value,
+    pub source_references: Option<serde_json::Value>,
     pub review_decision: Option<String>,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_review_value: Option<serde_json::Value>,
@@ -1827,7 +1829,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.36.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.37.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

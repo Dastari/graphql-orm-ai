@@ -9,13 +9,14 @@ use crate::AiError;
 /// This report proves only the exact ORM rows removed or scrubbed by one
 /// completed pass. Attachment counts prove only cleanup coordination or exact
 /// metadata deletion after a separate worker confirmed object absence. They
-/// do not prove that provider-persistent files, artifact rows, tool/proposal
-/// content, or an entire deleting session were purged.
+/// do not prove that provider-persistent files, artifact rows, tool content, an
+/// unresolved accepted proposal, or an entire deleting session were purged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
     pub sessions_scanned: u32,
-    /// Sessions whose protected event, context, or message content changed.
+    /// Sessions whose protected content, attachment state, or checkpoint
+    /// references changed.
     pub sessions_changed: u32,
     /// Protected provisional `provider_live_delta` event rows deleted.
     pub live_delta_events_deleted: u32,
@@ -23,6 +24,8 @@ pub struct AiSessionRetentionReport {
     pub deleting_session_events_deleted: u32,
     /// Protected context-summary checkpoints deleted before message scrubbing.
     pub deleting_session_context_checkpoints_deleted: u32,
+    /// Terminal proposal payloads scrubbed after their context dependencies.
+    pub deleting_session_proposal_payloads_purged: u32,
     /// Terminal run pointers cleared before append-only checkpoint deletion.
     pub deleting_session_run_checkpoint_references_cleared: u32,
     /// Append-only coordinator checkpoints physically deleted after their
@@ -49,6 +52,9 @@ pub struct AiSessionRetentionReport {
     /// Deleting sessions still waiting for bounded attachment proof, external
     /// object deletion, or unsupported artifact/provider-file cleanup.
     pub attachment_cleanups_blocked: u32,
+    /// Deleting sessions whose proposal set was over-bound, nonterminal, or
+    /// still accepted without an authoritative applied outcome.
+    pub proposal_payload_purges_blocked: u32,
     /// Deleting sessions whose run history exceeded the configured proof bound
     /// or still contained a nonterminal run.
     pub run_checkpoint_purges_blocked: u32,

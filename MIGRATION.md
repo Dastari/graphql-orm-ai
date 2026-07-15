@@ -4,6 +4,48 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: deleting-session proposal tombstones (crate 0.38.0 to 0.39.0; schema 0.36.0 to 0.37.0)
+
+Apply AI schema module `0.37.0` while session, proposal, retention, attachment,
+coordinator, and restore workers are closed. Do not run 0.39.0 code against a
+module still registered as 0.36.0. The generated migration keeps the existing
+39 private entities, adds nullable `payload_purged_at` to the proposal table,
+and makes proposal `protected_payload`/`source_references` plus proposal-item
+`protected_suggested_value`/`source_references` nullable. Use only the generated
+`graphql-orm` migration; no application SQL, consumer-table change, blob-key
+rewrite, or application-authored data copy is required. Existing non-null
+payloads and sources remain unchanged until retention proves them eligible.
+
+At and after the exact current deleting-session cutoff, repeated bounded scan
+cycles now order protected content as context summaries, proposal payloads,
+attachment cleanup, message bodies, and terminal coordinator checkpoints. A
+proposal pass first proves the complete session proposal/item set is within its
+lookahead bounds. It retains every accepted or accepted-edited proposal because
+the ordinary application mutation or authoritative outcome recorder may still
+be pending. It may tombstone only rejected, applied, expired, or expired
+pending-review proposals whose owning run is terminal. The same transaction
+clears all protected item values/rationales/sources/review values, clears the
+parent protected payload/sources, writes `payload_purged_at`, changes an expired
+pending review to `expired`, and appends redacted audit. Identity, schema,
+logical item count, review decisions, creator/reviewer, applied resource and
+application-audit references, timestamps, state, and CAS versions remain.
+
+The existing `AiSessionRetentionLimits` constructors remain source-compatible
+and derive proposal/item defaults from message/block limits. Call
+`with_proposal_limits` for independent `1..=5_000` proposal and `1..=20_000`
+item bounds; new getters return both. `AiSessionRetentionReport` adds
+`deleting_session_proposal_payloads_purged` and
+`proposal_payload_purges_blocked`. Downstream exhaustive struct literals must
+initialize the new fields or use `..Default::default()`.
+
+This is a pre-1.0 public Rust API, private persistent-shape,
+backup/schema-fingerprint, and retention-behavior change. It changes no public
+GraphQL SDL, Cargo feature/default, table/entity count, append-only policy, or
+consumer schema. Deploy the generated schema migration, then run retention in
+complete repeated cycles. One pass is not an erasure certificate; tool calls,
+approvals, provider raw payloads, proposal metadata, attachment artifacts,
+session shells, and immutable audit/usage/history facts remain.
+
 ## Unreleased: verified deleting-session attachment cleanup (crate 0.37.0 to 0.38.0; schema 0.35.0 to 0.36.0)
 
 Apply AI schema module `0.36.0` while session writers, attachment upload and

@@ -88,8 +88,10 @@ Session retention is a trusted, host-scheduled ORM service rather than a user
 resolver. It keyset-scans bounded session shells, reloads the exact current
 GraphQL-managed scope policy inside each deletion transaction, and never opens
 protected content. Eligible provisional deltas are removed without rewinding
-the stream; eligible terminal messages whose attachment rows have been
-independently cleaned and removed retain metadata but replace
+the stream. After a deleting-session cutoff, context summaries are exhausted
+before terminal proposal/item payloads; accepted proposals without an applied
+outcome stay blocked. Eligible terminal messages whose attachment rows have
+been independently cleaned and removed retain metadata but replace
 preview/blocks with a structural tombstone. Event readers detect resulting
 gaps and require a bounded client reset. Basic attachment objects require a
 separate verified cleanup worker; attachment artifacts/provider files and all

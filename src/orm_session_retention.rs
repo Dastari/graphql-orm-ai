@@ -35,6 +35,8 @@ pub struct AiSessionRetentionLimits {
     maximum_context_checkpoints_per_session: usize,
     maximum_messages_per_session: usize,
     maximum_message_blocks_per_session: usize,
+    maximum_proposals_per_session: usize,
+    maximum_proposal_items_per_session: usize,
     maximum_attachments_per_session: usize,
     maximum_runs_per_session: usize,
     maximum_run_checkpoints_per_session: usize,
@@ -94,6 +96,8 @@ impl AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session,
             maximum_messages_per_session,
             maximum_message_blocks_per_session,
+            maximum_proposals_per_session: maximum_messages_per_session,
+            maximum_proposal_items_per_session: maximum_message_blocks_per_session,
             maximum_attachments_per_session: maximum_messages_per_session,
             maximum_runs_per_session: maximum_messages_per_session,
             maximum_run_checkpoints_per_session: maximum_context_checkpoints_per_session,
@@ -144,6 +148,29 @@ impl AiSessionRetentionLimits {
         Ok(self)
     }
 
+    /// Sets independent whole-session proposal and proposal-item proof bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless proposals are in
+    /// `1..=5_000` and proposal items are in `1..=20_000`.
+    pub fn with_proposal_limits(
+        mut self,
+        maximum_proposals_per_session: usize,
+        maximum_proposal_items_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_proposals_per_session)
+            || !(1..=20_000).contains(&maximum_proposal_items_per_session)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention proposal limits".to_owned(),
+            ));
+        }
+        self.maximum_proposals_per_session = maximum_proposals_per_session;
+        self.maximum_proposal_items_per_session = maximum_proposal_items_per_session;
+        Ok(self)
+    }
+
     /// Maximum session metadata rows considered in one scan page.
     pub const fn maximum_sessions(self) -> usize {
         self.maximum_sessions
@@ -178,6 +205,16 @@ impl AiSessionRetentionLimits {
         self.maximum_attachments_per_session
     }
 
+    /// Maximum proposal rows proved for one deleting session.
+    pub const fn maximum_proposals_per_session(self) -> usize {
+        self.maximum_proposals_per_session
+    }
+
+    /// Maximum proposal-item rows proved for one deleting session.
+    pub const fn maximum_proposal_items_per_session(self) -> usize {
+        self.maximum_proposal_items_per_session
+    }
+
     /// Maximum run rows used to prove one deleting session is terminal.
     pub const fn maximum_runs_per_session(self) -> usize {
         self.maximum_runs_per_session
@@ -197,6 +234,8 @@ impl Default for AiSessionRetentionLimits {
             maximum_context_checkpoints_per_session: 100,
             maximum_messages_per_session: 100,
             maximum_message_blocks_per_session: 5_000,
+            maximum_proposals_per_session: 100,
+            maximum_proposal_items_per_session: 5_000,
             maximum_attachments_per_session: 100,
             maximum_runs_per_session: 100,
             maximum_run_checkpoints_per_session: 100,
@@ -244,16 +283,17 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
 /// The worker never opens or copies protected payloads. It deletes expired
 /// provisional delta rows and, after the deleting-session cutoff, all bounded
 /// protected session event rows. Protected context-summary checkpoints are
-/// deleted in bounded pages before eligible finalized message blocks are
-/// scrubbed, retaining an explicit message metadata tombstone. Once those
-/// sources are exhausted and every bounded run is terminal, the worker clears
-/// current checkpoint pointers before a separate retention transaction
-/// physically deletes append-only coordinator checkpoints. Linked attachments
-/// first enter the independently scheduled, exact-reference storage cleanup
-/// state; only confirmed, artifact-free tombstones are deleted before their
-/// messages can be scrubbed. Nonterminal runs, ambiguous storage deletion, and
-/// attachment artifacts remain blocked. Redacted audit, usage, egress,
-/// attempt, pricing, and skill facts remain non-purgeable.
+/// deleted in bounded pages before terminal proposal/item payloads are
+/// tombstoned under whole-session bounds. Linked attachments then enter the
+/// independently scheduled, exact-reference storage cleanup state; only
+/// confirmed, artifact-free tombstones are deleted before eligible finalized
+/// message blocks are scrubbed, retaining explicit proposal and message
+/// metadata tombstones. Once those sources are exhausted and every bounded run
+/// is terminal, the worker clears current checkpoint pointers before a separate
+/// retention transaction physically deletes append-only coordinator
+/// checkpoints. Unresolved accepted proposals, nonterminal runs, ambiguous
+/// storage deletion, and attachment artifacts remain blocked. Redacted audit,
+/// usage, egress, attempt, pricing, and skill facts remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
@@ -316,6 +356,17 @@ impl OrmAiSessionRetentionService {
             })?;
         let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
+        let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
+        let proposal_limit_with_lookahead = proposal_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
+        let proposal_item_limit = i64::try_from(self.limits.maximum_proposal_items_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid proposal-item limit".to_owned()))?;
+        let proposal_item_limit_with_lookahead =
+            proposal_item_limit.checked_add(1).ok_or_else(|| {
+                AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
+            })?;
         let attachment_limit = i64::try_from(self.limits.maximum_attachments_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
         let attachment_limit_with_lookahead = attachment_limit
@@ -461,10 +512,180 @@ impl OrmAiSessionRetentionService {
                     }
                     let deleting_session_context_checkpoints_deleted = context_checkpoint_ids.len();
 
+                    let mut proposal_payloads_purged = 0usize;
+                    let mut proposal_payload_purge_blocked = false;
+                    if deletion_cutoff_reached && context_checkpoint_ids.is_empty() {
+                        let proposals = tx
+                            .query::<AiProposalRecord>()
+                            .filter(AiProposalRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(proposal_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if proposals.len()
+                            > usize::try_from(proposal_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        {
+                            proposal_payload_purge_blocked = true;
+                        } else {
+                            let maximum_items = usize::try_from(proposal_item_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let mut proposal_groups = Vec::with_capacity(proposals.len());
+                            let mut item_count = 0usize;
+                            for proposal in proposals {
+                                validate_proposal(&proposal, &session)?;
+                                let items = tx
+                                    .query::<AiProposalItemRecord>()
+                                    .filter(AiProposalItemRecordWhereInput {
+                                        proposal_id: Some(UuidFilter {
+                                            eq: Some(proposal.id),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .default_order()
+                                    .limit(proposal_item_limit_with_lookahead)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                item_count =
+                                    item_count.checked_add(items.len()).ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?;
+                                if items.len() > maximum_items || item_count > maximum_items {
+                                    proposal_payload_purge_blocked = true;
+                                    break;
+                                }
+                                for (index, item) in items.iter().enumerate() {
+                                    validate_proposal_item(item, proposal.id, index)?;
+                                }
+                                proposal_groups.push((proposal, items));
+                            }
+                            if !proposal_payload_purge_blocked {
+                                for (proposal, items) in &proposal_groups {
+                                    let Some(run) = tx
+                                        .find_by_id::<AiRunRecord>(&proposal.run_id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                    else {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    };
+                                    let run_state = AiRunState::from_persisted(&run.state)
+                                        .ok_or_else(|| {
+                                            OrmPublicError::new(OrmErrorCode::InternalError)
+                                        })?;
+                                    if run.session_id != session.id || !run_state.is_terminal() {
+                                        proposal_payload_purge_blocked = true;
+                                        break;
+                                    }
+                                    if proposal.payload_purged_at.is_some() {
+                                        if proposal.protected_payload.is_some()
+                                            || proposal.source_references.is_some()
+                                            || !proposal_state_is_terminal(proposal, now)
+                                            || items.iter().any(|item| {
+                                                item.protected_suggested_value.is_some()
+                                                    || item.protected_rationale.is_some()
+                                                    || item.source_references.is_some()
+                                                    || item.protected_review_value.is_some()
+                                            })
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::InternalError,
+                                            ));
+                                        }
+                                        continue;
+                                    }
+                                    if proposal.protected_payload.is_none()
+                                        || proposal.source_references.is_none()
+                                        || !proposal_state_is_terminal(proposal, now)
+                                    {
+                                        proposal_payload_purge_blocked = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !proposal_payload_purge_blocked {
+                                for (proposal, items) in proposal_groups {
+                                    if proposal.payload_purged_at.is_some() {
+                                        continue;
+                                    }
+                                    for item in items {
+                                        let updated = tx
+                                            .compare_and_swap::<AiProposalItemRecord>(
+                                                &item.id,
+                                                item.row_version,
+                                                AiProposalItemRecordWhereInput {
+                                                    proposal_id: Some(UuidFilter {
+                                                        eq: Some(proposal.id),
+                                                        ..Default::default()
+                                                    }),
+                                                    ..Default::default()
+                                                },
+                                                UpdateAiProposalItemRecordInput {
+                                                    protected_suggested_value: Some(None),
+                                                    protected_rationale: Some(None),
+                                                    source_references: Some(None),
+                                                    protected_review_value: Some(None),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        if !matches!(updated, ConditionalUpdateOutcome::Updated(_))
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::Conflict,
+                                            ));
+                                        }
+                                    }
+                                    let updated = tx
+                                        .compare_and_swap::<AiProposalRecord>(
+                                            &proposal.id,
+                                            proposal.row_version,
+                                            AiProposalRecordWhereInput {
+                                                session_id: Some(UuidFilter {
+                                                    eq: Some(session.id),
+                                                    ..Default::default()
+                                                }),
+                                                ..Default::default()
+                                            },
+                                            UpdateAiProposalRecordInput {
+                                                protected_payload: Some(None),
+                                                source_references: Some(None),
+                                                payload_purged_at: Some(Some(now)),
+                                                state: (proposal.state == "pending_review")
+                                                    .then(|| "expired".to_owned()),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
+                                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                    }
+                                    proposal_payloads_purged += 1;
+                                }
+                            }
+                        }
+                    }
+
                     let mut attachment_cleanups_requested = 0usize;
                     let mut attachments_deleted = 0usize;
                     let mut attachment_cleanup_blocked = false;
-                    if deletion_cutoff_reached && context_checkpoint_ids.is_empty() {
+                    if deletion_cutoff_reached
+                        && context_checkpoint_ids.is_empty()
+                        && proposal_payloads_purged == 0
+                        && !proposal_payload_purge_blocked
+                    {
                         let attachments = tx
                             .query::<AiAttachmentRecord>()
                             .filter(AiAttachmentRecordWhereInput {
@@ -560,7 +781,9 @@ impl OrmAiSessionRetentionService {
                     let mut blocks_deleted = 0usize;
                     let mut messages_blocked = 0usize;
                     let message_cutoff = if deletion_cutoff_reached
-                        && !context_checkpoint_ids.is_empty()
+                        && (!context_checkpoint_ids.is_empty()
+                            || proposal_payloads_purged > 0
+                            || proposal_payload_purge_blocked)
                     {
                         None
                     } else if deletion_cutoff_reached {
@@ -736,6 +959,8 @@ impl OrmAiSessionRetentionService {
                     if deletion_cutoff_reached
                         && event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
+                        && proposal_payloads_purged == 0
+                        && !proposal_payload_purge_blocked
                         && attachment_cleanups_requested == 0
                         && attachments_deleted == 0
                         && !attachment_cleanup_blocked
@@ -768,6 +993,30 @@ impl OrmAiSessionRetentionService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
+                        let remaining_proposals = tx
+                            .query::<AiProposalRecord>()
+                            .filter(AiProposalRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(proposal_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let proposals_are_exhausted = remaining_proposals.len()
+                            <= usize::try_from(proposal_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                            && remaining_proposals.iter().all(|proposal| {
+                                proposal.session_id == session.id
+                                    && proposal.payload_purged_at.is_some()
+                                    && proposal.protected_payload.is_none()
+                                    && proposal.source_references.is_none()
+                                    && proposal_state_is_terminal(proposal, now)
+                            });
                         let remaining_message_content = tx
                             .query::<AiMessageRecord>()
                             .filter(AiMessageRecordWhereInput {
@@ -800,6 +1049,7 @@ impl OrmAiSessionRetentionService {
                             .map_err(OrmPublicError::from)?;
                         if remaining_events.is_empty()
                             && remaining_context.is_empty()
+                            && proposals_are_exhausted
                             && remaining_message_content.is_empty()
                             && remaining_attachments.is_empty()
                         {
@@ -896,6 +1146,7 @@ impl OrmAiSessionRetentionService {
                     }
                     if event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
+                        && proposal_payloads_purged == 0
                         && attachment_cleanups_requested == 0
                         && attachments_deleted == 0
                         && messages_purged == 0
@@ -903,6 +1154,7 @@ impl OrmAiSessionRetentionService {
                     {
                         return Ok(SessionPruneOutcome::Noop {
                             messages_blocked,
+                            proposal_payload_purge_blocked,
                             attachment_cleanup_blocked,
                             run_checkpoint_purge_ready,
                             run_checkpoint_purge_blocked,
@@ -930,6 +1182,8 @@ impl OrmAiSessionRetentionService {
                         live_delta_events_deleted,
                         deleting_session_events_deleted,
                         deleting_session_context_checkpoints_deleted,
+                        proposal_payloads_purged,
+                        proposal_payload_purge_blocked,
                         attachment_cleanups_requested,
                         attachments_deleted,
                         attachment_cleanup_blocked,
@@ -953,6 +1207,17 @@ impl OrmAiSessionRetentionService {
     }
 
     async fn purge_run_checkpoints(&self, session_id: Uuid, now: i64) -> Result<usize, AiError> {
+        let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
+        let proposal_limit_with_lookahead = proposal_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
+        let proposal_item_limit = i64::try_from(self.limits.maximum_proposal_items_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid proposal-item limit".to_owned()))?;
+        let proposal_item_limit_with_lookahead =
+            proposal_item_limit.checked_add(1).ok_or_else(|| {
+                AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
+            })?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let run_limit_with_lookahead = run_limit
@@ -1048,6 +1313,94 @@ impl OrmAiSessionRetentionService {
                         .fetch_all()
                         .await
                         .map_err(OrmPublicError::from)?;
+                    let remaining_proposals = maintenance
+                        .query::<AiProposalRecord>()
+                        .filter(AiProposalRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(proposal_limit_with_lookahead)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if remaining_proposals.len()
+                        > usize::try_from(proposal_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                    {
+                        return Ok(0);
+                    }
+                    let maximum_proposal_items = usize::try_from(proposal_item_limit)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let mut proposal_item_count = 0usize;
+                    for proposal in remaining_proposals {
+                        validate_proposal(&proposal, session)?;
+                        if proposal.payload_purged_at.is_none()
+                            || proposal.protected_payload.is_some()
+                            || proposal.source_references.is_some()
+                            || !proposal_state_is_terminal(&proposal, now)
+                        {
+                            return Ok(0);
+                        }
+                        let proposal_runs = maintenance
+                            .query::<AiRunRecord>()
+                            .filter(AiRunRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(proposal.run_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if proposal_runs.len() != 1 {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let proposal_run = &proposal_runs[0];
+                        if proposal_run.session_id != session_id
+                            || !AiRunState::from_persisted(&proposal_run.state)
+                                .is_some_and(AiRunState::is_terminal)
+                        {
+                            return Ok(0);
+                        }
+                        let items = maintenance
+                            .query::<AiProposalItemRecord>()
+                            .filter(AiProposalItemRecordWhereInput {
+                                proposal_id: Some(UuidFilter {
+                                    eq: Some(proposal.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(proposal_item_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        proposal_item_count = proposal_item_count
+                            .checked_add(items.len())
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if items.len() > maximum_proposal_items
+                            || proposal_item_count > maximum_proposal_items
+                        {
+                            return Ok(0);
+                        }
+                        for (index, item) in items.iter().enumerate() {
+                            validate_proposal_item(item, proposal.id, index)?;
+                            if item.protected_suggested_value.is_some()
+                                || item.protected_rationale.is_some()
+                                || item.source_references.is_some()
+                                || item.protected_review_value.is_some()
+                            {
+                                return Ok(0);
+                            }
+                        }
+                    }
                     let remaining_message_content = maintenance
                         .query::<AiMessageRecord>()
                         .filter(AiMessageRecordWhereInput {
@@ -1234,11 +1587,18 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 }
                 SessionPruneOutcome::Noop {
                     messages_blocked,
+                    proposal_payload_purge_blocked,
                     attachment_cleanup_blocked,
                     run_checkpoint_purge_ready,
                     run_checkpoint_purge_blocked,
                 } => {
                     report.messages_blocked = add_count(report.messages_blocked, messages_blocked)?;
+                    if proposal_payload_purge_blocked {
+                        report.proposal_payload_purges_blocked = report
+                            .proposal_payload_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                     if attachment_cleanup_blocked {
                         report.attachment_cleanups_blocked = report
                             .attachment_cleanups_blocked
@@ -1257,6 +1617,8 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     live_delta_events_deleted,
                     deleting_session_events_deleted,
                     deleting_session_context_checkpoints_deleted,
+                    proposal_payloads_purged,
+                    proposal_payload_purge_blocked,
                     attachment_cleanups_requested,
                     attachments_deleted,
                     attachment_cleanup_blocked,
@@ -1279,6 +1641,16 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                         report.deleting_session_context_checkpoints_deleted,
                         deleting_session_context_checkpoints_deleted,
                     )?;
+                    report.deleting_session_proposal_payloads_purged = add_count(
+                        report.deleting_session_proposal_payloads_purged,
+                        proposal_payloads_purged,
+                    )?;
+                    if proposal_payload_purge_blocked {
+                        report.proposal_payload_purges_blocked = report
+                            .proposal_payload_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                     report.deleting_session_attachment_cleanups_requested = add_count(
                         report.deleting_session_attachment_cleanups_requested,
                         attachment_cleanups_requested,
@@ -1339,6 +1711,7 @@ enum SessionPruneOutcome {
     Conflict,
     Noop {
         messages_blocked: usize,
+        proposal_payload_purge_blocked: bool,
         attachment_cleanup_blocked: bool,
         run_checkpoint_purge_ready: bool,
         run_checkpoint_purge_blocked: bool,
@@ -1347,6 +1720,8 @@ enum SessionPruneOutcome {
         live_delta_events_deleted: usize,
         deleting_session_events_deleted: usize,
         deleting_session_context_checkpoints_deleted: usize,
+        proposal_payloads_purged: usize,
+        proposal_payload_purge_blocked: bool,
         attachment_cleanups_requested: usize,
         attachments_deleted: usize,
         attachment_cleanup_blocked: bool,
@@ -1411,6 +1786,64 @@ fn validate_message(
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
     }
     Ok(())
+}
+
+fn validate_proposal(
+    proposal: &AiProposalRecord,
+    session: &AiSessionRecord,
+) -> Result<(), OrmPublicError> {
+    if proposal.id.is_nil()
+        || proposal.session_id != session.id
+        || proposal.run_id.is_nil()
+        || proposal.scope_kind != session.scope_kind
+        || proposal.scope_id != session.scope_id
+        || proposal.scope_kind.trim().is_empty()
+        || proposal.scope_kind.len() > 128
+        || proposal.scope_id.trim().is_empty()
+        || proposal.scope_id.len() > 512
+        || proposal.proposal_type.trim().is_empty()
+        || proposal.proposal_type.len() > 512
+        || proposal.schema_version.trim().is_empty()
+        || proposal.schema_version.len() > 512
+        || !(0..=10_000).contains(&proposal.item_count)
+        || !matches!(
+            proposal.state.as_str(),
+            "pending_review" | "accepted" | "accepted_edited" | "rejected" | "applied" | "expired"
+        )
+        || proposal.created_by_subject.trim().is_empty()
+        || proposal.created_by_subject.len() > 512
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn validate_proposal_item(
+    item: &AiProposalItemRecord,
+    proposal_id: Uuid,
+    expected_index: usize,
+) -> Result<(), OrmPublicError> {
+    if item.id.is_nil()
+        || item.proposal_id != proposal_id
+        || i64::try_from(expected_index).ok() != Some(item.item_index)
+        || item.stable_path.trim().is_empty()
+        || item.stable_path.len() > 4_096
+        || item
+            .review_decision
+            .as_ref()
+            .is_some_and(|decision| decision.trim().is_empty() || decision.len() > 128)
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
+    matches!(proposal.state.as_str(), "rejected" | "applied" | "expired")
+        || (proposal.state == "pending_review"
+            && proposal
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now))
 }
 
 fn validate_attachment(
@@ -1819,6 +2252,64 @@ mod tests {
             .expect("attachment should seed");
         }
         (message_id, run_id)
+    }
+
+    async fn seed_proposal(
+        database: &Database<SqliteBackend>,
+        scope: &AiScope,
+        session_id: Uuid,
+        run_id: Uuid,
+        state: &str,
+        expires_at: Option<i64>,
+        with_item: bool,
+    ) -> (Uuid, Option<Uuid>) {
+        let proposal_id = Uuid::new_v4();
+        AiProposalRecord::insert(
+            database,
+            CreateAiProposalRecordInput {
+                id: proposal_id,
+                session_id,
+                run_id,
+                scope_kind: scope.kind.clone(),
+                scope_id: scope.id.clone(),
+                proposal_type: "test.retention".to_owned(),
+                schema_version: "v1".to_owned(),
+                item_count: i64::from(with_item),
+                protected_payload: Some(serde_json::json!({"protected": "proposal"})),
+                source_references: Some(serde_json::json!([{"kind": "message"}])),
+                payload_purged_at: None,
+                state: state.to_owned(),
+                created_by_subject: "retention-user".to_owned(),
+                reviewed_by_subject: (state != "pending_review")
+                    .then(|| "retention-reviewer".to_owned()),
+                applied_resource_ref: None,
+                application_audit_ref: None,
+                reviewed_at: (state != "pending_review").then_some(now().unix_timestamp() - 90),
+                expires_at,
+            },
+        )
+        .await
+        .expect("proposal should seed");
+        let item_id = with_item.then(Uuid::new_v4);
+        if let Some(item_id) = item_id {
+            AiProposalItemRecord::insert(
+                database,
+                CreateAiProposalItemRecordInput {
+                    id: item_id,
+                    proposal_id,
+                    item_index: 0,
+                    stable_path: "/title".to_owned(),
+                    protected_suggested_value: Some(serde_json::json!("suggested")),
+                    protected_rationale: Some(serde_json::json!("reason")),
+                    source_references: Some(serde_json::json!([{"kind": "message"}])),
+                    review_decision: Some("accepted".to_owned()),
+                    protected_review_value: Some(serde_json::json!("reviewed")),
+                },
+            )
+            .await
+            .expect("proposal item should seed");
+        }
+        (proposal_id, item_id)
     }
 
     async fn seed_events(database: &Database<SqliteBackend>, session_id: Uuid) {
@@ -2284,6 +2775,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_session_proposal_payloads_precede_message_scrubbing() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let (proposal_id, item_id) = seed_proposal(
+            &database,
+            &scope,
+            session_id,
+            run_id,
+            "pending_review",
+            Some(now().unix_timestamp() - 1),
+            true,
+        )
+        .await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let proposal_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("retention should scrub the expired proposal first");
+        assert_eq!(proposal_pass.sessions_changed, 1);
+        assert_eq!(proposal_pass.deleting_session_proposal_payloads_purged, 1);
+        assert_eq!(proposal_pass.proposal_payload_purges_blocked, 0);
+        assert_eq!(proposal_pass.message_contents_purged, 0);
+        let proposal = AiProposalRecord::find_by_id(&database, &proposal_id)
+            .await
+            .expect("proposal lookup should succeed")
+            .expect("proposal metadata should remain");
+        assert_eq!(proposal.state, "expired");
+        assert!(proposal.protected_payload.is_none());
+        assert!(proposal.source_references.is_none());
+        assert_eq!(proposal.payload_purged_at, Some(now().unix_timestamp()));
+        let item = AiProposalItemRecord::find_by_id(
+            &database,
+            &item_id.expect("proposal item should exist"),
+        )
+        .await
+        .expect("proposal-item lookup should succeed")
+        .expect("proposal-item metadata should remain");
+        assert!(item.protected_suggested_value.is_none());
+        assert!(item.protected_rationale.is_none());
+        assert!(item.source_references.is_none());
+        assert!(item.protected_review_value.is_none());
+        assert_eq!(item.review_decision.as_deref(), Some("accepted"));
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should remain");
+        assert!(message.protected_preview.is_some());
+
+        let message_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("later retention should scrub message content");
+        assert_eq!(message_pass.deleting_session_proposal_payloads_purged, 0);
+        assert_eq!(message_pass.message_contents_purged, 1);
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message metadata should remain");
+        assert!(message.protected_preview.is_none());
+        assert!(message.content_purged_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn accepted_proposal_blocks_deleting_session_payload_retention() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let (proposal_id, _) = seed_proposal(
+            &database, &scope, session_id, run_id, "accepted", None, false,
+        )
+        .await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("accepted proposal should fail closed without mutation");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.deleting_session_proposal_payloads_purged, 0);
+        assert_eq!(report.proposal_payload_purges_blocked, 1);
+        assert_eq!(report.message_contents_purged, 0);
+        let proposal = AiProposalRecord::find_by_id(&database, &proposal_id)
+            .await
+            .expect("proposal lookup should succeed")
+            .expect("accepted proposal should remain");
+        assert!(proposal.protected_payload.is_some());
+        assert!(proposal.source_references.is_some());
+        assert!(proposal.payload_purged_at.is_none());
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should remain");
+        assert!(message.protected_preview.is_some());
+    }
+
+    #[tokio::test]
+    async fn proposal_lookahead_blocks_the_whole_deleting_session_set() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (_, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let first = seed_proposal(
+            &database, &scope, session_id, run_id, "rejected", None, false,
+        )
+        .await
+        .0;
+        let second = seed_proposal(
+            &database, &scope, session_id, run_id, "rejected", None, false,
+        )
+        .await
+        .0;
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_proposal_limits(1, 5_000)
+            .expect("proposal lookahead limit should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("over-bound proposals should remain closed");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.proposal_payload_purges_blocked, 1);
+        assert_eq!(report.deleting_session_proposal_payloads_purged, 0);
+        for proposal_id in [first, second] {
+            let proposal = AiProposalRecord::find_by_id(&database, &proposal_id)
+                .await
+                .expect("proposal lookup should succeed")
+                .expect("over-bound proposal should remain");
+            assert!(proposal.protected_payload.is_some());
+            assert!(proposal.payload_purged_at.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn deleting_session_attachment_cleanup_precedes_message_scrubbing() {
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
@@ -2598,6 +3245,16 @@ mod tests {
         assert_eq!(attachment_limits.maximum_attachments_per_session(), 2);
         assert!(matches!(
             attachment_limits.with_attachment_limit(0),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        let proposal_limits = AiSessionRetentionLimits::new(1, 10, 10, 10)
+            .expect("base retention limits should validate")
+            .with_proposal_limits(2, 3)
+            .expect("independent proposal limits should validate");
+        assert_eq!(proposal_limits.maximum_proposals_per_session(), 2);
+        assert_eq!(proposal_limits.maximum_proposal_items_per_session(), 3);
+        assert!(matches!(
+            proposal_limits.with_proposal_limits(0, 3),
             Err(AiError::InvalidConfiguration(_))
         ));
     }

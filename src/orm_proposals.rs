@@ -371,9 +371,16 @@ impl OrmAiProposalService {
                     "protected_payload",
                     &scope,
                 ),
-                &record.protected_payload,
+                record
+                    .protected_payload
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?,
             )
             .await?;
+        let sources = record
+            .source_references
+            .clone()
+            .ok_or(AiError::PersistenceFailed)?;
         let state = if record.state == "pending_review"
             && record
                 .expires_at
@@ -392,7 +399,7 @@ impl OrmAiProposalService {
             proposal_type: record.proposal_type.clone(),
             schema_version: record.schema_version.clone(),
             payload: async_graphql::Json(payload),
-            sources: async_graphql::Json(record.source_references.clone()),
+            sources: async_graphql::Json(sources),
             item_count: record.item_count,
             state,
             created_by_subject: record.created_by_subject.clone(),
@@ -522,8 +529,13 @@ impl AiProposalService for OrmAiProposalService {
                     AiError::InvalidInput("edited proposal item count is invalid".to_owned())
                 })?;
                 let proposal_type = AiProposalTypeId::parse(current.proposal_type.clone())?;
-                let sources = serde_json::from_value(current.source_references.clone())
-                    .map_err(|_| AiError::PersistenceFailed)?;
+                let sources = serde_json::from_value(
+                    current
+                        .source_references
+                        .clone()
+                        .ok_or(AiError::PersistenceFailed)?,
+                )
+                .map_err(|_| AiError::PersistenceFailed)?;
                 let validated = self.catalog.validate(AiProposalDraft {
                     proposal_type,
                     session_id: AiSessionId(current.session_id),
@@ -630,7 +642,7 @@ impl AiProposalService for OrmAiProposalService {
                             current.row_version,
                             AiProposalRecordWhereInput::default(),
                             UpdateAiProposalRecordInput {
-                                protected_payload: replacement_payload,
+                                protected_payload: replacement_payload.map(Some),
                                 item_count: replacement_item_count,
                                 state: Some(state.to_owned()),
                                 reviewed_by_subject: Some(Some(reviewer)),

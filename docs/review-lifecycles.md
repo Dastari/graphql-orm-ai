@@ -46,6 +46,16 @@ and authoritative application audit/resource references. The service freshly
 rehydrates and authorizes that linkage. It never performs or retries the domain
 mutation. An exact repeated link is idempotent; a conflicting link is rejected.
 
+After a session enters `deleting` and reaches its exact current content-purge
+cutoff, proposal reads/reviews/outcome links remain inaccessible. The bounded
+session-retention worker may later clear protected parent/item content only for
+rejected, applied, expired, or expired pending-review proposals whose owning
+run is terminal. It preserves non-content identity, schema, review, outcome,
+application-audit, timestamp, and CAS metadata. Accepted or accepted-edited
+proposals remain blocked because a domain mutation/outcome boundary may be
+unresolved; operators must reconcile that state rather than treating deletion
+as proof that an application effect did or did not occur.
+
 ## Approval request
 
 The host builds `AiCanonicalActionPreview` from current server-owned policy and

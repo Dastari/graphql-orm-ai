@@ -1,18 +1,20 @@
 # Bounded Session Retention
 
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
-for six narrowly defined classes of protected chat data:
+for narrowly defined classes of protected chat data:
 
 - expired provisional `provider_live_delta` session events;
 - expired preview/block content from finalized messages whose producing run is
   terminal and which have no linked attachment;
 - after a deleting-session cutoff, every bounded protected session event;
-- after that cutoff, protected context-summary checkpoints, followed only on a
-  later pass by the same safely detachable terminal message content, even when
-  ordinary message retention is disabled; and
-- after context summaries are exhausted, artifact-free attachments coordinated
+- after that cutoff, protected context-summary checkpoints;
+- after context summaries are exhausted, terminal proposal and optional
+  proposal-item protected content under whole-session lookahead bounds;
+- after proposal payloads are exhausted, artifact-free attachments coordinated
   through separately verified exact-reference blob cleanup, followed by their
-  ordinary metadata rows; and
+  ordinary metadata rows;
+- after attachments are exhausted, the same safely detachable terminal message
+  content even when ordinary message retention is disabled; and
 - after all those protected sources are exhausted, immutable coordinator
   checkpoints belonging to a bounded, entirely terminal run set.
 
@@ -28,6 +30,8 @@ and validated `AiSessionRetentionLimits`. Use
 `new_with_context_checkpoints` when context summaries need a limit distinct
 from the message-row limit, and chain `with_run_checkpoint_limits` when run
 proofs and immutable checkpoint pages need independent bounds. Chain
+`with_proposal_limits` when whole-session proposal and proposal-item proofs need
+independent bounds. Chain
 `with_attachment_limit` when a whole-session attachment proof needs its own
 bound. Schedule `OrmAiAttachmentService::cleanup_once` independently; session
 retention never performs storage I/O. Start a complete scan cycle by calling
@@ -41,8 +45,9 @@ states only what that completed page changed; it is not a global erasure
 certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
-`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
-never treat a partial scan cycle as complete.
+`proposal_payload_purges_blocked`, or `run_checkpoint_purges_blocked`. Also
+alert on attachment cleanup failures and never treat a partial scan cycle as
+complete.
 
 ## Policy and deletion rules
 
@@ -73,11 +78,30 @@ context deletion may share one transaction and one redacted audit, but a
 summary can never remain after this worker has scrubbed content it could
 cover.
 
-Only after the context page is empty does retention load the session's entire
-attachment set under a configured lookahead bound. Any over-bound set blocks
-the session. An attachment artifact also blocks its parent immediately because
-artifact blobs, protected derivatives, and provider-file references need an
-independent deletion lifecycle. For an artifact-free row, retention either:
+Only after the context page is empty does retention load the complete proposal
+set and every optional proposal item under independent lookahead bounds. It
+validates exact session/scope/run bindings, stable item ordering, and a terminal
+owning run without opening protected values. Rejected, applied, expired, and
+expired pending-review proposals are eligible. An expired pending review is
+changed to `expired`. Accepted and accepted-edited proposals remain blocked
+because a trusted application mutation or authoritative outcome record may
+still be pending.
+
+For an eligible whole-session set, one transaction clears item suggested
+values, rationales, sources, and protected review values before clearing each
+parent payload/source pair and writing `payload_purged_at`. Proposal and item
+identity, type/schema, logical count, state, review decisions, creator/reviewer,
+application resource/audit links, timestamps, and row versions remain as
+non-content metadata. Any over-bound set, nonterminal run, unresolved accepted
+state, malformed binding, or CAS race leaves all proposal content in place.
+Attachment coordination and message scrubbing wait until a later pass.
+
+Only after proposal payloads are exhausted does retention load the session's
+entire attachment set under a configured lookahead bound. Any over-bound set
+blocks the session. An attachment artifact also blocks its parent immediately
+because artifact blobs, protected derivatives, and provider-file references
+need an independent deletion lifecycle. For an artifact-free row, retention
+either:
 
 - deletes ordinary metadata already proven fully cleaned and tombstoned by a
   positive cleanup generation;
@@ -109,12 +133,13 @@ The transaction clears the protected preview, deletes exact block rows, writes
 fact. Any failure rolls back the whole session change.
 
 Run-checkpoint purge starts only in a later pass that proves no protected
-session event, context checkpoint, attachment row, or unpurged message content
-remains. The run query uses a lookahead bound and every returned run must belong
-to the session, have valid fencing metadata, and be terminal. Each non-null
-current checkpoint pointer must identify an exact, structurally valid
-checkpoint for that run. The ordinary state-machine transaction clears those
-pointers with CAS before any physical deletion can start.
+session event, context checkpoint, proposal/item payload, attachment row, or
+unpurged message content remains. The run query uses a lookahead bound and every
+returned run must belong to the session, have valid fencing metadata, and be
+terminal. Each non-null current checkpoint pointer must identify an exact,
+structurally valid checkpoint for that run. The ordinary state-machine
+transaction clears those pointers with CAS before any physical deletion can
+start.
 
 The worker then opens a generated `graphql-orm` retention transaction. It
 reloads and validates the deleting session, current scope policy, cutoff,
@@ -148,14 +173,16 @@ retention never requires loading the complete transcript into the DOM.
 
 This workflow does not delete session or message metadata, attachment artifacts
 or provider-persistent files, runs, run attempts/outcomes, tool calls/results,
-proposals, approvals, provider raw payloads, usage, egress decisions, audit
-facts, pricing/skill history, or restore evidence. It therefore advances but
-does not complete the `deleting` session lifecycle. Basic attachment objects
-and metadata are eligible only through the two-worker proof above; artifacts
-remain deliberately closed. Unsafe message or run dependencies remain in
-place and are counted as blocked. The remaining resources require separate
-workers with their own dependency ordering, external delete confirmation,
-fencing, restore reconciliation, and audit contracts.
+proposal metadata, approvals, provider raw payloads, usage, egress decisions,
+audit facts, pricing/skill history, or restore evidence. It therefore advances
+but does not complete the `deleting` session lifecycle. Proposal protected
+content is eligible only through the terminal whole-session proof above; an
+unresolved accepted proposal remains deliberately closed. Basic attachment
+objects and metadata are eligible only through the two-worker proof above;
+artifacts remain deliberately closed. Unsafe message or run dependencies
+remain in place and are counted as blocked. The remaining resources require
+separate workers with their own dependency ordering, external delete
+confirmation, fencing, restore reconciliation, and audit contracts.
 
 Ordinary message-retention expiry does not yet delete context checkpoints. The
 context-compaction producer remains unimplemented and must stay disabled until
