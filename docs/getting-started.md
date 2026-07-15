@@ -81,7 +81,9 @@ camelCase to PascalCase.
    trusted bounded host worker.
 12. Schedule `OrmAiSessionRetentionService` as a separate trusted host worker.
    Start a scan cycle with no cursor and continue its bounded keyset pages until
-   `next_session_cursor` is absent. This prunes eligible provisional deltas;
+   `next_session_cursor` is absent. This prunes eligible provisional deltas and
+   age-expired terminal tool/approval protected payloads under the current
+   `raw_payload_retention_seconds` policy while preserving newer/live authority;
    after a deleting-session cutoff it also removes bounded protected session
    events, then protected context-summary checkpoints, tombstones terminal
    proposal/item protected content under whole-session bounds, then tombstones

@@ -4,6 +4,45 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: age-based terminal tool payload retention (crate 0.40.0 to 0.41.0; schema 0.38.0 to 0.39.0)
+
+Apply AI schema module `0.39.0` while session, run, tool, approval,
+coordinator, retention, and restore workers are closed. Do not run 0.41.0 code
+against a module still registered as 0.38.0. The generated migration adds no
+table, column, index, constraint, or entity and rewrites no row data. The module
+version advances because `raw_payload_retention_seconds` now has an operational
+persistent meaning for the tool/approval tombstones introduced in 0.40.0. No
+application SQL, consumer-table change, protected-value rewrite, or
+application-authored data copy is required.
+
+For active, archived, and pre-deletion-cutoff sessions, a bounded retention
+pass now computes the exact current policy cutoff and considers only tool calls
+whose trusted `completed_at` is at or before it. The owning run and exact
+application-tool step must be terminal, and any referenced one-shot approval
+must be exact, terminal, and state-compatible. Eligible approval resource
+bindings/action previews are cleared before the matching tool arguments/result,
+and both rows receive `payload_purged_at`. Newer calls and nonterminal runs or
+pending/approved/resume-claimed approvals remain intact and do not block an
+independent eligible terminal subset. A malformed eligible graph, missing
+completion time, lookahead overflow, or CAS race fails closed without partial
+scrubbing.
+
+The same redacted IDs, hashes, states, authorization and egress evidence,
+approval decision/use metadata, application audit references, timestamps, and
+CAS versions documented for 0.40.0 remain. Provider adapters do not persist raw
+HTTP response envelopes; they normalize bounded results. Protected provider
+state inside coordinator checkpoints has a separate dependency lifecycle and
+is not removed by this age-based tool phase.
+
+`AiSessionRetentionReport` adds `expired_tool_payloads_purged`,
+`expired_approval_payloads_purged`, and `raw_payload_purges_blocked`.
+Downstream exhaustive struct literals must initialize the new fields or use
+`..Default::default()`. This is a pre-1.0 public Rust API, schema-module
+semantic, and retention-behavior change. It changes no public GraphQL SDL,
+Cargo feature/default, private entity shape/count, append-only policy, or
+consumer schema. Run complete bounded scan cycles after migration; one report
+is not an erasure certificate.
+
 ## Unreleased: deleting-session tool and approval tombstones (crate 0.39.0 to 0.40.0; schema 0.37.0 to 0.38.0)
 
 Apply AI schema module `0.38.0` while session, run, tool, approval, proposal,

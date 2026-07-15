@@ -182,6 +182,13 @@ references remain after protected arguments/results/resources/previews are
 tombstoned. Any active wait, recovery-required run, or ambiguous binding keeps
 the payloads and every later deletion phase closed.
 
+Outside the deleting-session cutoff, the current raw-payload age policy may
+tombstone a completed supervised call and consumed approval only after its run,
+finished step, and exact state-compatible one-shot binding are terminal. A
+newer or active supervised wait is not eligible and remains usable; it does not
+become purge authority for itself. Provider continuation state in an immutable
+checkpoint remains separate and is never inferred absent from a tool tombstone.
+
 An exact complete provider-retained result can be requeued after lease loss,
 reopened under current principal/rule/protection authority, and consumed once
 before later transport without executing the resolver again. The coordinator

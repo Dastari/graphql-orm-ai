@@ -5,13 +5,24 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.40.0` and the
-AI schema module to `0.38.0`. It keeps 39 private entities, adds nullable
-tool-call and approval payload-purge timestamps, and makes the protected tool
-arguments plus approval resource bindings/action preview nullable so exact
-deleting-session tombstones can retain non-content authority and audit facts.
+This development line advances the pre-1.0 crate version to `0.41.0` and the
+AI schema module to `0.39.0`. It keeps 39 private entities and gives the
+existing raw-payload retention setting a fail-closed age-based meaning for
+terminal tool and approval protected content while preserving live authority.
 
 ### Added
+
+- `raw_payload_retention_seconds` now drives age-based tool/approval payload
+  tombstones for active, archived, or pre-cutoff deleting sessions. The worker
+  selects only calls whose completion time has expired and whose owning run,
+  exact application-tool step, and optional one-shot approval are terminal and
+  state-compatible. Newer or live runs/calls/approvals remain untouched and do
+  not prevent an independent expired terminal subset from being scrubbed.
+- `AiSessionRetentionReport` now counts expired tool and approval payloads plus
+  sessions whose complete raw-payload lookahead proof exceeded a deployment
+  bound or was malformed. Provider adapters continue to normalize responses
+  without persisting raw HTTP envelopes. Protected coordinator state remains a
+  separate retention dependency and is not claimed by this slice.
 
 - Deleting-session retention now tombstones protected tool arguments/results
   and approval resource bindings/action previews after proposal content and

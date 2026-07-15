@@ -168,6 +168,13 @@ cleared current pointers before deleting an exact ordered checkpoint page.
 Active or uncertain authority can therefore never be discarded merely to make
 a checkpoint purge eligible.
 
+The ordinary `raw_payload_retention_seconds` cutoff can independently
+tombstone an age-expired terminal tool/approval row while leaving the immutable
+checkpoint in place. That tombstone proves only that the row payload is gone;
+it does not assert that normalized provider/tool state embedded in a checkpoint
+has been removed. Checkpoint state remains protected, append-only, and subject
+to its own pointer, run, scope, age/deletion, and maintenance proofs.
+
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already
 documented.

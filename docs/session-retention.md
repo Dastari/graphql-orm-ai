@@ -4,6 +4,9 @@
 for narrowly defined classes of protected chat data:
 
 - expired provisional `provider_live_delta` session events;
+- age-expired protected tool arguments/results and approval resource
+  bindings/action previews for exact terminal calls under the current
+  `raw_payload_retention_seconds` policy;
 - expired preview/block content from finalized messages whose producing run is
   terminal and which have no linked attachment;
 - after a deleting-session cutoff, every bounded protected session event;
@@ -49,9 +52,9 @@ states only what that completed page changed; it is not a global erasure
 certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
-`proposal_payload_purges_blocked`, `tool_payload_purges_blocked`, or
-`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
-never treat a partial scan cycle as complete.
+`proposal_payload_purges_blocked`, `tool_payload_purges_blocked`,
+`raw_payload_purges_blocked`, or `run_checkpoint_purges_blocked`. Also alert on
+attachment cleanup failures and never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -64,6 +67,24 @@ Expired provisional deltas are selected only by the fixed
 `provider_live_delta` event kind. Their protected payloads are never opened.
 Deleting one may create a sequence gap; sequence heads never move backward and
 sequence values are never reused.
+
+For active, archived, or pre-cutoff deleting sessions, the worker also computes
+`now - raw_payload_retention_seconds` with checked arithmetic. It loads the
+complete session run and tool-call sets under lookahead bounds, but selects only
+calls whose owning run and call state are terminal and whose trusted completion
+timestamp is at or before that cutoff. Any referenced approval must be the
+exact state-compatible terminal one-shot record. The complete eligible subset
+and its pre-purge payload shape validate before approval resources/previews are
+cleared ahead of tool arguments/results. Each changed row receives
+`payload_purged_at` and the transaction appends redacted audit.
+
+Newer calls, nonterminal runs, and pending/approved/resume-claimed approvals are
+not eligible and remain intact; they do not prevent an independently expired
+terminal subset from being scrubbed. Lookahead overflow or malformed eligible
+linkage blocks the age-based phase without a partial update. Provider adapters
+normalize bounded responses and do not persist raw HTTP envelopes. Protected
+provider/tool continuation state in immutable coordinator checkpoints is a
+separate dependency and is not removed by this age-based phase.
 
 A session in `deleting` state must carry the exact `deleted_at` timestamp
 written by the authenticated session lifecycle. Once that timestamp plus the
@@ -123,12 +144,12 @@ attachment and message phases wait for a separate pass. Ordinary approval,
 checkpoint, and consequential-tool paths treat a tombstoned protected value as
 unusable and fail closed.
 
-Only after tool and approval payloads are exhausted does retention load the session's
-entire attachment set under a configured lookahead bound. Any over-bound set
-blocks the session. An attachment artifact also blocks its parent immediately
-because artifact blobs, protected derivatives, and provider-file references
-need an independent deletion lifecycle. For an artifact-free row, retention
-either:
+Only after tool and approval payloads are exhausted does retention load the
+session's entire attachment set under a configured lookahead bound. Any
+over-bound set blocks the session. An attachment artifact also blocks its
+parent immediately because artifact blobs, protected derivatives, and
+provider-file references need an independent deletion lifecycle. For an
+artifact-free row, retention either:
 
 - deletes ordinary metadata already proven fully cleaned and tombstoned by a
   positive cleanup generation;
@@ -201,12 +222,16 @@ retention never requires loading the complete transcript into the DOM.
 
 This workflow does not delete session or message metadata, attachment artifacts
 or provider-persistent files, runs, run attempts/outcomes, tool-call or
-approval metadata, proposal metadata, provider raw payloads, usage, egress
-decisions, audit facts, pricing/skill history, or restore evidence. It therefore
+approval metadata, proposal metadata, protected normalized coordinator state,
+usage, egress decisions, audit facts, pricing/skill history, or restore
+evidence. It therefore
 advances but does not complete the `deleting` session lifecycle. Proposal
-protected content and tool/approval protected payloads are eligible only
-through their terminal whole-session proofs above; unresolved accepted
-proposals and active or uncertain tool authority remain deliberately closed.
+protected content is eligible only through its terminal whole-session proof.
+Tool/approval protected payloads may use either the selective age-based proof
+or, after the deletion cutoff, their terminal whole-session proof. Unresolved
+accepted proposals and active or uncertain tool authority remain deliberately
+closed. No raw provider HTTP envelope is persisted, but protected normalized
+provider state in coordinator checkpoints remains until its separate lifecycle.
 Basic attachment objects and metadata are eligible only through the two-worker
 proof above; artifacts remain deliberately closed. Unsafe message or run
 dependencies remain in place and are counted as blocked. The remaining

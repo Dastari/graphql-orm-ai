@@ -67,6 +67,14 @@ or over-bound authority stays intact and blocks later attachment/message and
 checkpoint cleanup. Tombstoned terminal approvals cannot be read, consumed, or
 reconstructed as fresh authority.
 
+The same terminal graph can become eligible earlier under the current scope's
+`raw_payload_retention_seconds` cutoff. This age-based path selects only
+expired completed calls on terminal runs; it leaves newer calls and every live
+wait or run intact, even when it safely tombstones an older terminal subset in
+the same session. Protected coordinator state remains a separate dependency.
+Retained hashes and decision/use facts prove what was authorized but cannot
+reconstruct the removed preview, resources, arguments, or result.
+
 ## Approval request
 
 The host builds `AiCanonicalActionPreview` from current server-owned policy and

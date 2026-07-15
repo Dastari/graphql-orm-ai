@@ -36,20 +36,20 @@ waits without polling, resuming, or executing them.
   periodic current-principal reauthorization, explicit retention-gap reset,
   and a GraphQL-policy-driven bounded pruning worker.
 - A host-only bounded session-retention worker that uses generated ORM
-  transactions to remove expired provisional deltas, purge all bounded
-  protected session events after the deleting-session cutoff, delete bounded
-  protected context-summary checkpoints before they can outlive covered
-  content, tombstone only terminal proposal/item payloads under whole-session
-  bounds, tombstone only exactly linked terminal tool/approval payloads after a
-  complete bounded authority proof, coordinate artifact-free attachment objects
-  through independently verified exact-reference cleanup, delete only confirmed
-  attachment tombstones, scrub eligible terminal message content, clear
-  validated terminal run-checkpoint pointers, and finally purge bounded
-  immutable checkpoint pages under the exact current GraphQL-managed scope
-  policy. Proposal/tool/approval/message/run metadata remains, sequence gaps
-  force bounded client reset, and unresolved accepted proposals, active or
-  uncertain tool authority, attachment artifacts, nonterminal work, and other
-  append-only security facts stay closed.
+  transactions to remove expired provisional deltas and age-expired terminal
+  tool/approval protected payloads, purge all bounded protected session events
+  after the deleting-session cutoff, delete bounded protected context-summary
+  checkpoints before they can outlive covered content, tombstone only terminal
+  proposal/item payloads under whole-session bounds, tombstone only exactly
+  linked terminal tool/approval payloads after a complete bounded authority
+  proof, coordinate artifact-free attachment objects through independently
+  verified exact-reference cleanup, delete only confirmed attachment
+  tombstones, scrub eligible terminal message content, clear validated terminal
+  run-checkpoint pointers, and finally purge bounded immutable checkpoint pages
+  under the exact current GraphQL-managed scope policy. Newer/live tool
+  authority and all non-content metadata remain; unresolved accepted proposals,
+  attachment artifacts, nonterminal work, and other append-only security facts
+  stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
