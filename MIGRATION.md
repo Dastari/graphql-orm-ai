@@ -4,6 +4,62 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: deleting-session lifecycle closure (crate 0.44.0 to 0.45.0; schema 0.42.0 to 0.43.0)
+
+Apply AI schema module `0.43.0` while session, inbox, retention, attachment,
+backup/restore, and runtime workers are closed. Do not run 0.45.0 code against
+a module still registered as 0.42.0. The generated migration keeps 39 private
+entities, makes the private inbox protected-payload column nullable, and adds a
+nullable payload-purge timestamp plus a defaulted CAS row version. It adds no
+table, index, constraint, or entity. Existing inbox rows remain in the retained
+payload state; no application-authored SQL, data copy, or content rewrite is
+required. Private session-state and inbox-session filters also become explicit,
+and `deleted` becomes a durable terminal session state.
+
+Deleting-session retention now queries protected principal-inbox events by
+their exact session binding and CAS-clears one bounded page of payloads after
+the current `deleted_content_purge_seconds` cutoff. Each row receives a trusted
+purge timestamp while its principal sequence is retained, so this worker does
+not punch a hole in the shared cross-session stream. Inbox readers encountering
+a tombstone require an explicit cursor reset; ordinary prefix pruning may later
+delete the row contiguously. Message content cannot be scrubbed in the same pass
+that finds an unpurged inbox page, so a duplicated notification payload cannot
+outlive its source message. Use
+`AiSessionRetentionLimits::with_inbox_event_limit` when inbox and session-event
+cardinality need different hard bounds.
+
+Once every ordered phase is exhausted, the worker re-proves the current policy
+and cutoff, zero remaining session/context/attachment protected rows, a
+complete database-side proof that no exact-session inbox row lacks its payload-
+purge timestamp, complete retained message tombstones, a bounded entirely
+terminal run set, zero current checkpoint pointers, and zero immutable
+coordinator checkpoints.
+The immediately preceding append-only purge transaction has independently
+re-proved proposal/item and tool/approval tombstones plus exact external-object
+absence. Only then does one state-machine transaction replace the user-authored
+title with an empty tombstone, transition `deleting` to `deleted`, and append a
+redacted `finalize_session_deletion` audit. Audit, usage, egress, attempt,
+message/run tombstone, ownership/scope, and other required non-content security
+facts remain.
+
+Session list queries now constrain state before pagination so deleting/deleted
+shells cannot consume visible windows. Direct lookup also hides any session
+with `deleted_at`, and repeated delete requests return success for either
+`deleting` or `deleted`. No public GraphQL SDL changes. The public Rust report
+adds `deleting_session_inbox_payloads_purged` and
+`deleting_sessions_finalized`; exhaustive literals must initialize them or use
+`..Default::default()`. Restore collectors must extend their existing
+`invalid_session_retention_count` validation to reject a `deleted` shell with a
+nonempty title, a malformed inbox payload tombstone, any remaining
+protected/external session dependency, a nonterminal run, current or retained
+checkpoint, missing message tombstone, or an invalid deletion audit transition.
+
+There is no application-authored data migration. Existing `deleting` sessions
+continue through bounded scheduled passes and finalize only after all current
+proofs succeed. Existing serialized restore facts are unchanged. This is an
+intentional pre-1.0 public Rust API, private persistent-semantics, retention,
+restore-validation, session-query, and audit behavior change.
+
 ## Unreleased: protected context compaction (crate 0.43.0 to 0.44.0; schema 0.41.0 to 0.42.0)
 
 Apply AI schema module `0.42.0` while session, run, provider, compaction,

@@ -124,7 +124,8 @@ pub(crate) async fn append_inbox_event(
         sequence,
         session_id: Some(event.session_id),
         event_type: event.event_type,
-        protected_payload: event.protected_payload,
+        protected_payload: Some(event.protected_payload),
+        payload_purged_at: None,
     })
     .await
     .map_err(OrmPublicError::from)?;
@@ -281,6 +282,10 @@ impl OrmAiInboxPruningService {
                             || row.principal_subject != current.principal_subject
                             || row.sequence != expected_sequence
                             || row.sequence > current.stream_head
+                            || !matches!(
+                                (&row.protected_payload, row.payload_purged_at),
+                                (Some(_), None) | (None, Some(_))
+                            )
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
@@ -582,8 +587,25 @@ impl OrmAiInboxService {
         let has_more = rows.len() > first as usize;
         let mut rows = rows;
         rows.truncate(first as usize);
+        let mut retained_payloads = Vec::with_capacity(rows.len());
+        for row in &rows {
+            match (&row.protected_payload, row.payload_purged_at) {
+                (Some(payload), None) => retained_payloads.push(payload.clone()),
+                (None, Some(_)) => {
+                    return Ok(AiInboxEventPage {
+                        events: Vec::new(),
+                        watermark: stream.stream_head,
+                        has_more: false,
+                        reset_required: true,
+                    });
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(AiError::PersistenceFailed);
+                }
+            }
+        }
         let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
+        for (row, protected_payload) in rows.into_iter().zip(retained_payloads) {
             if row.principal_kind != stream.principal_kind
                 || row.principal_subject != stream.principal_subject
                 || row.sequence <= after_sequence
@@ -628,7 +650,7 @@ impl OrmAiInboxService {
                         field: "protected_payload".to_owned(),
                         scope,
                     },
-                    &row.protected_payload,
+                    &protected_payload,
                 )
                 .await?;
             events.push(AiInboxEventView {

@@ -87,7 +87,9 @@ camelCase to PascalCase.
    It also purges expired orphaned protected coordinator checkpoints only after
    terminal run/attempt/budget and final-output or tombstoned-tool re-proof;
    after a deleting-session cutoff it also removes bounded protected session
-   events, then protected context-summary checkpoints, tombstones terminal
+   events and CAS-tombstones bounded session-bound principal-inbox payloads
+   without removing their stream sequences, then protected context-summary
+   checkpoints, tombstones terminal
    proposal/item protected content under whole-session bounds, then tombstones
    terminal tool/approval protected payloads only after proving the complete
    bounded run/call/step/approval graph. It next coordinates attachment
@@ -98,9 +100,10 @@ camelCase to PascalCase.
    only confirmed artifact/attachment tombstones, scrubs eligible terminal
    message content, clears validated
    terminal-run checkpoint pointers, and purges bounded immutable coordinator
-   checkpoints. It does not erase unresolved accepted proposals, active or
-   uncertain tool authority, ambiguous artifact/provider files, other
-   append-only facts, runs, or the session shell; see the
+   checkpoints. After a final complete proof it redacts the title and moves the
+   hidden shell to `deleted`. It does not erase unresolved accepted proposals,
+   active or uncertain tool authority, ambiguous artifact/provider files,
+   required redacted metadata, other append-only facts, or runs; see the
    [retention guide](session-retention.md).
 13. Construct `OrmAiContextCompactionService` from the same fenced run,
    current-principal, owner/scope access, content-protection, and clock

@@ -175,6 +175,7 @@ async fn services(
     OrmAiSessionService,
     OrmAiInboxService,
     OrmAiInboxPruningService,
+    OrmAiSessionRetentionService,
     AuthPrincipal,
     Arc<AtomicBool>,
 ) {
@@ -258,11 +259,18 @@ async fn services(
     .with_reauthorization_interval(reauthorization_interval)
     .with_replay_page_size(1);
     let pruning = OrmAiInboxPruningService::new(
-        database,
+        database.clone(),
         Arc::new(FixedClock::new(now + TimeDuration::seconds(61))),
         AiInboxPruningLimits::new(10, 100).expect("valid pruning limits"),
     );
-    (sessions, inbox, pruning, owner, active)
+    let session_retention = OrmAiSessionRetentionService::new(
+        database,
+        Arc::new(FixedClock::new(now + TimeDuration::seconds(61))),
+        AiSessionRetentionLimits::default()
+            .with_inbox_event_limit(1)
+            .expect("valid session inbox-retention limit"),
+    );
+    (sessions, inbox, pruning, session_retention, owner, active)
 }
 
 async fn create_session(
@@ -287,7 +295,8 @@ async fn create_session(
 
 #[tokio::test]
 async fn owner_pages_atomic_cross_session_events_without_cross_principal_leakage() {
-    let (sessions, inbox, _pruning, owner, _active) = services(Duration::from_secs(60)).await;
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
     let first_session = create_session(&sessions, &owner).await;
     let second_session = create_session(&sessions, &owner).await;
     let sent = sessions
@@ -335,7 +344,8 @@ async fn owner_pages_atomic_cross_session_events_without_cross_principal_leakage
 
 #[tokio::test]
 async fn subscription_replays_to_a_watermark_follows_commits_and_closes_on_revocation() {
-    let (sessions, inbox, _pruning, owner, active) = services(Duration::from_millis(20)).await;
+    let (sessions, inbox, _pruning, _retention, owner, active) =
+        services(Duration::from_millis(20)).await;
     let session = create_session(&sessions, &owner).await;
     let mut stream = inbox
         .inbox_events(owner.clone(), 0)
@@ -377,7 +387,8 @@ async fn subscription_replays_to_a_watermark_follows_commits_and_closes_on_revoc
 
 #[tokio::test]
 async fn pruning_deletes_only_an_expired_prefix_and_requires_cursor_reset() {
-    let (sessions, inbox, pruning, owner, _active) = services(Duration::from_secs(60)).await;
+    let (sessions, inbox, pruning, _retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
     let session = create_session(&sessions, &owner).await;
     for text in ["first", "second"] {
         sessions
@@ -427,8 +438,68 @@ async fn pruning_deletes_only_an_expired_prefix_and_requires_cursor_reset() {
 }
 
 #[tokio::test]
+async fn deleting_session_tombstones_inbox_payloads_without_punching_stream_holes() {
+    let (sessions, inbox, pruning, retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
+    let session = create_session(&sessions, &owner).await;
+    sessions
+        .delete_session(&owner, AiSessionId(session.id))
+        .await
+        .expect("session deletion should start");
+
+    let payload_pass = retention
+        .prune_session_content(None)
+        .await
+        .expect("session-bound inbox payloads should tombstone");
+    assert_eq!(payload_pass.deleting_session_inbox_payloads_purged, 1);
+    assert_eq!(payload_pass.deleting_sessions_finalized, 0);
+    let reset = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("a tombstone should request explicit reset");
+    assert!(reset.reset_required);
+    assert!(reset.events.is_empty());
+    assert_eq!(reset.watermark, 2);
+
+    let second_payload_pass = retention
+        .prune_session_content(None)
+        .await
+        .expect("the next bounded inbox payload should tombstone");
+    assert_eq!(
+        second_payload_pass.deleting_session_inbox_payloads_purged,
+        1
+    );
+    assert_eq!(second_payload_pass.deleting_sessions_finalized, 0);
+
+    let final_pass = retention
+        .prune_session_content(None)
+        .await
+        .expect("dependency-free session should finalize");
+    assert_eq!(final_pass.deleting_sessions_finalized, 1);
+    assert!(
+        sessions
+            .delete_session(&owner, AiSessionId(session.id))
+            .await
+            .expect("delete replay after finalization should remain idempotent")
+    );
+
+    let prefix = pruning
+        .prune_inbox_events()
+        .await
+        .expect("ordinary pruning should retain prefix semantics");
+    assert_eq!(prefix.events_deleted, 1);
+    let stale = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("the advanced prefix still requests reset");
+    assert!(stale.reset_required);
+    assert_eq!(stale.watermark, 2);
+}
+
+#[tokio::test]
 async fn pruning_fails_closed_for_an_unconfigured_scope() {
-    let (sessions, inbox, pruning, owner, _active) = services(Duration::from_secs(60)).await;
+    let (sessions, inbox, pruning, _retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
     sessions
         .create_session(
             &owner,

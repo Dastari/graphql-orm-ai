@@ -13,6 +13,8 @@ for narrowly defined classes of protected chat data:
 - expired preview/block content from finalized messages whose producing run is
   terminal and which have no linked attachment;
 - after a deleting-session cutoff, every bounded protected session event;
+- after that cutoff, bounded protected principal-inbox payload tombstones tied
+  to the session while preserving stream sequence, before any message content;
 - after that cutoff, protected context-summary checkpoints;
 - after context summaries are exhausted, terminal proposal and optional
   proposal-item protected content under whole-session lookahead bounds;
@@ -25,7 +27,9 @@ for narrowly defined classes of protected chat data:
 - after attachments are exhausted, the same safely detachable terminal message
   content even when ordinary message retention is disabled; and
 - after all those protected sources are exhausted, immutable coordinator
-  checkpoints belonging to a bounded, entirely terminal run set.
+  checkpoints belonging to a bounded, entirely terminal run set; and
+- after every checkpoint page is gone, the user-authored title and `deleting`
+  lifecycle state under one final complete proof.
 
 It does not expose a GraphQL mutation and does not issue SQL. All reads, CAS
 updates, deletes, audit appends, keyset cursors, and transactions use generated
@@ -42,6 +46,8 @@ proofs and immutable checkpoint pages need independent bounds. Chain
 `with_proposal_limits` when whole-session proposal and proposal-item proofs need
 independent bounds. Chain `with_tool_payload_limits` when whole-session tool
 call and approval proofs need independent bounds. Chain
+`with_inbox_event_limit` when session-bound principal-inbox pages need a bound
+distinct from session events. Chain
 `with_attachment_limit` when a whole-session attachment proof needs its own
 bound, and `with_attachment_artifact_limit` for the independent complete
 artifact-set proof. Schedule `OrmAiAttachmentService::cleanup_once`
@@ -121,6 +127,18 @@ The same event-page limit applies, so repeated scheduled cycles may be needed.
 Before the cutoff, only ordinary expired live deltas are eligible. A malformed
 state/timestamp pair or arithmetic overflow fails closed without deleting
 content.
+
+The same cutoff selects one independently bounded page of principal-inbox
+events whose session, owner, deterministic scope key, scope fields, tenant,
+and sequence are exact. Their protected payloads are never opened. Each row is
+CAS-updated to clear the payload and record a trusted purge timestamp, and a
+nonempty page defers all message scrubbing to a later pass. The event row and
+principal sequence remain so deletion cannot punch a hole in the shared cross-
+session stream. A reader that reaches a tombstone receives an explicit reset;
+ordinary inbox retention may later delete it only as part of a contiguous
+expired prefix. Repeated bounded pages can exhaust any supported history; final
+session closure does not wait for ordinary inbox age retention to remove those
+tombstone rows.
 
 At the deleting-session cutoff, the worker also selects a bounded page of
 protected context-summary checkpoints. If that page is nonempty, it deletes
@@ -258,6 +276,28 @@ checkpoint entity and policy key on its private database-handle clone.
 Ordinary append-only update/delete remains database-prohibited. Pricing,
 skills, usage, audit, egress, and run-attempt/outcome facts are not opted in.
 
+After that maintenance transaction returns, one final state-machine
+transaction may close the lifecycle. It reloads the exact current policy and
+cutoff and proves zero session events, uses a complete database-side predicate
+to prove no exact-session inbox row lacks its purge timestamp, and proves zero
+context checkpoints, attachment rows, unpurged message content, or coordinator
+checkpoints remain. The retained message set must be complete through
+`message_head`, ordered without gaps, fully tombstoned, and have no block rows.
+The complete bounded run set must be terminal with no current checkpoint
+pointer. The immediately preceding maintenance proof already revalidated every
+proposal, item, tool, approval, external-object, and append-only-checkpoint
+dependency; the deleting state prevents new runtime content from entering
+between these monotonic cleanup transactions.
+
+Only then does a CAS replace the user-authored title with an empty tombstone,
+transition `deleting` to terminal `deleted`, preserve the original
+`deleted_at`, and append `finalize_session_deletion` as a redacted audit fact.
+Any missing policy, changed cutoff, nonterminal run, over-bound history,
+remaining content, pointer/checkpoint, malformed tombstone, or race leaves the
+session in `deleting` for retry. Finalized shells are excluded from later
+retention scans and all user-visible session pagination before windows are
+formed.
+
 ## Reader and frontend behavior
 
 Authorized message pagination retains a small metadata shell. A purged message
@@ -271,16 +311,19 @@ When an event replay window crosses a removed sequence,
 must discard provisional per-run rendering and reload bounded authoritative
 session/message windows. It should continue using virtualized keyset windows;
 retention never requires loading the complete transcript into the DOM.
+Deleting and deleted session shells are not visible through session queries.
 
 ## Deliberate limits
 
-This workflow does not delete session or message metadata, active/ineligible
+This workflow finalizes the supported protected-content lifecycle but does not
+claim physical record, audit, or identity erasure. It does not delete session
+or message metadata, active/ineligible
 attachment artifacts or provider-persistent files lacking exact absence proof,
 runs, run attempts/outcomes, tool-call or approval metadata, proposal metadata,
 current or ineligible protected
 normalized coordinator state, usage, egress decisions, audit facts,
-pricing/skill history, or restore evidence. It therefore
-advances but does not complete the `deleting` session lifecycle. Proposal
+pricing/skill history, or restore evidence. The retained empty-title `deleted`
+shell is required redacted lifecycle evidence. Proposal
 protected content is eligible only through its terminal whole-session proof.
 Tool/approval protected payloads may use either the selective age-based proof
 or, after the deletion cutoff, their terminal whole-session proof. Unresolved
@@ -290,11 +333,8 @@ coordinator state follows the independent age-based proof above; current or
 ambiguous checkpoint state remains.
 Attachment artifacts and basic attachment objects/metadata are eligible only
 through the dependency-ordered two-worker proof above. Unsafe or ambiguous
-artifact, message, or run dependencies remain in place and are counted as
-blocked. The remaining
-resources require separate workers with their own dependency ordering,
-external delete confirmation, fencing, restore reconciliation, and audit
-contracts.
+artifact, message, or run dependencies remain in place, are counted as
+blocked, and prevent lifecycle finalization.
 
 Protected context compaction and latest-valid selection are implemented by
 `OrmAiContextCompactionService`. A producer may be enabled only when it uses
@@ -305,9 +345,13 @@ physically invalidates covering checkpoints before deleting source content;
 deleting-session retention retains its stronger page-before-content order.
 
 Restore collectors must distinguish validated retention gaps from corruption
-and must validate message, context checkpoint, proposal, tool, approval,
+and must validate inbox retained-payload/tombstone shape, message, context
+checkpoint, proposal, tool, approval,
 attachment, and artifact invariants, including exact checkpoint prefix/parent/
 source-hash/provenance/budget evidence, terminal call/step/approval linkage,
 and every artifact parent/cleanup/reference state. A nonzero
 `invalid_context_checkpoint_count` or `invalid_session_retention_count` is
-fatal and keeps runtime readiness closed.
+fatal and keeps runtime readiness closed. A finalized `deleted` shell is valid
+only with an empty title, its original deletion timestamp, no protected or
+external session dependency, complete message tombstones, terminal runs,
+absent current/retained checkpoints, and its redacted finalization audit.

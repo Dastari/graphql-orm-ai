@@ -94,8 +94,11 @@ leaving newer or active authority intact. A database-enforced append-only
 retention transaction may then delete an expired orphaned protected coordinator
 checkpoint only after re-proving its terminal run, closed attempt outcome,
 committed budget, absent current pointer, and durable final output or exact
-tombstoned tool dependencies without reading protected state. After a deleting-session cutoff,
-context summaries are exhausted before terminal proposal/item payloads;
+tombstoned tool dependencies without reading protected state. After a
+deleting-session cutoff, bounded session-bound principal-inbox payloads are
+CAS-tombstoned without removing their shared-stream sequence rows, and context
+summaries are exhausted before message content and terminal proposal/item
+payloads;
 accepted proposals without an applied outcome stay blocked. A later
 whole-session pass proves terminal runs, finished tool steps, and exact terminal
 one-shot approval linkage before clearing every remaining tool argument/result
@@ -108,7 +111,12 @@ separate verified cleanup worker. That worker now fences artifact cleanup ahead
 of parent cleanup, confirms exact local absence, and requires a host-supplied
 authoritative deletion/absence contract for provider references; ambiguous
 artifacts and all immutable audit/usage/fence evidence remain lifecycle
-obligations.
+obligations. Once every protected/external dependency and immutable coordinator
+checkpoint is gone, a final current-policy transaction proves complete message
+tombstones and terminal pointer-free runs, redacts the title, records audit,
+and moves the hidden shell from `deleting` to `deleted`. Required redacted
+metadata remains; this is content-lifecycle closure, not physical audit or
+identity erasure.
 
 Schema migration, backup, restore, and runtime readiness use the dependency-
 owned `AiSchemaModule`. A restored database is not runnable until leases,

@@ -538,6 +538,7 @@ pub(crate) struct AiSessionRecord {
     /// User-visible title.
     pub title: String,
     /// Lifecycle state.
+    #[filterable(type = "string")]
     pub state: String,
     /// Current durable stream head.
     pub stream_head: i64,
@@ -711,15 +712,23 @@ pub(crate) struct AiInboxEventRecord {
     #[sortable]
     pub sequence: i64,
     /// Optional session.
+    #[filterable(type = "uuid")]
     pub session_id: Option<graphql_orm::uuid::Uuid>,
     /// Stable event type.
     pub event_type: String,
-    /// Protected/ciphertext payload envelope.
+    /// Protected/ciphertext payload envelope until session deletion retention.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_payload: serde_json::Value,
+    pub protected_payload: Option<serde_json::Value>,
+    /// Trusted timestamp at which session deletion retention removed the
+    /// protected payload while preserving stream sequence continuity.
+    #[filterable(type = "number")]
+    pub payload_purged_at: Option<i64>,
     /// Created timestamp.
     #[filterable(type = "number")]
     pub created_at: i64,
+    /// CAS version.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
 }
 
 /// Bounded message metadata; large content lives in block rows.
@@ -1847,7 +1856,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.42.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.43.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

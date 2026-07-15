@@ -23,6 +23,9 @@ pub struct AiSessionRetentionReport {
     pub live_delta_events_deleted: u32,
     /// Protected event rows deleted after a session-deletion retention cutoff.
     pub deleting_session_events_deleted: u32,
+    /// Protected principal-inbox payloads tombstoned after a session-deletion
+    /// retention cutoff and before message content.
+    pub deleting_session_inbox_payloads_purged: u32,
     /// Protected context-summary checkpoints deleted before message scrubbing.
     pub deleting_session_context_checkpoints_deleted: u32,
     /// Context-summary checkpoints invalidated by physical deletion before an
@@ -65,6 +68,10 @@ pub struct AiSessionRetentionReport {
     /// Fully tombstoned attachment-artifact metadata rows physically deleted
     /// before their parent attachment was cleaned.
     pub deleting_session_attachment_artifacts_deleted: u32,
+    /// Session shells atomically finalized as `deleted` after every bounded
+    /// protected/external dependency and coordinator checkpoint was proved
+    /// exhausted.
+    pub deleting_sessions_finalized: u32,
     /// Sessions skipped because their GraphQL-managed retention policy was
     /// absent or invalid.
     pub sessions_not_ready: u32,

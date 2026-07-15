@@ -57,10 +57,13 @@ waits without polling, resuming, or executing them.
   confirmed artifact and attachment tombstones, scrub eligible terminal
   message content, clear validated terminal
   run-checkpoint pointers, and finally purge bounded immutable checkpoint pages
-  under the exact current GraphQL-managed scope policy. Newer/live tool
-  authority and all non-content metadata remain; unresolved accepted proposals,
-  ambiguous external deletion, nonterminal work, and other append-only security
-  facts stay closed.
+  under the exact current GraphQL-managed scope policy. It also CAS-tombstones
+  bounded session-bound protected inbox payloads before message content while
+  preserving principal stream sequences; after a final complete dependency
+  proof, it redacts the user title and transitions the hidden shell to
+  `deleted`. Newer/live tool authority and required non-content metadata remain;
+  unresolved accepted proposals, ambiguous external deletion, nonterminal work,
+  and other append-only security facts stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.

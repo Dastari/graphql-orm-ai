@@ -43,6 +43,7 @@ enum ToolPayloadRetentionMode {
 pub struct AiSessionRetentionLimits {
     maximum_sessions: usize,
     maximum_live_delta_events_per_session: usize,
+    maximum_inbox_events_per_session: usize,
     maximum_context_checkpoints_per_session: usize,
     maximum_messages_per_session: usize,
     maximum_message_blocks_per_session: usize,
@@ -107,6 +108,7 @@ impl AiSessionRetentionLimits {
         Ok(Self {
             maximum_sessions,
             maximum_live_delta_events_per_session,
+            maximum_inbox_events_per_session: maximum_live_delta_events_per_session,
             maximum_context_checkpoints_per_session,
             maximum_messages_per_session,
             maximum_message_blocks_per_session,
@@ -143,6 +145,26 @@ impl AiSessionRetentionLimits {
         }
         self.maximum_runs_per_session = maximum_runs_per_session;
         self.maximum_run_checkpoints_per_session = maximum_run_checkpoints_per_session;
+        Ok(self)
+    }
+
+    /// Sets an independent bound for protected principal-inbox events tied to
+    /// one deleting session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the limit is in
+    /// `1..=5_000`.
+    pub fn with_inbox_event_limit(
+        mut self,
+        maximum_inbox_events_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_inbox_events_per_session) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention inbox-event limit".to_owned(),
+            ));
+        }
+        self.maximum_inbox_events_per_session = maximum_inbox_events_per_session;
         Ok(self)
     }
 
@@ -246,6 +268,12 @@ impl AiSessionRetentionLimits {
         self.maximum_live_delta_events_per_session
     }
 
+    /// Maximum protected principal-inbox payloads tombstoned for one deleting
+    /// session transaction.
+    pub const fn maximum_inbox_events_per_session(self) -> usize {
+        self.maximum_inbox_events_per_session
+    }
+
     /// Maximum protected context-summary checkpoints deleted for one session.
     pub const fn maximum_context_checkpoints_per_session(self) -> usize {
         self.maximum_context_checkpoints_per_session
@@ -308,6 +336,7 @@ impl Default for AiSessionRetentionLimits {
         Self {
             maximum_sessions: 50,
             maximum_live_delta_events_per_session: 500,
+            maximum_inbox_events_per_session: 500,
             maximum_context_checkpoints_per_session: 100,
             maximum_messages_per_session: 100,
             maximum_message_blocks_per_session: 5_000,
@@ -407,7 +436,17 @@ impl OrmAiSessionRetentionService {
         let connection =
             AiSessionRecord::keyset_connection_page(
                 &self.database,
-                AiSessionRecordWhereInput::default(),
+                AiSessionRecordWhereInput {
+                    state: Some(StringFilter {
+                        in_list: Some(vec![
+                            "active".to_owned(),
+                            "archived".to_owned(),
+                            "deleting".to_owned(),
+                        ]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
                 KeysetConnectionInput {
                     after,
                     first: Some(i64::try_from(self.limits.maximum_sessions).map_err(|_| {
@@ -436,6 +475,8 @@ impl OrmAiSessionRetentionService {
     ) -> Result<SessionPruneOutcome, AiError> {
         let event_limit = i64::try_from(self.limits.maximum_live_delta_events_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid event limit".to_owned()))?;
+        let inbox_event_limit = i64::try_from(self.limits.maximum_inbox_events_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid inbox event limit".to_owned()))?;
         let context_checkpoint_limit =
             i64::try_from(self.limits.maximum_context_checkpoints_per_session).map_err(|_| {
                 AiError::InvalidConfiguration("invalid context checkpoint limit".to_owned())
@@ -586,6 +627,51 @@ impl OrmAiSessionRetentionService {
                         event_ids.len()
                     };
 
+                    let inbox_event_rows = if deletion_cutoff_reached {
+                        tx.query::<AiInboxEventRecord>()
+                            .filter(AiInboxEventRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                payload_purged_at: Some(IntFilter {
+                                    is_null: Some(true),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(inbox_event_limit)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                    } else {
+                        Vec::new()
+                    };
+                    let mut inbox_events = Vec::with_capacity(inbox_event_rows.len());
+                    let mut previous_inbox_sequence = None;
+                    for event in inbox_event_rows {
+                        if event.id.is_nil()
+                            || event.session_id != Some(session.id)
+                            || event.principal_kind != session.owner_principal_kind
+                            || event.principal_subject != session.owner_subject
+                            || event.scope_key != exact_scope_key
+                            || event.scope_kind != session.scope_kind
+                            || event.scope_id != session.scope_id
+                            || event.tenant_id != session.tenant_id
+                            || event.sequence <= 0
+                            || event.protected_payload.is_none()
+                            || event.payload_purged_at.is_some()
+                            || previous_inbox_sequence
+                                .is_some_and(|sequence| event.sequence <= sequence)
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        previous_inbox_sequence = Some(event.sequence);
+                        inbox_events.push(event);
+                    }
+                    let deleting_session_inbox_payloads_purged = inbox_events.len();
+
                     let context_checkpoint_rows = if deletion_cutoff_reached {
                         tx.query::<AiContextCheckpointRecord>()
                             .filter(AiContextCheckpointRecordWhereInput {
@@ -623,7 +709,10 @@ impl OrmAiSessionRetentionService {
 
                     let mut proposal_payloads_purged = 0usize;
                     let mut proposal_payload_purge_blocked = false;
-                    if deletion_cutoff_reached && context_checkpoint_ids.is_empty() {
+                    if deletion_cutoff_reached
+                        && inbox_events.is_empty()
+                        && context_checkpoint_ids.is_empty()
+                    {
                         let proposals = tx
                             .query::<AiProposalRecord>()
                             .filter(AiProposalRecordWhereInput {
@@ -1322,7 +1411,8 @@ impl OrmAiSessionRetentionService {
                     let mut messages_blocked = 0usize;
                     let mut context_checkpoints_invalidated = 0usize;
                     let message_cutoff = if deletion_cutoff_reached
-                        && (!context_checkpoint_ids.is_empty()
+                        && (!inbox_events.is_empty()
+                            || !context_checkpoint_ids.is_empty()
                             || proposal_payloads_purged > 0
                             || proposal_payload_purge_blocked
                             || deleting_tool_payloads_purged > 0
@@ -1533,6 +1623,34 @@ impl OrmAiSessionRetentionService {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                     }
+                    for event in &inbox_events {
+                        let outcome = tx
+                            .compare_and_swap::<AiInboxEventRecord>(
+                                &event.id,
+                                event.row_version,
+                                AiInboxEventRecordWhereInput {
+                                    session_id: Some(UuidFilter {
+                                        eq: Some(session.id),
+                                        ..Default::default()
+                                    }),
+                                    payload_purged_at: Some(IntFilter {
+                                        is_null: Some(true),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                },
+                                UpdateAiInboxEventRecordInput {
+                                    protected_payload: Some(None),
+                                    payload_purged_at: Some(Some(now)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
                     for checkpoint_id in &context_checkpoint_ids {
                         if !tx
                             .delete_by_id::<AiContextCheckpointRecord>(checkpoint_id)
@@ -1548,6 +1666,7 @@ impl OrmAiSessionRetentionService {
                     let mut run_checkpoint_purge_blocked = false;
                     if deletion_cutoff_reached
                         && event_ids.is_empty()
+                        && inbox_events.is_empty()
                         && context_checkpoint_ids.is_empty()
                         && proposal_payloads_purged == 0
                         && !proposal_payload_purge_blocked
@@ -1578,6 +1697,23 @@ impl OrmAiSessionRetentionService {
                             .filter(AiContextCheckpointRecordWhereInput {
                                 session_id: Some(UuidFilter {
                                     eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let remaining_inbox = tx
+                            .query::<AiInboxEventRecord>()
+                            .filter(AiInboxEventRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                payload_purged_at: Some(IntFilter {
+                                    is_null: Some(true),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
@@ -1641,6 +1777,7 @@ impl OrmAiSessionRetentionService {
                             .await
                             .map_err(OrmPublicError::from)?;
                         if remaining_events.is_empty()
+                            && remaining_inbox.is_empty()
                             && remaining_context.is_empty()
                             && proposals_are_exhausted
                             && remaining_message_content.is_empty()
@@ -1738,6 +1875,7 @@ impl OrmAiSessionRetentionService {
                         }
                     }
                     if event_ids.is_empty()
+                        && inbox_events.is_empty()
                         && context_checkpoint_ids.is_empty()
                         && proposal_payloads_purged == 0
                         && deleting_tool_payloads_purged == 0
@@ -1783,6 +1921,7 @@ impl OrmAiSessionRetentionService {
                     Ok(SessionPruneOutcome::Changed {
                         live_delta_events_deleted,
                         deleting_session_events_deleted,
+                        deleting_session_inbox_payloads_purged,
                         deleting_session_context_checkpoints_deleted,
                         context_checkpoints_invalidated,
                         proposal_payloads_purged,
@@ -1817,7 +1956,299 @@ impl OrmAiSessionRetentionService {
         }
     }
 
-    async fn purge_run_checkpoints(&self, session_id: Uuid, now: i64) -> Result<usize, AiError> {
+    async fn finalize_deleted_session(&self, session_id: Uuid, now: i64) -> Result<bool, AiError> {
+        let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
+        let run_limit_with_lookahead = run_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
+        let message_limit = i64::try_from(self.limits.maximum_messages_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
+        let message_limit_with_lookahead = message_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid message limit".to_owned()))?;
+        let result = self
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let session = tx
+                        .find_by_id::<AiSessionRecord>(&session_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    validate_session(&session)?;
+                    if session.state != "deleting" {
+                        return Ok(false);
+                    }
+                    let deleted_at = session
+                        .deleted_at
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let scope = session_scope(&session);
+                    let exact_scope_key = crate::ai_scope_key(&scope);
+                    let policies = tx
+                        .query::<AiRetentionPolicyRecord>()
+                        .filter(AiRetentionPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(exact_scope_key.clone()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if policies.len() != 1 {
+                        return Ok(false);
+                    }
+                    let policy = &policies[0];
+                    if !valid_policy(policy, &scope, &exact_scope_key)
+                        || deleted_at
+                            .checked_add(policy.deleted_content_purge_seconds)
+                            .is_none_or(|cutoff| cutoff > now)
+                    {
+                        return Ok(false);
+                    }
+
+                    let remaining_events = tx
+                        .query::<AiSessionEventRecord>()
+                        .filter(AiSessionEventRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_inbox = tx
+                        .query::<AiInboxEventRecord>()
+                        .filter(AiInboxEventRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            payload_purged_at: Some(IntFilter {
+                                is_null: Some(true),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_context = tx
+                        .query::<AiContextCheckpointRecord>()
+                        .filter(AiContextCheckpointRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_message_content = tx
+                        .query::<AiMessageRecord>()
+                        .filter(AiMessageRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            content_purged_at: Some(IntFilter {
+                                is_null: Some(true),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let remaining_attachments = tx
+                        .query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !remaining_events.is_empty()
+                        || !remaining_inbox.is_empty()
+                        || !remaining_context.is_empty()
+                        || !remaining_message_content.is_empty()
+                        || !remaining_attachments.is_empty()
+                    {
+                        return Ok(false);
+                    }
+
+                    let messages = tx
+                        .query::<AiMessageRecord>()
+                        .filter(AiMessageRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(message_limit_with_lookahead)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if messages.len()
+                        > usize::try_from(message_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        || i64::try_from(messages.len()).ok() != Some(session.message_head)
+                    {
+                        return Ok(false);
+                    }
+                    for (index, message) in messages.iter().enumerate() {
+                        let expected_sequence = i64::try_from(index)
+                            .ok()
+                            .and_then(|index| index.checked_add(1));
+                        if message.id.is_nil()
+                            || message.session_id != session_id
+                            || Some(message.sequence) != expected_sequence
+                            || message.protected_preview.is_some()
+                            || message.block_count != 0
+                            || message.content_purged_at.is_none()
+                            || message.completion_state != "complete"
+                            || message.finalized_at.is_none()
+                        {
+                            return Ok(false);
+                        }
+                        let blocks = tx
+                            .query::<AiMessageBlockRecord>()
+                            .filter(AiMessageBlockRecordWhereInput {
+                                message_id: Some(UuidFilter {
+                                    eq: Some(message.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !blocks.is_empty() {
+                            return Ok(false);
+                        }
+                    }
+
+                    let runs = tx
+                        .query::<AiRunRecord>()
+                        .filter(AiRunRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(run_limit_with_lookahead)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if runs.len()
+                        > usize::try_from(run_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        || runs.iter().any(|run| {
+                            run.id.is_nil()
+                                || run.session_id != session_id
+                                || run.lease_generation < 0
+                                || run.latest_checkpoint_id.is_some()
+                                || !AiRunState::from_persisted(&run.state)
+                                    .is_some_and(AiRunState::is_terminal)
+                        })
+                    {
+                        return Ok(false);
+                    }
+                    let run_ids = runs.iter().map(|run| run.id).collect::<Vec<_>>();
+                    if !run_ids.is_empty() {
+                        let remaining_checkpoints = tx
+                            .project::<AiRunCheckpointRetentionProjection>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    in_list: Some(run_ids),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if !remaining_checkpoints.is_empty() {
+                            return Ok(false);
+                        }
+                    }
+                    if session.title.trim().is_empty() {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    let outcome = tx
+                        .compare_and_swap::<AiSessionRecord>(
+                            &session.id,
+                            session.row_version,
+                            AiSessionRecordWhereInput {
+                                state: Some(StringFilter {
+                                    eq: Some("deleting".to_owned()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            UpdateAiSessionRecordInput {
+                                title: Some(String::new()),
+                                state: Some("deleted".to_owned()),
+                                last_activity_at: Some(now),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "system".to_owned(),
+                        actor_subject: "session-retention".to_owned(),
+                        action: "finalize_session_deletion".to_owned(),
+                        resource_kind: "ai_session".to_owned(),
+                        resource_reference: session_id.to_string(),
+                        outcome: "allowed".to_owned(),
+                        reason_code: "session_content_dependencies_exhausted".to_owned(),
+                        correlation_id: Uuid::new_v4().to_string(),
+                        causation_id: None,
+                        policy_version: Some(format!("{}:{}", policy.id, policy.row_version)),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(true)
+                })
+            })
+            .await;
+        match result {
+            Ok(finalized) => Ok(finalized),
+            Err(error) if error.public_error().code == OrmErrorCode::Conflict => Ok(false),
+            Err(error) => Err(map_transaction(error)),
+        }
+    }
+
+    async fn purge_run_checkpoints(
+        &self,
+        session_id: Uuid,
+        now: i64,
+    ) -> Result<DeletingRunCheckpointPurgeOutcome, AiError> {
         let proposal_limit = i64::try_from(self.limits.maximum_proposals_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid proposal limit".to_owned()))?;
         let proposal_limit_with_lookahead = proposal_limit
@@ -1870,7 +2301,7 @@ impl OrmAiSessionRetentionService {
                     let session = &session[0];
                     validate_session(session)?;
                     if session.state != "deleting" {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let scope = session_scope(session);
                     let exact_scope_key = crate::ai_scope_key(&scope);
@@ -1893,10 +2324,10 @@ impl OrmAiSessionRetentionService {
                         ));
                     }
                     let Some(policy) = policies.into_iter().next() else {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     };
                     if !valid_policy(&policy, &scope, &exact_scope_key) {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let deleted_at = session
                         .deleted_at
@@ -1905,7 +2336,7 @@ impl OrmAiSessionRetentionService {
                         .checked_add(policy.deleted_content_purge_seconds)
                         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
                     if cutoff > now {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
 
                     let remaining_events = maintenance
@@ -1952,7 +2383,7 @@ impl OrmAiSessionRetentionService {
                         > usize::try_from(proposal_limit)
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
                     {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let maximum_proposal_items = usize::try_from(proposal_item_limit)
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -1964,7 +2395,7 @@ impl OrmAiSessionRetentionService {
                             || proposal.source_references.is_some()
                             || !proposal_state_is_terminal(&proposal, now)
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         let proposal_runs = maintenance
                             .query::<AiRunRecord>()
@@ -1987,7 +2418,7 @@ impl OrmAiSessionRetentionService {
                             || !AiRunState::from_persisted(&proposal_run.state)
                                 .is_some_and(AiRunState::is_terminal)
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         let items = maintenance
                             .query::<AiProposalItemRecord>()
@@ -2009,7 +2440,7 @@ impl OrmAiSessionRetentionService {
                         if items.len() > maximum_proposal_items
                             || proposal_item_count > maximum_proposal_items
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         for (index, item) in items.iter().enumerate() {
                             validate_proposal_item(item, proposal.id, index)?;
@@ -2018,7 +2449,7 @@ impl OrmAiSessionRetentionService {
                                 || item.source_references.is_some()
                                 || item.protected_review_value.is_some()
                             {
-                                return Ok(0);
+                                return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                             }
                         }
                     }
@@ -2057,7 +2488,7 @@ impl OrmAiSessionRetentionService {
                         || !remaining_message_content.is_empty()
                         || !remaining_attachments.is_empty()
                     {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
 
                     let runs = maintenance
@@ -2078,7 +2509,7 @@ impl OrmAiSessionRetentionService {
                         > usize::try_from(run_limit)
                             .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
                     {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let mut run_fences = HashMap::with_capacity(runs.len());
                     for run in runs {
@@ -2091,7 +2522,7 @@ impl OrmAiSessionRetentionService {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                         }
                         if !state.is_terminal() || run.latest_checkpoint_id.is_some() {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         run_fences.insert(run.id, run.lease_generation);
                     }
@@ -2135,7 +2566,7 @@ impl OrmAiSessionRetentionService {
                             > usize::try_from(approval_limit)
                                 .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
                     {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                     }
                     let calls_by_id = calls
                         .iter()
@@ -2152,7 +2583,7 @@ impl OrmAiSessionRetentionService {
                             || call.protected_arguments.is_some()
                             || call.protected_result.is_some()
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                         let steps = maintenance
                             .query::<AiRunStepRecord>()
@@ -2183,7 +2614,7 @@ impl OrmAiSessionRetentionService {
                                     || approval.protected_action_preview.is_some()
                             })
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                     }
                     for approval in &approvals {
@@ -2197,11 +2628,11 @@ impl OrmAiSessionRetentionService {
                             || approval.protected_resource_bindings.is_some()
                             || approval.protected_action_preview.is_some()
                         {
-                            return Ok(0);
+                            return Ok(DeletingRunCheckpointPurgeOutcome::Blocked);
                         }
                     }
                     if run_fences.is_empty() {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Verified { deleted: 0 });
                     }
 
                     let checkpoints = maintenance
@@ -2237,7 +2668,7 @@ impl OrmAiSessionRetentionService {
                         checkpoint_ids.push(checkpoint.id);
                     }
                     if checkpoint_ids.is_empty() {
-                        return Ok(0);
+                        return Ok(DeletingRunCheckpointPurgeOutcome::Verified { deleted: 0 });
                     }
                     let maximum = u32::try_from(checkpoint_ids.len())
                         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -2275,8 +2706,10 @@ impl OrmAiSessionRetentionService {
                         })
                         .await
                         .map_err(OrmPublicError::from)?;
-                    usize::try_from(affected)
-                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
+                    Ok(DeletingRunCheckpointPurgeOutcome::Verified {
+                        deleted: usize::try_from(affected)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                    })
                 })
             })
             .await
@@ -2981,6 +3414,7 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 SessionPruneOutcome::Changed {
                     live_delta_events_deleted,
                     deleting_session_events_deleted,
+                    deleting_session_inbox_payloads_purged,
                     deleting_session_context_checkpoints_deleted,
                     context_checkpoints_invalidated,
                     proposal_payloads_purged,
@@ -3010,6 +3444,10 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.deleting_session_events_deleted = add_count(
                         report.deleting_session_events_deleted,
                         deleting_session_events_deleted,
+                    )?;
+                    report.deleting_session_inbox_payloads_purged = add_count(
+                        report.deleting_session_inbox_payloads_purged,
+                        deleting_session_inbox_payloads_purged,
                     )?;
                     report.deleting_session_context_checkpoints_deleted = add_count(
                         report.deleting_session_context_checkpoints_deleted,
@@ -3097,11 +3535,29 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 }
             }
             if checkpoint_purge_ready {
-                let deleted = self.purge_run_checkpoints(session_id, now).await?;
-                if deleted > 0 {
-                    session_changed = true;
-                    report.deleting_session_run_checkpoints_deleted =
-                        add_count(report.deleting_session_run_checkpoints_deleted, deleted)?;
+                match self.purge_run_checkpoints(session_id, now).await? {
+                    DeletingRunCheckpointPurgeOutcome::Verified { deleted } => {
+                        if deleted > 0 {
+                            session_changed = true;
+                            report.deleting_session_run_checkpoints_deleted = add_count(
+                                report.deleting_session_run_checkpoints_deleted,
+                                deleted,
+                            )?;
+                        }
+                        if self.finalize_deleted_session(session_id, now).await? {
+                            session_changed = true;
+                            report.deleting_sessions_finalized = report
+                                .deleting_sessions_finalized
+                                .checked_add(1)
+                                .ok_or(AiError::PersistenceFailed)?;
+                        }
+                    }
+                    DeletingRunCheckpointPurgeOutcome::Blocked => {
+                        report.run_checkpoint_purges_blocked = report
+                            .run_checkpoint_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
                 }
             } else {
                 match self.purge_expired_run_checkpoints(session_id, now).await? {
@@ -3142,6 +3598,11 @@ enum RawCheckpointPurgeOutcome {
     Deleted(usize),
 }
 
+enum DeletingRunCheckpointPurgeOutcome {
+    Verified { deleted: usize },
+    Blocked,
+}
+
 enum SessionPruneOutcome {
     NotReady,
     Conflict,
@@ -3157,6 +3618,7 @@ enum SessionPruneOutcome {
     Changed {
         live_delta_events_deleted: usize,
         deleting_session_events_deleted: usize,
+        deleting_session_inbox_payloads_purged: usize,
         deleting_session_context_checkpoints_deleted: usize,
         context_checkpoints_invalidated: usize,
         proposal_payloads_purged: usize,
@@ -3194,11 +3656,16 @@ fn validate_cursor(cursor: Option<&str>) -> Result<(), AiError> {
 
 pub(crate) fn validate_session(session: &AiSessionRecord) -> Result<(), OrmPublicError> {
     let scope = session_scope(session);
+    let lifecycle_is_valid = match session.state.as_str() {
+        "active" | "archived" => session.deleted_at.is_none() && !session.title.trim().is_empty(),
+        "deleting" => session.deleted_at.is_some() && !session.title.trim().is_empty(),
+        "deleted" => session.deleted_at.is_some() && session.title.is_empty(),
+        _ => false,
+    };
     if session.id.is_nil()
         || session.owner_principal_kind.trim().is_empty()
         || session.owner_subject.trim().is_empty()
-        || !matches!(session.state.as_str(), "active" | "archived" | "deleting")
-        || (session.state == "deleting") != session.deleted_at.is_some()
+        || !lifecycle_is_valid
         || session.stream_head < 0
         || session.message_head < 0
         || scope.kind.trim().is_empty()
@@ -4736,6 +5203,92 @@ mod tests {
         }
     }
 
+    async fn seed_inbox_event(
+        database: &Database<SqliteBackend>,
+        scope: &AiScope,
+        session_id: Uuid,
+    ) {
+        AiInboxEventRecord::insert(
+            database,
+            CreateAiInboxEventRecordInput {
+                id: Uuid::new_v4(),
+                principal_kind: "user".to_owned(),
+                principal_subject: "retention-user".to_owned(),
+                scope_key: crate::ai_scope_key(scope),
+                scope_kind: scope.kind.clone(),
+                scope_id: scope.id.clone(),
+                tenant_id: scope.tenant_id.clone(),
+                sequence: 1,
+                session_id: Some(session_id),
+                event_type: "session_deleting".to_owned(),
+                protected_payload: Some(serde_json::json!({"protected": "inbox content"})),
+                payload_purged_at: None,
+            },
+        )
+        .await
+        .expect("inbox event should seed");
+    }
+
+    #[tokio::test]
+    async fn deleting_session_inbox_and_message_content_precede_shell_finalization() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, _) = seed_message(&database, session_id, "completed", false).await;
+        seed_inbox_event(&database, &scope, session_id).await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let inbox_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("inbox retention should succeed");
+        assert_eq!(inbox_pass.deleting_session_inbox_payloads_purged, 1);
+        assert_eq!(inbox_pass.message_contents_purged, 0);
+        assert_eq!(inbox_pass.deleting_sessions_finalized, 0);
+
+        let message_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("message retention should succeed");
+        assert_eq!(message_pass.deleting_session_inbox_payloads_purged, 0);
+        assert_eq!(message_pass.message_contents_purged, 1);
+        assert_eq!(message_pass.deleting_sessions_finalized, 0);
+
+        let final_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("session finalization should succeed");
+        assert_eq!(final_pass.deleting_sessions_finalized, 1);
+        assert_eq!(final_pass.sessions_changed, 1);
+        let session = AiSessionRecord::find_by_id(&database, &session_id)
+            .await
+            .expect("session lookup should succeed")
+            .expect("redacted session shell should remain");
+        assert_eq!(session.state, "deleted");
+        assert!(session.title.is_empty());
+        assert!(session.deleted_at.is_some());
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("redacted message metadata should remain");
+        assert!(message.protected_preview.is_none());
+        assert_eq!(message.block_count, 0);
+        assert!(message.content_purged_at.is_some());
+
+        let replay = service
+            .prune_session_content(None)
+            .await
+            .expect("finalized shell should leave the candidate set");
+        assert_eq!(replay.sessions_scanned, 0);
+        assert_eq!(replay.deleting_sessions_finalized, 0);
+    }
+
     #[tokio::test]
     async fn expired_delta_and_terminal_message_content_are_pruned_atomically() {
         let database = database().await;
@@ -5037,6 +5590,7 @@ mod tests {
             second_checkpoint_page.deleting_session_run_checkpoints_deleted,
             1
         );
+        assert_eq!(second_checkpoint_page.deleting_sessions_finalized, 1);
 
         let message = AiMessageRecord::find_by_id(&database, &message_id)
             .await
@@ -5104,7 +5658,7 @@ mod tests {
         assert!(events.is_empty());
         assert!(context_checkpoints.is_empty());
         assert!(run_checkpoints.is_empty());
-        assert_eq!(audits.len(), 7);
+        assert_eq!(audits.len(), 8);
         assert_eq!(
             audits
                 .iter()
@@ -5119,12 +5673,20 @@ mod tests {
                 .count(),
             6
         );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| audit.reason_code == "session_content_dependencies_exhausted")
+                .count(),
+            1
+        );
 
         let replay = service
             .prune_session_content(None)
             .await
             .expect("deleting-session retention replay should be idempotent");
         assert_eq!(replay.sessions_changed, 0);
+        assert_eq!(replay.sessions_scanned, 0);
         assert_eq!(replay.deleting_session_events_deleted, 0);
         assert_eq!(replay.deleting_session_run_checkpoints_deleted, 0);
     }

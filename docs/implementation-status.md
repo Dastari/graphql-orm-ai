@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.42.0`) and 39 private records
+- AI schema-module identity (currently version `0.43.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -305,10 +305,15 @@ production-ready behavior.
   clears validated terminal run pointers before a separate generated-ORM
   transaction independently re-proves tool/approval tombstones, purges bounded
   immutable coordinator-checkpoint pages, and atomically appends redacted
-  audit. Message, proposal, tool, and approval metadata tombstones remain,
-  event gaps request a client reset, ambiguous artifacts and unsafe
-  dependencies remain blocked, and all other append-only security facts stay
-  non-purgeable.
+  audit. Protected session-bound inbox payloads are CAS-tombstoned before
+  message content while their shared-stream rows and sequences remain. A later
+  complete proof of the current cutoff, valid inbox payload tombstones, retained
+  message tombstones, terminal runs, zero pointers/checkpoints, and absence of
+  every ordinary protected/external dependency atomically redacts the title and
+  finalizes the hidden shell as `deleted`. Message, proposal, tool, and approval
+  metadata tombstones remain, event gaps request a client reset, ambiguous
+  artifacts and unsafe dependencies remain blocked, and all other append-only
+  security facts stay non-purgeable.
 - Protected context compaction under a current running lease. Preparation
   rehydrates principal/owner/scope authority, renews the complete fence, opens
   only one exact contiguous message segment after the latest valid checkpoint,
@@ -387,10 +392,9 @@ production-ready behavior.
   context-summary/terminal-proposal/terminal-tool-and-approval/artifact/basic-attachment/
   message-content pruning are implemented; unresolved accepted proposals,
   active or uncertain tool authority, artifact/provider objects without exact
-  absence proof,
-  session shells, unsafe message dependencies, runs and attempt history,
-  ordinary-retention context invalidation, non-checkpoint append-only facts,
-  and other external content remain, so reports do not claim complete erasure.
+  absence proof, unsafe message dependencies, required redacted session shells,
+  runs and attempt history, non-checkpoint append-only facts, and other external
+  content remain, so reports do not claim physical record or audit erasure.
   Bounded deleting-session and age-expired orphaned protected coordinator-
   checkpoint purge are implemented; current, nonterminal, recovery-required,
   or dependency-ambiguous checkpoints remain deliberately closed.
@@ -445,8 +449,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add remaining retention/telemetry contracts, including complete deletion-
-   lifecycle closure and reviewed operational telemetry sinks.
+1. Add reviewed operational telemetry sink contracts for provider, run/tool,
+   recovery, retention, and restore lifecycle observations without content.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -473,9 +477,10 @@ intentional.
 - Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
-- Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  public PR base through 0.43.0; the working crate/schema versions are
-  `0.44.0`/`0.42.0` pending this slice's full verification.
+- The full local release matrix and `cargo-semver-checks` gate passed against
+  the reviewed public PR base through 0.44.0 for crate/schema versions
+  `0.45.0`/`0.43.0`. The committed release-policy gate and branch CI remain
+  required before review.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

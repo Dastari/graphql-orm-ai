@@ -5,12 +5,27 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.44.0` and the
-AI schema module to `0.42.0`. It keeps 39 private entities and adds protected,
-bounded context compaction with exact chained source coverage plus ordinary-
-retention invalidation.
+This development line advances the pre-1.0 crate version to `0.45.0` and the
+AI schema module to `0.43.0`. It keeps 39 private entities and adds protected,
+bounded context compaction plus dependency-proved deleting-session lifecycle
+closure.
 
 ### Added
+
+- Deleting-session retention now CAS-tombstones bounded protected principal-
+  inbox payloads before message content while retaining their monotonic stream
+  rows and reports the exact count. After session events, inbox payloads,
+  context summaries, proposal/tool/approval payloads,
+  attachment objects/metadata, message content, and immutable coordinator
+  checkpoints are independently proved exhausted, a final state-machine
+  transaction rechecks the current retention cutoff, complete bounded terminal
+  run set, zero current checkpoint pointers, exact retained message tombstones,
+  and absence of protected/external rows before redacting the session title and
+  transitioning the shell from `deleting` to `deleted` with a redacted audit.
+- `AiSessionRetentionLimits::with_inbox_event_limit` supplies an independent
+  per-session bound. `AiSessionRetentionReport` adds
+  `deleting_session_inbox_payloads_purged` and
+  `deleting_sessions_finalized`; neither is a whole-database erasure claim.
 
 - `OrmAiContextCompactionService` prepares only a contiguous, bounded prefix
   segment under a renewed running lease and fresh owner/scope authority. The
@@ -54,6 +69,16 @@ retention invalidation.
   artifacts before parent attachments and appends only redacted audit facts.
 
 ### Changed
+
+- Session queries now filter lifecycle state at the generated ORM boundary so
+  `deleting` and finalized `deleted` shells do not consume visible pagination
+  windows. Repeated delete requests remain idempotent after finalization.
+- Private session-state and inbox-session filters are explicit generated ORM
+  metadata. Schema module `0.43.0` makes the private inbox protected payload
+  nullable and adds its nullable purge timestamp plus a defaulted CAS version;
+  it adds no table, index, constraint, or entity. Existing payloads remain
+  retained without an application-authored row rewrite. Eligible payload/title
+  redaction and the new terminal `deleted` state occur only through retention.
 
 - Ordinary message retention now physically deletes every context checkpoint
   whose prefix could cover an eligible message before scrubbing that message

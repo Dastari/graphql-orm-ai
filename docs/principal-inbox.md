@@ -119,11 +119,22 @@ at that boundary. CAS races are reported through `streams_conflicted` and are
 safe to retry in a later bounded pass. Do not expose pruning as an ordinary
 user GraphQL mutation or manually delete inbox rows.
 
+Deleting-session retention uses a separate exact-session proof. After the
+current deletion cutoff it CAS-clears each selected protected payload and
+records a purge timestamp without deleting the event row or reusing its
+principal sequence. A page or subscription that reaches such a tombstone
+returns `resetRequired` so the client reloads visible shells and reconnects at
+the current watermark. The ordinary inbox-pruning worker may later remove the
+tombstoned row only when it is part of the same contiguous expired prefix
+described above.
+
 ## Restore behavior
 
 Keep subscriptions, appends, and pruning closed while a restore is in
 progress. Restore validation must verify the schema module, unique principal
 sequence constraint, each stream's `1 <= minimum <= head + 1`, contiguous
-retained prefixes, captured scope keys, and protection readiness before the
-runtime start gate opens. A client cursor older than the restored retained
-prefix receives an explicit reset; the server never fabricates missing events.
+retained prefixes, exact retained-payload or purged-payload tombstone shape,
+captured scope keys, and protection readiness before the runtime start gate
+opens. A client cursor older than the restored retained prefix, or one that
+reaches a restored tombstone, receives an explicit reset; the server never
+fabricates missing events.

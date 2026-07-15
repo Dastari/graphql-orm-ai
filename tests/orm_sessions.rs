@@ -223,7 +223,7 @@ async fn archive_restore_and_session_keyset_are_bounded() {
         )
         .await
         .expect("first session");
-    service
+    let second = service
         .create_session(
             &owner,
             CreateAiSessionInput {
@@ -275,4 +275,53 @@ async fn archive_restore_and_session_keyset_are_bounded() {
     assert_eq!(page.edges.len(), 1);
     assert!(page.page_info.has_next_page);
     assert!(page.page_info.total_count.is_none());
+
+    let full_page = service
+        .sessions(
+            &owner,
+            KeysetConnectionInput {
+                first: Some(2),
+                ..Default::default()
+            }
+            .validate(10, 50)
+            .expect("valid full page"),
+        )
+        .await
+        .expect("full session page loads");
+    let hidden_id = full_page.edges[0].node.id;
+    assert!(hidden_id == first.id || hidden_id == second.id);
+    assert!(
+        service
+            .delete_session(&owner, AiSessionId(hidden_id))
+            .await
+            .expect("delete begins")
+    );
+    assert!(
+        service
+            .delete_session(&owner, AiSessionId(hidden_id))
+            .await
+            .expect("delete replay is idempotent")
+    );
+    assert!(
+        service
+            .session(&owner, AiSessionId(hidden_id))
+            .await
+            .expect("hidden lookup succeeds")
+            .is_none()
+    );
+    let visible_page = service
+        .sessions(
+            &owner,
+            KeysetConnectionInput {
+                first: Some(1),
+                ..Default::default()
+            }
+            .validate(10, 50)
+            .expect("valid visible page"),
+        )
+        .await
+        .expect("visible session page loads");
+    assert_eq!(visible_page.edges.len(), 1);
+    assert_ne!(visible_page.edges[0].node.id, hidden_id);
+    assert!(!visible_page.page_info.has_next_page);
 }

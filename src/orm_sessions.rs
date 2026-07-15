@@ -144,7 +144,7 @@ impl OrmAiSessionService {
         let Some(record) = record else {
             return Ok(None);
         };
-        if !is_owner(principal, &record) || record.state == "deleting" {
+        if !is_owner(principal, &record) || record.deleted_at.is_some() {
             return Ok(None);
         }
         self.require_scope(principal, &record_scope(&record), action)
@@ -212,6 +212,10 @@ impl AiSessionService for OrmAiSessionService {
                     eq: Some(subject.to_owned()),
                     ..Default::default()
                 }),
+                state: Some(StringFilter {
+                    in_list: Some(vec!["active".to_owned(), "archived".to_owned()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             page_input(&page, false),
@@ -221,12 +225,11 @@ impl AiSessionService for OrmAiSessionService {
 
         let mut edges = Vec::with_capacity(connection.edges.len());
         for edge in connection.edges {
-            if edge.node.state == "deleting"
-                || !self
-                    .access_policy
-                    .can_access_scope(principal, &record_scope(&edge.node), AiSessionAction::List)
-                    .await
-                    .is_allowed()
+            if !self
+                .access_policy
+                .can_access_scope(principal, &record_scope(&edge.node), AiSessionAction::List)
+                .await
+                .is_allowed()
             {
                 continue;
             }
@@ -632,7 +635,7 @@ impl AiSessionService for OrmAiSessionService {
         if !is_owner(principal, &existing) {
             return Err(AiError::NotFound);
         }
-        if existing.state == "deleting" {
+        if matches!(existing.state.as_str(), "deleting" | "deleted") {
             return Ok(true);
         }
         let scope = record_scope(&existing);
@@ -668,7 +671,7 @@ impl AiSessionService for OrmAiSessionService {
                     {
                         return Err(OrmPublicError::not_found());
                     }
-                    if session.state == "deleting" {
+                    if matches!(session.state.as_str(), "deleting" | "deleted") {
                         return Ok(true);
                     }
                     let outcome = tx
