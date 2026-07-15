@@ -36,6 +36,10 @@ pub struct AiSessionRetentionReport {
     /// Age-expired terminal approval payloads scrubbed with their exact tool
     /// calls.
     pub expired_approval_payloads_purged: u32,
+    /// Age-expired orphaned protected coordinator checkpoints physically
+    /// deleted after their terminal history and content dependencies were
+    /// re-proved.
+    pub expired_run_checkpoints_deleted: u32,
     /// Terminal run pointers cleared before append-only checkpoint deletion.
     pub deleting_session_run_checkpoint_references_cleared: u32,
     /// Append-only coordinator checkpoints physically deleted after their
@@ -71,6 +75,9 @@ pub struct AiSessionRetentionReport {
     /// Sessions whose age-based raw tool/approval proof exceeded a deployment
     /// bound or could not prove an exact terminal payload graph.
     pub raw_payload_purges_blocked: u32,
+    /// Sessions whose age-based protected-checkpoint purge exceeded a proof
+    /// bound or could not prove exact terminal history and dependencies.
+    pub raw_checkpoint_purges_blocked: u32,
     /// Deleting sessions whose run history exceeded the configured proof bound
     /// or still contained a nonterminal run.
     pub run_checkpoint_purges_blocked: u32,

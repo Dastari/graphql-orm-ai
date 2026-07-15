@@ -37,9 +37,12 @@ waits without polling, resuming, or executing them.
   and a GraphQL-policy-driven bounded pruning worker.
 - A host-only bounded session-retention worker that uses generated ORM
   transactions to remove expired provisional deltas and age-expired terminal
-  tool/approval protected payloads, purge all bounded protected session events
-  after the deleting-session cutoff, delete bounded protected context-summary
-  checkpoints before they can outlive covered content, tombstone only terminal
+  tool/approval protected payloads, then physically purge age-expired orphaned
+  protected coordinator checkpoints only after exact terminal history, budget,
+  final-output/tool dependency, and current-pointer proof. After the deleting-
+  session cutoff it purges all bounded protected session events and deletes
+  bounded protected context-summary checkpoints before they can outlive
+  covered content, tombstones only terminal
   proposal/item payloads under whole-session bounds, tombstone only exactly
   linked terminal tool/approval payloads after a complete bounded authority
   proof, coordinate artifact-free attachment objects through independently

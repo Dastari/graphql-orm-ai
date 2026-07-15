@@ -169,11 +169,23 @@ Active or uncertain authority can therefore never be discarded merely to make
 a checkpoint purge eligible.
 
 The ordinary `raw_payload_retention_seconds` cutoff can independently
-tombstone an age-expired terminal tool/approval row while leaving the immutable
-checkpoint in place. That tombstone proves only that the row payload is gone;
-it does not assert that normalized provider/tool state embedded in a checkpoint
-has been removed. Checkpoint state remains protected, append-only, and subject
-to its own pointer, run, scope, age/deletion, and maintenance proofs.
+tombstone an age-expired terminal tool/approval row. A later database-enforced
+append-only maintenance transaction may physically delete a protected
+`provider_turn_persisted`, `tool_batch_persisted`, or
+`supervised_tool_batch_persisted` checkpoint only when it is also expired,
+belongs to a terminal run, and is absent from every current run pointer. The
+transaction uses the projection that excludes `protected_state` and re-proves
+the current scope policy, exact closed attempt outcome, committed/reconciled
+budget, and either the later current final-output checkpoint plus durable
+assistant message or every correlated terminal tombstoned tool/approval row.
+
+Current checkpoints, nonterminal or recovery-required runs, missing attempt
+outcomes, incomplete final-output proof, untombstoned tool authority, malformed
+correlation, and over-bound history remain intact. This age-based phase retains
+run/checkpoint redacted history only in the redacted audit plus ordinary run,
+attempt/outcome, budget/usage, tool/approval, and egress facts; it does not
+claim complete session erasure. Post-deletion-cutoff sessions continue through
+the stronger whole-session checkpoint workflow above.
 
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already

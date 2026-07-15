@@ -7,6 +7,9 @@ for narrowly defined classes of protected chat data:
 - age-expired protected tool arguments/results and approval resource
   bindings/action previews for exact terminal calls under the current
   `raw_payload_retention_seconds` policy;
+- age-expired orphaned protected coordinator checkpoints for terminal runs
+  after exact attempt/outcome, budget, current-pointer, and final-output or
+  tombstoned-tool dependency proof;
 - expired preview/block content from finalized messages whose producing run is
   terminal and which have no linked attachment;
 - after a deleting-session cutoff, every bounded protected session event;
@@ -16,9 +19,9 @@ for narrowly defined classes of protected chat data:
 - after proposal payloads are exhausted, protected arguments/results and
   approval resource bindings/action previews for a completely bounded,
   terminal, exactly linked run/tool/approval graph;
-- after tool and approval payloads are exhausted, artifact-free attachments coordinated
-  through separately verified exact-reference blob cleanup, followed by their
-  ordinary metadata rows;
+- after tool and approval payloads are exhausted, artifact-free attachments
+  coordinated through separately verified exact-reference blob cleanup,
+  followed by their ordinary metadata rows;
 - after attachments are exhausted, the same safely detachable terminal message
   content even when ordinary message retention is disabled; and
 - after all those protected sources are exhausted, immutable coordinator
@@ -53,8 +56,9 @@ certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
 `proposal_payload_purges_blocked`, `tool_payload_purges_blocked`,
-`raw_payload_purges_blocked`, or `run_checkpoint_purges_blocked`. Also alert on
-attachment cleanup failures and never treat a partial scan cycle as complete.
+`raw_payload_purges_blocked`, `raw_checkpoint_purges_blocked`, or
+`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
+never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -85,6 +89,27 @@ linkage blocks the age-based phase without a partial update. Provider adapters
 normalize bounded responses and do not persist raw HTTP envelopes. Protected
 provider/tool continuation state in immutable coordinator checkpoints is a
 separate dependency and is not removed by this age-based phase.
+
+A separate database-enforced append-only maintenance transaction applies the
+same checked raw cutoff to protected `provider_turn_persisted`,
+`tool_batch_persisted`, and `supervised_tool_batch_persisted` checkpoints. It
+selects a deterministic created-time/ID page only from terminal runs and skips
+every checkpoint named by a current run pointer. Without loading
+`protected_state`, it re-proves the exact current scope policy, checkpoint
+metadata, closed immutable attempt outcome, and committed/reconciled budget.
+A provider-turn checkpoint must additionally have either a later current
+final-output checkpoint and durable assistant message or its complete
+correlated terminal tombstoned tool set. Tool-batch checkpoints require at
+least one exact terminal tombstoned call; supervised batches require exactly
+one. Every optional one-shot approval must be exact, terminal, and tombstoned.
+
+All selected rows validate before one exact-cardinality purge and redacted
+audit. A current checkpoint, nonterminal or recovery-required run, missing
+attempt outcome, untombstoned call/approval, incomplete final-output proof,
+lookahead overflow, or malformed correlation blocks this phase without a
+partial delete. Sessions past the deleting cutoff use the stronger dependency-
+ordered whole-session workflow instead. The age-based checkpoint phase retains
+run, attempt/outcome, budget/usage, egress, call/approval, and audit metadata.
 
 A session in `deleting` state must carry the exact `deleted_at` timestamp
 written by the authenticated session lifecycle. Once that timestamp plus the
@@ -222,16 +247,17 @@ retention never requires loading the complete transcript into the DOM.
 
 This workflow does not delete session or message metadata, attachment artifacts
 or provider-persistent files, runs, run attempts/outcomes, tool-call or
-approval metadata, proposal metadata, protected normalized coordinator state,
-usage, egress decisions, audit facts, pricing/skill history, or restore
-evidence. It therefore
+approval metadata, proposal metadata, current or ineligible protected
+normalized coordinator state, usage, egress decisions, audit facts,
+pricing/skill history, or restore evidence. It therefore
 advances but does not complete the `deleting` session lifecycle. Proposal
 protected content is eligible only through its terminal whole-session proof.
 Tool/approval protected payloads may use either the selective age-based proof
 or, after the deletion cutoff, their terminal whole-session proof. Unresolved
 accepted proposals and active or uncertain tool authority remain deliberately
-closed. No raw provider HTTP envelope is persisted, but protected normalized
-provider state in coordinator checkpoints remains until its separate lifecycle.
+closed. No raw provider HTTP envelope is persisted. Eligible orphaned protected
+coordinator state follows the independent age-based proof above; current or
+ambiguous checkpoint state remains.
 Basic attachment objects and metadata are eligible only through the two-worker
 proof above; artifacts remain deliberately closed. Unsafe message or run
 dependencies remain in place and are counted as blocked. The remaining

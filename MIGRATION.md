@@ -4,6 +4,45 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: orphaned protected-checkpoint retention (crate 0.41.0 to 0.42.0; schema 0.39.0 to 0.40.0)
+
+Apply AI schema module `0.40.0` while session, run, coordinator, retention, and
+restore workers are closed. Do not run 0.42.0 code against a module still
+registered as 0.39.0. The generated migration adds no table, column, index,
+constraint, entity, or retention opt-in and rewrites no row data. The module
+version advances because `raw_payload_retention_seconds` now also governs
+physical deletion of narrowly selected protected coordinator checkpoints. No
+application SQL, consumer-table change, protected-value rewrite, or
+application-authored data copy is required.
+
+The age-based checkpoint phase considers only the protected
+`provider_turn_persisted`, `tool_batch_persisted`, and
+`supervised_tool_batch_persisted` kinds on terminal runs. A candidate must be
+at or before the checked current cutoff and absent from every current run
+pointer. Inside the database-enforced append-only retention transaction, the
+worker re-proves the exact current scope policy, bounded run history, closed
+attempt outcome, committed/reconciled budget reservation, and checkpoint
+metadata without reading `protected_state`. A provider-turn checkpoint also
+requires either its exact terminal tombstoned tool set or the later current
+final-output checkpoint plus durable assistant message. Tool-batch checkpoints
+require their exact terminal tombstoned calls and approvals. Every selected row
+validates before a deterministic exact-cardinality purge and redacted audit.
+
+Current checkpoints, nonterminal or recovery-required runs, missing/ambiguous
+attempt outcomes, untombstoned tool authority, incomplete final-output proof,
+lookahead overflow, and malformed correlation remain intact. Post-deletion-
+cutoff sessions continue through the stronger whole-session deletion workflow
+instead. Audit, attempt/outcome, budget/usage, egress, tool/approval metadata,
+and session/run shells remain.
+
+`AiSessionRetentionReport` adds `expired_run_checkpoints_deleted` and
+`raw_checkpoint_purges_blocked`. Downstream exhaustive struct literals must
+initialize them or use `..Default::default()`. This is a pre-1.0 public Rust
+API, schema-module semantic, and retention-behavior change. It changes no
+public GraphQL SDL, Cargo feature/default, private entity shape/count,
+append-only opt-in, or consumer schema. Run complete bounded scan cycles after
+migration; one report is not an erasure certificate.
+
 ## Unreleased: age-based terminal tool payload retention (crate 0.40.0 to 0.41.0; schema 0.38.0 to 0.39.0)
 
 Apply AI schema module `0.39.0` while session, run, tool, approval,

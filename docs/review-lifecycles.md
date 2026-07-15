@@ -75,6 +75,13 @@ the same session. Protected coordinator state remains a separate dependency.
 Retained hashes and decision/use facts prove what was authorized but cannot
 reconstruct the removed preview, resources, arguments, or result.
 
+After those exact tool tombstones exist, an independently expired orphaned
+protected coordinator checkpoint may be physically deleted only through the
+database-enforced append-only maintenance transaction. The terminal run,
+closed attempt outcome, committed budget, absent current pointer, and complete
+correlated tool/approval set are re-proved without reading checkpoint content.
+A current or ambiguous approval/recovery checkpoint remains intact.
+
 ## Approval request
 
 The host builds `AiCanonicalActionPreview` from current server-owned policy and

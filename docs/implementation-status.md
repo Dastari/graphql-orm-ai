@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.39.0`) and 39 private records
+- AI schema-module identity (currently version `0.40.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -277,7 +277,11 @@ production-ready behavior.
   state-machine transactions. The exact current scope policy gates deletion of
   expired provisional live deltas and selectively tombstones age-expired
   terminal tool/approval protected payloads while preserving newer/live
-  authority. Once an exact `deleting`/`deleted_at` session reaches
+  authority. A separate database-enforced append-only transaction then purges
+  bounded age-expired orphaned protected coordinator checkpoints only after
+  terminal run, closed attempt-outcome, committed budget, absent current
+  pointer, and final-output or tombstoned-tool dependency proof. Once an exact
+  `deleting`/`deleted_at` session reaches
   `deleted_content_purge_seconds`, bounded passes delete every
   protected session event kind, then exhaust independently bounded protected
   context-summary checkpoint pages. A whole-session lookahead proof then
@@ -358,8 +362,8 @@ production-ready behavior.
 - Consumer-owned migration validation and production deployment acceptance.
   The crate's disposable PostgreSQL parity harness is implemented, but it does
   not substitute for a consumer's schema composition/restore rehearsal.
-- Complete deleting-session, normalized provider-checkpoint, audit,
-  attachment/blob, and provider-persistent-file retention workflows.
+- Complete deleting-session, audit, attachment/blob, and provider-persistent-
+  file retention workflows.
   Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
   context-summary/terminal-proposal/terminal-tool-and-approval/basic-attachment/
@@ -368,7 +372,9 @@ production-ready behavior.
   session shells, unsafe message dependencies, runs and attempt history,
   ordinary-retention context invalidation, non-checkpoint append-only facts,
   and other external content remain, so reports do not claim complete erasure.
-  Bounded terminal coordinator-checkpoint purge is implemented.
+  Bounded deleting-session and age-expired orphaned protected coordinator-
+  checkpoint purge are implemented; current, nonterminal, recovery-required,
+  or dependency-ambiguous checkpoints remain deliberately closed.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
@@ -419,10 +425,9 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Continue dependency-ordered normalized provider-checkpoint and
-   attachment-artifact/provider-file retention. The reviewed generated-ORM
-   primitive remains scoped only to terminal coordinator checkpoints; keep
-   every other append-only entity closed until its independent scope, age, and
+1. Continue dependency-ordered attachment-artifact/provider-file retention.
+   Keep externally ambiguous object deletion, session shells, and every other
+   append-only entity closed until independent scope, age, history, and
    dependency proofs exist.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
@@ -451,7 +456,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  public PR base; the current crate/schema versions are `0.41.0`/`0.39.0`.
+  public PR base; the current crate/schema versions are `0.42.0`/`0.40.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

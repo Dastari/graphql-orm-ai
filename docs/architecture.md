@@ -90,7 +90,11 @@ GraphQL-managed scope policy inside each deletion transaction, and never opens
 protected content. Eligible provisional deltas are removed without rewinding
 the stream. Independently, the current raw-payload age cutoff may tombstone an
 expired terminal tool/approval subset after exact run/step/approval proof while
-leaving newer or active authority intact. After a deleting-session cutoff,
+leaving newer or active authority intact. A database-enforced append-only
+retention transaction may then delete an expired orphaned protected coordinator
+checkpoint only after re-proving its terminal run, closed attempt outcome,
+committed budget, absent current pointer, and durable final output or exact
+tombstoned tool dependencies without reading protected state. After a deleting-session cutoff,
 context summaries are exhausted before terminal proposal/item payloads;
 accepted proposals without an applied outcome stay blocked. A later
 whole-session pass proves terminal runs, finished tool steps, and exact terminal

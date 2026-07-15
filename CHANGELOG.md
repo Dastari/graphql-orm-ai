@@ -5,12 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.41.0` and the
-AI schema module to `0.39.0`. It keeps 39 private entities and gives the
-existing raw-payload retention setting a fail-closed age-based meaning for
-terminal tool and approval protected content while preserving live authority.
+This development line advances the pre-1.0 crate version to `0.42.0` and the
+AI schema module to `0.40.0`. It keeps 39 private entities and extends the
+existing raw-payload retention setting to protected normalized coordinator
+checkpoints only after their recovery authority and dependencies are closed.
 
 ### Added
+
+- The generated-ORM retention worker now physically deletes bounded,
+  age-expired `provider_turn_persisted`, `tool_batch_persisted`, and
+  `supervised_tool_batch_persisted` checkpoints only when their run is
+  terminal and no current run pointer references them. The database-enforced
+  append-only purge transaction re-proves the current scope policy, exact
+  attempt/outcome fence, committed budget, and either a durable final assistant
+  output or every correlated terminal tombstoned tool/approval dependency.
+  Current checkpoints, live/nonterminal runs, missing history, untombstoned
+  tool authority, lookahead overflow, and malformed correlations remain closed.
+- `AiSessionRetentionReport` now counts expired protected checkpoints and raw
+  checkpoint proofs that remained blocked. Deletion is deterministic,
+  cardinality-exact, atomically redacted-audited, and never opens protected
+  checkpoint state.
 
 - `raw_payload_retention_seconds` now drives age-based tool/approval payload
   tombstones for active, archived, or pre-cutoff deleting sessions. The worker

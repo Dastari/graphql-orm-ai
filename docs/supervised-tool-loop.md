@@ -189,6 +189,13 @@ newer or active supervised wait is not eligible and remains usable; it does not
 become purge authority for itself. Provider continuation state in an immutable
 checkpoint remains separate and is never inferred absent from a tool tombstone.
 
+Once both the consumed approval and terminal tool payload are tombstoned, an
+age-expired orphaned `supervised_tool_batch_persisted` checkpoint may be
+physically deleted only after a separate append-only maintenance transaction
+re-proves the exact terminal run, closed attempt outcome, committed budget,
+one correlated call/approval, and absent current pointer. A current supervised
+checkpoint or any incomplete dependency remains protected and non-purgeable.
+
 An exact complete provider-retained result can be requeued after lease loss,
 reopened under current principal/rule/protection authority, and consumed once
 before later transport without executing the resolver again. The coordinator
