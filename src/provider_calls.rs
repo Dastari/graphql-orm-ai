@@ -3503,7 +3503,8 @@ mod tests {
         assert_eq!(
             record
                 .protected_arguments
-                .get("protection")
+                .as_ref()
+                .and_then(|value| value.get("protection"))
                 .and_then(serde_json::Value::as_str),
             Some("database_managed")
         );

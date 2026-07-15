@@ -1235,12 +1235,14 @@ pub(crate) struct AiToolCallRecord {
     pub tool_fingerprint: String,
     /// Protected arguments.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_arguments: serde_json::Value,
+    pub protected_arguments: Option<serde_json::Value>,
     /// Canonical argument hash used for approvals/idempotency.
     pub argument_hash: String,
     /// Protected result.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_result: Option<serde_json::Value>,
+    /// Timestamp when deleting-session retention removed protected content.
+    pub payload_purged_at: Option<i64>,
     /// Risk class.
     pub risk: String,
     /// Authorization decision code.
@@ -1340,10 +1342,12 @@ pub(crate) struct AiApprovalRecord {
     pub authorization_state_digest: String,
     /// Protected exact resource/version bindings.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_resource_bindings: serde_json::Value,
+    pub protected_resource_bindings: Option<serde_json::Value>,
     /// Protected server-generated canonical action preview.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
-    pub protected_action_preview: serde_json::Value,
+    pub protected_action_preview: Option<serde_json::Value>,
+    /// Timestamp when deleting-session retention removed protected content.
+    pub payload_purged_at: Option<i64>,
     /// Canonical action-preview hash.
     pub action_preview_hash: String,
     /// Pending/approved/resume-claimed/denied/expired/revoked/consumed state.
@@ -1829,7 +1833,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.37.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.38.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.37.0`) and 39 private records
+- AI schema-module identity (currently version `0.38.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -281,17 +281,22 @@ production-ready behavior.
   context-summary checkpoint pages. A whole-session lookahead proof then
   tombstones protected proposal/item content only for terminal outcomes and
   terminal owning runs; accepted proposals without a trusted applied outcome
-  stay blocked. Artifact-free attachments next enter a separately claimed
-  exact-reference blob cleanup state; that worker re-proves the current cutoff,
-  retains ambiguous deletes for retry, and only a later retention pass removes
-  confirmed ordinary metadata before eligible terminal message scrubbing, even
-  when ordinary message retention is disabled. After all ordinary protected
-  sources are exhausted, retention clears validated terminal run pointers
-  before a separate generated-ORM transaction purges bounded immutable
-  coordinator-checkpoint pages and atomically appends redacted audit. Message
-  and proposal tombstones remain, event gaps request a client reset, attachment
-  artifacts and unsafe dependencies remain blocked, and all other append-only
-  security facts stay non-purgeable.
+  stay blocked. A later whole-session proof tombstones protected tool
+  arguments/results and approval resources/previews only for bounded terminal
+  runs, exact finished steps, and compatible terminal one-shot approvals;
+  active or uncertain authority blocks the session. Artifact-free attachments
+  next enter a separately claimed exact-reference blob cleanup state; that
+  worker re-proves the current cutoff, retains ambiguous deletes for retry, and
+  only a later retention pass removes confirmed ordinary metadata before
+  eligible terminal message scrubbing, even when ordinary message retention is
+  disabled. After all ordinary protected sources are exhausted, retention
+  clears validated terminal run pointers before a separate generated-ORM
+  transaction independently re-proves tool/approval tombstones, purges bounded
+  immutable coordinator-checkpoint pages, and atomically appends redacted
+  audit. Message, proposal, tool, and approval metadata tombstones remain,
+  event gaps request a client reset, attachment artifacts and unsafe
+  dependencies remain blocked, and all other append-only security facts stay
+  non-purgeable.
 - Project-neutral hierarchical rule management and runtime resolution through
   generated ORM operations. Host-derived application/tenant-project/user
   lineages intersect immutable deployment ceilings and every explicit exact
@@ -351,12 +356,13 @@ production-ready behavior.
 - Consumer-owned migration validation and production deployment acceptance.
   The crate's disposable PostgreSQL parity harness is implemented, but it does
   not substitute for a consumer's schema composition/restore rehearsal.
-- Complete deleting-session, raw-provider/tool payload, audit, attachment/blob,
+- Complete deleting-session, raw-provider, audit, attachment/blob,
   and provider-persistent-file retention workflows. Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
-  context-summary/terminal-proposal/basic-attachment/message-content pruning are
-  implemented; unresolved accepted proposals, attachment artifacts/provider
-  files, session shells, unsafe message dependencies, runs and attempt history,
+  context-summary/terminal-proposal/terminal-tool-and-approval/basic-attachment/
+  message-content pruning are implemented; unresolved accepted proposals,
+  active or uncertain tool authority, attachment artifacts/provider files,
+  session shells, unsafe message dependencies, runs and attempt history,
   ordinary-retention context invalidation, non-checkpoint append-only facts,
   and other external content remain, so reports do not claim complete erasure.
   Bounded terminal coordinator-checkpoint purge is implemented.
@@ -410,7 +416,7 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Continue dependency-ordered deleting-session raw-provider/tool and
+1. Continue dependency-ordered deleting-session raw-provider and
    attachment-artifact/provider-file retention. The reviewed generated-ORM
    primitive remains scoped only to terminal coordinator checkpoints; keep
    every other append-only entity closed until its independent scope, age, and
@@ -442,7 +448,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  public PR base; the current crate/schema versions are `0.39.0`/`0.37.0`.
+  public PR base; the current crate/schema versions are `0.40.0`/`0.38.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

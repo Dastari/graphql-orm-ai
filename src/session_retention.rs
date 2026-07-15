@@ -26,6 +26,10 @@ pub struct AiSessionRetentionReport {
     pub deleting_session_context_checkpoints_deleted: u32,
     /// Terminal proposal payloads scrubbed after their context dependencies.
     pub deleting_session_proposal_payloads_purged: u32,
+    /// Terminal tool-call payloads scrubbed after proposal dependencies.
+    pub deleting_session_tool_payloads_purged: u32,
+    /// Terminal approval payloads scrubbed with their exact tool calls.
+    pub deleting_session_approval_payloads_purged: u32,
     /// Terminal run pointers cleared before append-only checkpoint deletion.
     pub deleting_session_run_checkpoint_references_cleared: u32,
     /// Append-only coordinator checkpoints physically deleted after their
@@ -55,6 +59,9 @@ pub struct AiSessionRetentionReport {
     /// Deleting sessions whose proposal set was over-bound, nonterminal, or
     /// still accepted without an authoritative applied outcome.
     pub proposal_payload_purges_blocked: u32,
+    /// Deleting sessions whose tool/approval set was over-bound, nonterminal,
+    /// uncertain, or retained active authority.
+    pub tool_payload_purges_blocked: u32,
     /// Deleting sessions whose run history exceeded the configured proof bound
     /// or still contained a nonterminal run.
     pub run_checkpoint_purges_blocked: u32,

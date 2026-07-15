@@ -90,12 +90,16 @@ GraphQL-managed scope policy inside each deletion transaction, and never opens
 protected content. Eligible provisional deltas are removed without rewinding
 the stream. After a deleting-session cutoff, context summaries are exhausted
 before terminal proposal/item payloads; accepted proposals without an applied
-outcome stay blocked. Eligible terminal messages whose attachment rows have
-been independently cleaned and removed retain metadata but replace
-preview/blocks with a structural tombstone. Event readers detect resulting
-gaps and require a bounded client reset. Basic attachment objects require a
-separate verified cleanup worker; attachment artifacts/provider files and all
-immutable audit/usage/fence evidence remain separate lifecycle obligations.
+outcome stay blocked. A later whole-session pass proves terminal runs, finished
+tool steps, and exact terminal one-shot approval linkage before clearing tool
+arguments/results and approval resources/previews. Active, uncertain, or
+over-bound authority blocks everything later. Eligible terminal messages whose
+attachment rows have been independently cleaned and removed retain metadata but
+replace preview/blocks with a structural tombstone. Event readers detect
+resulting gaps and require a bounded client reset. Basic attachment objects
+require a separate verified cleanup worker; attachment artifacts/provider files
+and all immutable audit/usage/fence evidence remain separate lifecycle
+obligations.
 
 Schema migration, backup, restore, and runtime readiness use the dependency-
 owned `AiSchemaModule`. A restored database is not runnable until leases,

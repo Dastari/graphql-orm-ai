@@ -84,14 +84,16 @@ camelCase to PascalCase.
    `next_session_cursor` is absent. This prunes eligible provisional deltas;
    after a deleting-session cutoff it also removes bounded protected session
    events, then protected context-summary checkpoints, tombstones terminal
-   proposal/item protected content under whole-session bounds, coordinates
-   artifact-free attachment objects through the separately scheduled
+   proposal/item protected content under whole-session bounds, then tombstones
+   terminal tool/approval protected payloads only after proving the complete
+   bounded run/call/step/approval graph. It next coordinates artifact-free
+   attachment objects through the separately scheduled
    `OrmAiAttachmentService::cleanup_once`, deletes only confirmed attachment
-   tombstones, then scrubs eligible terminal message content, clears validated
+   tombstones, scrubs eligible terminal message content, clears validated
    terminal-run checkpoint pointers, and purges bounded immutable coordinator
-   checkpoints. It does not erase unresolved accepted proposals, attachment
-   artifacts/provider files, other append-only facts, runs, or the session
-   shell; see the
+   checkpoints. It does not erase unresolved accepted proposals, active or
+   uncertain tool authority, attachment artifacts/provider files, other
+   append-only facts, runs, or the session shell; see the
    [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
    `AiUsageAccessPolicy`. Grant current-principal-only reporting by default;

@@ -37,6 +37,8 @@ pub struct AiSessionRetentionLimits {
     maximum_message_blocks_per_session: usize,
     maximum_proposals_per_session: usize,
     maximum_proposal_items_per_session: usize,
+    maximum_tool_calls_per_session: usize,
+    maximum_approvals_per_session: usize,
     maximum_attachments_per_session: usize,
     maximum_runs_per_session: usize,
     maximum_run_checkpoints_per_session: usize,
@@ -98,6 +100,8 @@ impl AiSessionRetentionLimits {
             maximum_message_blocks_per_session,
             maximum_proposals_per_session: maximum_messages_per_session,
             maximum_proposal_items_per_session: maximum_message_blocks_per_session,
+            maximum_tool_calls_per_session: maximum_messages_per_session,
+            maximum_approvals_per_session: maximum_messages_per_session,
             maximum_attachments_per_session: maximum_messages_per_session,
             maximum_runs_per_session: maximum_messages_per_session,
             maximum_run_checkpoints_per_session: maximum_context_checkpoints_per_session,
@@ -171,6 +175,29 @@ impl AiSessionRetentionLimits {
         Ok(self)
     }
 
+    /// Sets independent whole-session tool-call and approval proof bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless both limits are in
+    /// `1..=5_000`.
+    pub fn with_tool_payload_limits(
+        mut self,
+        maximum_tool_calls_per_session: usize,
+        maximum_approvals_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_tool_calls_per_session)
+            || !(1..=5_000).contains(&maximum_approvals_per_session)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention tool-payload limits".to_owned(),
+            ));
+        }
+        self.maximum_tool_calls_per_session = maximum_tool_calls_per_session;
+        self.maximum_approvals_per_session = maximum_approvals_per_session;
+        Ok(self)
+    }
+
     /// Maximum session metadata rows considered in one scan page.
     pub const fn maximum_sessions(self) -> usize {
         self.maximum_sessions
@@ -215,6 +242,16 @@ impl AiSessionRetentionLimits {
         self.maximum_proposal_items_per_session
     }
 
+    /// Maximum tool-call rows proved for one deleting session.
+    pub const fn maximum_tool_calls_per_session(self) -> usize {
+        self.maximum_tool_calls_per_session
+    }
+
+    /// Maximum approval rows proved for one deleting session.
+    pub const fn maximum_approvals_per_session(self) -> usize {
+        self.maximum_approvals_per_session
+    }
+
     /// Maximum run rows used to prove one deleting session is terminal.
     pub const fn maximum_runs_per_session(self) -> usize {
         self.maximum_runs_per_session
@@ -236,6 +273,8 @@ impl Default for AiSessionRetentionLimits {
             maximum_message_blocks_per_session: 5_000,
             maximum_proposals_per_session: 100,
             maximum_proposal_items_per_session: 5_000,
+            maximum_tool_calls_per_session: 100,
+            maximum_approvals_per_session: 100,
             maximum_attachments_per_session: 100,
             maximum_runs_per_session: 100,
             maximum_run_checkpoints_per_session: 100,
@@ -284,14 +323,16 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
 /// provisional delta rows and, after the deleting-session cutoff, all bounded
 /// protected session event rows. Protected context-summary checkpoints are
 /// deleted in bounded pages before terminal proposal/item payloads are
-/// tombstoned under whole-session bounds. Linked attachments then enter the
-/// independently scheduled, exact-reference storage cleanup state; only
-/// confirmed, artifact-free tombstones are deleted before eligible finalized
-/// message blocks are scrubbed, retaining explicit proposal and message
-/// metadata tombstones. Once those sources are exhausted and every bounded run
-/// is terminal, the worker clears current checkpoint pointers before a separate
-/// retention transaction physically deletes append-only coordinator
-/// checkpoints. Unresolved accepted proposals, nonterminal runs, ambiguous
+/// tombstoned under whole-session bounds. A later whole-session proof
+/// tombstones protected tool/approval payloads only for exact terminal
+/// call/step/approval graphs. Linked attachments then enter the independently
+/// scheduled, exact-reference storage cleanup state; only confirmed,
+/// artifact-free tombstones are deleted before eligible finalized message
+/// blocks are scrubbed, retaining explicit metadata tombstones. Once those
+/// sources are exhausted and every bounded run is terminal, the worker clears
+/// current checkpoint pointers before a separate retention transaction
+/// physically deletes append-only coordinator checkpoints. Unresolved accepted
+/// proposals, active or uncertain tool authority, nonterminal runs, ambiguous
 /// storage deletion, and attachment artifacts remain blocked. Redacted audit,
 /// usage, egress, attempt, pricing, and skill facts remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
@@ -367,6 +408,16 @@ impl OrmAiSessionRetentionService {
             proposal_item_limit.checked_add(1).ok_or_else(|| {
                 AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
             })?;
+        let tool_call_limit = i64::try_from(self.limits.maximum_tool_calls_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
+        let tool_call_limit_with_lookahead = tool_call_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
+        let approval_limit = i64::try_from(self.limits.maximum_approvals_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
+        let approval_limit_with_lookahead = approval_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
         let attachment_limit = i64::try_from(self.limits.maximum_attachments_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
         let attachment_limit_with_lookahead = attachment_limit
@@ -678,6 +729,239 @@ impl OrmAiSessionRetentionService {
                         }
                     }
 
+                    let mut tool_payloads_purged = 0usize;
+                    let mut approval_payloads_purged = 0usize;
+                    let mut tool_payload_purge_blocked = false;
+                    if deletion_cutoff_reached
+                        && context_checkpoint_ids.is_empty()
+                        && proposal_payloads_purged == 0
+                        && !proposal_payload_purge_blocked
+                    {
+                        let runs = tx
+                            .query::<AiRunRecord>()
+                            .filter(AiRunRecordWhereInput {
+                                session_id: Some(UuidFilter {
+                                    eq: Some(session.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(run_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let maximum_runs = usize::try_from(run_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if runs.len() > maximum_runs {
+                            tool_payload_purge_blocked = true;
+                        }
+                        let mut run_ids = Vec::with_capacity(runs.len());
+                        for run in &runs {
+                            let state = AiRunState::from_persisted(&run.state)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if run.id.is_nil()
+                                || run.session_id != session.id
+                                || run.lease_generation < 0
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                            if !state.is_terminal() {
+                                tool_payload_purge_blocked = true;
+                            }
+                            run_ids.push(run.id);
+                        }
+                        if !tool_payload_purge_blocked {
+                            let calls = if run_ids.is_empty() {
+                                Vec::new()
+                            } else {
+                                tx.query::<AiToolCallRecord>()
+                                    .filter(AiToolCallRecordWhereInput {
+                                        run_id: Some(UuidFilter {
+                                            in_list: Some(run_ids.clone()),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                    .default_order()
+                                    .limit(tool_call_limit_with_lookahead)
+                                    .fetch_all()
+                                    .await
+                                    .map_err(OrmPublicError::from)?
+                            };
+                            let approvals = tx
+                                .query::<AiApprovalRecord>()
+                                .filter(AiApprovalRecordWhereInput {
+                                    session_id: Some(UuidFilter {
+                                        eq: Some(session.id),
+                                        ..Default::default()
+                                    }),
+                                    ..Default::default()
+                                })
+                                .default_order()
+                                .limit(approval_limit_with_lookahead)
+                                .fetch_all()
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            let maximum_calls = usize::try_from(tool_call_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let maximum_approvals = usize::try_from(approval_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            if calls.len() > maximum_calls || approvals.len() > maximum_approvals {
+                                tool_payload_purge_blocked = true;
+                            } else {
+                                let calls_by_id = calls
+                                    .iter()
+                                    .map(|call| (call.id, call))
+                                    .collect::<HashMap<_, _>>();
+                                let approvals_by_id = approvals
+                                    .iter()
+                                    .map(|approval| (approval.id, approval))
+                                    .collect::<HashMap<_, _>>();
+                                for call in &calls {
+                                    validate_tool_call(call, &run_ids)?;
+                                    if !tool_call_state_is_terminal(&call.state) {
+                                        tool_payload_purge_blocked = true;
+                                        break;
+                                    }
+                                    let Some(step) = tx
+                                        .find_by_id::<AiRunStepRecord>(&call.id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                    else {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    };
+                                    validate_tool_step(&step, call)?;
+                                    let approval = call
+                                        .approval_id
+                                        .and_then(|approval_id| approvals_by_id.get(&approval_id))
+                                        .copied();
+                                    if call.approval_id.is_some() != approval.is_some()
+                                        || !tool_approval_states_match(call, approval)
+                                    {
+                                        tool_payload_purge_blocked = true;
+                                        break;
+                                    }
+                                    if call.payload_purged_at.is_some() {
+                                        if call.protected_arguments.is_some()
+                                            || call.protected_result.is_some()
+                                            || approval.is_some_and(|approval| {
+                                                approval.payload_purged_at.is_none()
+                                                    || approval
+                                                        .protected_resource_bindings
+                                                        .is_some()
+                                                    || approval.protected_action_preview.is_some()
+                                            })
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::InternalError,
+                                            ));
+                                        }
+                                        continue;
+                                    }
+                                    if call.protected_arguments.is_none()
+                                        || tool_call_result_required(&call.state)
+                                            != call.protected_result.is_some()
+                                        || approval.is_some_and(|approval| {
+                                            approval.payload_purged_at.is_some()
+                                                || approval.protected_resource_bindings.is_none()
+                                                || approval.protected_action_preview.is_none()
+                                        })
+                                    {
+                                        return Err(OrmPublicError::new(
+                                            OrmErrorCode::InternalError,
+                                        ));
+                                    }
+                                }
+                                if !tool_payload_purge_blocked {
+                                    for approval in &approvals {
+                                        validate_approval(approval, session.id)?;
+                                        let Some(call) = calls_by_id.get(&approval.tool_call_id)
+                                        else {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::InternalError,
+                                            ));
+                                        };
+                                        if call.approval_id != Some(approval.id)
+                                            || !approval_state_is_terminal(&approval.state)
+                                        {
+                                            tool_payload_purge_blocked = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if !tool_payload_purge_blocked {
+                                    for approval in approvals {
+                                        if approval.payload_purged_at.is_some() {
+                                            continue;
+                                        }
+                                        let updated = tx
+                                            .compare_and_swap::<AiApprovalRecord>(
+                                                &approval.id,
+                                                approval.row_version,
+                                                AiApprovalRecordWhereInput {
+                                                    session_id: Some(UuidFilter {
+                                                        eq: Some(session.id),
+                                                        ..Default::default()
+                                                    }),
+                                                    ..Default::default()
+                                                },
+                                                UpdateAiApprovalRecordInput {
+                                                    protected_resource_bindings: Some(None),
+                                                    protected_action_preview: Some(None),
+                                                    payload_purged_at: Some(Some(now)),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        if !matches!(updated, ConditionalUpdateOutcome::Updated(_))
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::Conflict,
+                                            ));
+                                        }
+                                        approval_payloads_purged += 1;
+                                    }
+                                    for call in calls {
+                                        if call.payload_purged_at.is_some() {
+                                            continue;
+                                        }
+                                        let updated = tx
+                                            .compare_and_swap::<AiToolCallRecord>(
+                                                &call.id,
+                                                call.row_version,
+                                                AiToolCallRecordWhereInput {
+                                                    run_id: Some(UuidFilter {
+                                                        in_list: Some(run_ids.clone()),
+                                                        ..Default::default()
+                                                    }),
+                                                    ..Default::default()
+                                                },
+                                                UpdateAiToolCallRecordInput {
+                                                    protected_arguments: Some(None),
+                                                    protected_result: Some(None),
+                                                    payload_purged_at: Some(Some(now)),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        if !matches!(updated, ConditionalUpdateOutcome::Updated(_))
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::Conflict,
+                                            ));
+                                        }
+                                        tool_payloads_purged += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let mut attachment_cleanups_requested = 0usize;
                     let mut attachments_deleted = 0usize;
                     let mut attachment_cleanup_blocked = false;
@@ -685,6 +969,9 @@ impl OrmAiSessionRetentionService {
                         && context_checkpoint_ids.is_empty()
                         && proposal_payloads_purged == 0
                         && !proposal_payload_purge_blocked
+                        && tool_payloads_purged == 0
+                        && approval_payloads_purged == 0
+                        && !tool_payload_purge_blocked
                     {
                         let attachments = tx
                             .query::<AiAttachmentRecord>()
@@ -783,7 +1070,10 @@ impl OrmAiSessionRetentionService {
                     let message_cutoff = if deletion_cutoff_reached
                         && (!context_checkpoint_ids.is_empty()
                             || proposal_payloads_purged > 0
-                            || proposal_payload_purge_blocked)
+                            || proposal_payload_purge_blocked
+                            || tool_payloads_purged > 0
+                            || approval_payloads_purged > 0
+                            || tool_payload_purge_blocked)
                     {
                         None
                     } else if deletion_cutoff_reached {
@@ -961,6 +1251,9 @@ impl OrmAiSessionRetentionService {
                         && context_checkpoint_ids.is_empty()
                         && proposal_payloads_purged == 0
                         && !proposal_payload_purge_blocked
+                        && tool_payloads_purged == 0
+                        && approval_payloads_purged == 0
+                        && !tool_payload_purge_blocked
                         && attachment_cleanups_requested == 0
                         && attachments_deleted == 0
                         && !attachment_cleanup_blocked
@@ -1147,6 +1440,8 @@ impl OrmAiSessionRetentionService {
                     if event_ids.is_empty()
                         && context_checkpoint_ids.is_empty()
                         && proposal_payloads_purged == 0
+                        && tool_payloads_purged == 0
+                        && approval_payloads_purged == 0
                         && attachment_cleanups_requested == 0
                         && attachments_deleted == 0
                         && messages_purged == 0
@@ -1155,6 +1450,7 @@ impl OrmAiSessionRetentionService {
                         return Ok(SessionPruneOutcome::Noop {
                             messages_blocked,
                             proposal_payload_purge_blocked,
+                            tool_payload_purge_blocked,
                             attachment_cleanup_blocked,
                             run_checkpoint_purge_ready,
                             run_checkpoint_purge_blocked,
@@ -1184,6 +1480,9 @@ impl OrmAiSessionRetentionService {
                         deleting_session_context_checkpoints_deleted,
                         proposal_payloads_purged,
                         proposal_payload_purge_blocked,
+                        tool_payloads_purged,
+                        approval_payloads_purged,
+                        tool_payload_purge_blocked,
                         attachment_cleanups_requested,
                         attachments_deleted,
                         attachment_cleanup_blocked,
@@ -1218,6 +1517,16 @@ impl OrmAiSessionRetentionService {
             proposal_item_limit.checked_add(1).ok_or_else(|| {
                 AiError::InvalidConfiguration("invalid proposal-item limit".to_owned())
             })?;
+        let tool_call_limit = i64::try_from(self.limits.maximum_tool_calls_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
+        let tool_call_limit_with_lookahead = tool_call_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid tool-call limit".to_owned()))?;
+        let approval_limit = i64::try_from(self.limits.maximum_approvals_per_session)
+            .map_err(|_| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
+        let approval_limit_with_lookahead = approval_limit
+            .checked_add(1)
+            .ok_or_else(|| AiError::InvalidConfiguration("invalid approval limit".to_owned()))?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let run_limit_with_lookahead = run_limit
@@ -1474,6 +1783,111 @@ impl OrmAiSessionRetentionService {
                         }
                         run_fences.insert(run.id, run.lease_generation);
                     }
+                    let run_ids = run_fences.keys().copied().collect::<Vec<_>>();
+                    let calls = if run_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        maintenance
+                            .query::<AiToolCallRecord>()
+                            .filter(AiToolCallRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    in_list: Some(run_ids.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .default_order()
+                            .limit(tool_call_limit_with_lookahead)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                    };
+                    let approvals = maintenance
+                        .query::<AiApprovalRecord>()
+                        .filter(AiApprovalRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .default_order()
+                        .limit(approval_limit_with_lookahead)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if calls.len()
+                        > usize::try_from(tool_call_limit)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        || approvals.len()
+                            > usize::try_from(approval_limit)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+                    {
+                        return Ok(0);
+                    }
+                    let calls_by_id = calls
+                        .iter()
+                        .map(|call| (call.id, call))
+                        .collect::<HashMap<_, _>>();
+                    let approvals_by_id = approvals
+                        .iter()
+                        .map(|approval| (approval.id, approval))
+                        .collect::<HashMap<_, _>>();
+                    for call in &calls {
+                        validate_tool_call(call, &run_ids)?;
+                        if !tool_call_state_is_terminal(&call.state)
+                            || call.payload_purged_at.is_none()
+                            || call.protected_arguments.is_some()
+                            || call.protected_result.is_some()
+                        {
+                            return Ok(0);
+                        }
+                        let steps = maintenance
+                            .query::<AiRunStepRecord>()
+                            .filter(AiRunStepRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(call.id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if steps.len() != 1 {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        validate_tool_step(&steps[0], call)?;
+                        let approval = call
+                            .approval_id
+                            .and_then(|approval_id| approvals_by_id.get(&approval_id))
+                            .copied();
+                        if call.approval_id.is_some() != approval.is_some()
+                            || !tool_approval_states_match(call, approval)
+                            || approval.is_some_and(|approval| {
+                                approval.payload_purged_at.is_none()
+                                    || approval.protected_resource_bindings.is_some()
+                                    || approval.protected_action_preview.is_some()
+                            })
+                        {
+                            return Ok(0);
+                        }
+                    }
+                    for approval in &approvals {
+                        validate_approval(approval, session_id)?;
+                        let Some(call) = calls_by_id.get(&approval.tool_call_id) else {
+                            return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        };
+                        if call.approval_id != Some(approval.id)
+                            || !approval_state_is_terminal(&approval.state)
+                            || approval.payload_purged_at.is_none()
+                            || approval.protected_resource_bindings.is_some()
+                            || approval.protected_action_preview.is_some()
+                        {
+                            return Ok(0);
+                        }
+                    }
                     if run_fences.is_empty() {
                         return Ok(0);
                     }
@@ -1588,6 +2002,7 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                 SessionPruneOutcome::Noop {
                     messages_blocked,
                     proposal_payload_purge_blocked,
+                    tool_payload_purge_blocked,
                     attachment_cleanup_blocked,
                     run_checkpoint_purge_ready,
                     run_checkpoint_purge_blocked,
@@ -1596,6 +2011,12 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     if proposal_payload_purge_blocked {
                         report.proposal_payload_purges_blocked = report
                             .proposal_payload_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
+                    if tool_payload_purge_blocked {
+                        report.tool_payload_purges_blocked = report
+                            .tool_payload_purges_blocked
                             .checked_add(1)
                             .ok_or(AiError::PersistenceFailed)?;
                     }
@@ -1619,6 +2040,9 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     deleting_session_context_checkpoints_deleted,
                     proposal_payloads_purged,
                     proposal_payload_purge_blocked,
+                    tool_payloads_purged,
+                    approval_payloads_purged,
+                    tool_payload_purge_blocked,
                     attachment_cleanups_requested,
                     attachments_deleted,
                     attachment_cleanup_blocked,
@@ -1648,6 +2072,20 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     if proposal_payload_purge_blocked {
                         report.proposal_payload_purges_blocked = report
                             .proposal_payload_purges_blocked
+                            .checked_add(1)
+                            .ok_or(AiError::PersistenceFailed)?;
+                    }
+                    report.deleting_session_tool_payloads_purged = add_count(
+                        report.deleting_session_tool_payloads_purged,
+                        tool_payloads_purged,
+                    )?;
+                    report.deleting_session_approval_payloads_purged = add_count(
+                        report.deleting_session_approval_payloads_purged,
+                        approval_payloads_purged,
+                    )?;
+                    if tool_payload_purge_blocked {
+                        report.tool_payload_purges_blocked = report
+                            .tool_payload_purges_blocked
                             .checked_add(1)
                             .ok_or(AiError::PersistenceFailed)?;
                     }
@@ -1712,6 +2150,7 @@ enum SessionPruneOutcome {
     Noop {
         messages_blocked: usize,
         proposal_payload_purge_blocked: bool,
+        tool_payload_purge_blocked: bool,
         attachment_cleanup_blocked: bool,
         run_checkpoint_purge_ready: bool,
         run_checkpoint_purge_blocked: bool,
@@ -1722,6 +2161,9 @@ enum SessionPruneOutcome {
         deleting_session_context_checkpoints_deleted: usize,
         proposal_payloads_purged: usize,
         proposal_payload_purge_blocked: bool,
+        tool_payloads_purged: usize,
+        approval_payloads_purged: usize,
+        tool_payload_purge_blocked: bool,
         attachment_cleanups_requested: usize,
         attachments_deleted: usize,
         attachment_cleanup_blocked: bool,
@@ -1844,6 +2286,137 @@ fn proposal_state_is_terminal(proposal: &AiProposalRecord, now: i64) -> bool {
             && proposal
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= now))
+}
+
+fn validate_tool_call(call: &AiToolCallRecord, run_ids: &[Uuid]) -> Result<(), OrmPublicError> {
+    if call.id.is_nil()
+        || call.run_id.is_nil()
+        || !run_ids.contains(&call.run_id)
+        || call.provider_call_key.trim().is_empty()
+        || call.provider_call_key.len() > 1_024
+        || call.provider_call_id.trim().is_empty()
+        || call.provider_call_id.len() > 1_024
+        || call
+            .provider_kind
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty() || value.len() > 128)
+        || call
+            .provider_model
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty() || value.len() > 512)
+        || call.provider_turn_index < 0
+        || call.tool_call_index < 0
+        || call.tool_id.trim().is_empty()
+        || call.tool_id.len() > 512
+        || call.tool_fingerprint.trim().is_empty()
+        || call.tool_fingerprint.len() > 512
+        || call.argument_hash.trim().is_empty()
+        || call.argument_hash.len() > 512
+        || call.risk.trim().is_empty()
+        || call.risk.len() > 128
+        || call.lease_generation < 0
+        || call.state.trim().is_empty()
+        || call.state.len() > 128
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn validate_tool_step(
+    step: &AiRunStepRecord,
+    call: &AiToolCallRecord,
+) -> Result<(), OrmPublicError> {
+    if step.id != call.id
+        || step.run_id != call.run_id
+        || step.step_kind != "application_tool"
+        || step.state != call.state
+        || step.lease_generation != call.lease_generation
+        || step.started_at.is_none()
+        || step.finished_at.is_none()
+        || call.completed_at.is_none()
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn validate_approval(approval: &AiApprovalRecord, session_id: Uuid) -> Result<(), OrmPublicError> {
+    if approval.id.is_nil()
+        || approval.tool_call_id.is_nil()
+        || approval.session_id != session_id
+        || approval.principal_subject.trim().is_empty()
+        || approval.principal_subject.len() > 512
+        || approval.principal_reference_fingerprint.trim().is_empty()
+        || approval.principal_reference_fingerprint.len() > 512
+        || approval.argument_hash.trim().is_empty()
+        || approval.argument_hash.len() > 512
+        || approval.tool_fingerprint.trim().is_empty()
+        || approval.tool_fingerprint.len() > 512
+        || approval.binding_hash.trim().is_empty()
+        || approval.binding_hash.len() > 512
+        || approval.action_preview_hash.trim().is_empty()
+        || approval.action_preview_hash.len() > 512
+        || approval.maximum_uses != 1
+        || !(0..=1).contains(&approval.consumed_uses)
+        || !matches!(
+            approval.state.as_str(),
+            "pending"
+                | "approved"
+                | "resume_claimed"
+                | "denied"
+                | "expired"
+                | "revoked"
+                | "consumed"
+        )
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn tool_call_state_is_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "completed"
+            | "execution_failed"
+            | "egress_denied"
+            | "egress_audit_failed"
+            | "approval_denied"
+            | "approval_revoked"
+            | "approval_expired"
+    )
+}
+
+fn tool_call_result_required(state: &str) -> bool {
+    matches!(
+        state,
+        "completed" | "execution_failed" | "egress_denied" | "egress_audit_failed"
+    )
+}
+
+fn approval_state_is_terminal(state: &str) -> bool {
+    matches!(state, "consumed" | "denied" | "expired" | "revoked")
+}
+
+fn tool_approval_states_match(
+    call: &AiToolCallRecord,
+    approval: Option<&AiApprovalRecord>,
+) -> bool {
+    match approval.map(|approval| approval.state.as_str()) {
+        None => !matches!(
+            call.state.as_str(),
+            "approval_denied" | "approval_revoked" | "approval_expired"
+        ),
+        Some("consumed") => matches!(
+            call.state.as_str(),
+            "completed" | "execution_failed" | "egress_denied" | "egress_audit_failed"
+        ),
+        Some("denied") => call.state == "approval_denied",
+        Some("revoked") => call.state == "approval_revoked",
+        Some("expired") => call.state == "approval_expired",
+        Some(_) => false,
+    }
 }
 
 fn validate_attachment(
@@ -2310,6 +2883,124 @@ mod tests {
             .expect("proposal item should seed");
         }
         (proposal_id, item_id)
+    }
+
+    async fn seed_tool_call(
+        database: &Database<SqliteBackend>,
+        session_id: Uuid,
+        run_id: Uuid,
+        call_state: &str,
+        approval_state: Option<&str>,
+    ) -> (Uuid, Option<Uuid>) {
+        let call_id = Uuid::new_v4();
+        let approval_id = approval_state.map(|_| Uuid::new_v4());
+        let call_is_terminal = tool_call_state_is_terminal(call_state);
+        AiRunStepRecord::insert(
+            database,
+            CreateAiRunStepRecordInput {
+                id: call_id,
+                run_id,
+                step_index: 0,
+                step_kind: "application_tool".to_owned(),
+                state: call_state.to_owned(),
+                lease_generation: 0,
+                started_at: Some(now().unix_timestamp() - 100),
+                finished_at: call_is_terminal.then_some(now().unix_timestamp() - 90),
+                error_code: (call_state != "completed").then(|| "test_outcome".to_owned()),
+            },
+        )
+        .await
+        .expect("tool step should seed");
+        AiToolCallRecord::insert(
+            database,
+            CreateAiToolCallRecordInput {
+                id: call_id,
+                run_id,
+                provider_call_key: format!("retention:{call_id}"),
+                provider_call_id: format!("provider-{call_id}"),
+                provider_kind: Some("mock".to_owned()),
+                provider_model: Some("retention-test".to_owned()),
+                provider_response_id: Some("retention-response".to_owned()),
+                budget_reservation_id: None,
+                provider_turn_index: 0,
+                tool_call_index: 0,
+                tool_id: "test.read".to_owned(),
+                tool_fingerprint: "tool-fingerprint".to_owned(),
+                protected_arguments: Some(serde_json::json!({"protected": "arguments"})),
+                argument_hash: "argument-hash".to_owned(),
+                protected_result: tool_call_result_required(call_state)
+                    .then(|| serde_json::json!({"protected": "result"})),
+                payload_purged_at: None,
+                risk: if approval_id.is_some() {
+                    "high_impact".to_owned()
+                } else {
+                    "read_only".to_owned()
+                },
+                authorization_code: call_is_terminal.then(|| "allowed".to_owned()),
+                authorization_policy_version: call_is_terminal.then(|| "policy-v1".to_owned()),
+                authorization_state_digest: call_is_terminal.then(|| "auth-state".to_owned()),
+                disclosure_schema_fingerprint: call_is_terminal
+                    .then(|| "disclosure-fingerprint".to_owned()),
+                result_classification: call_is_terminal.then(|| "internal".to_owned()),
+                result_egress_decision_id: None,
+                result_egress_manifest_hash: None,
+                application_audit_ref: None,
+                approval_id,
+                idempotency_key: Some(call_id.to_string()),
+                correlation_id: Some("tool-correlation".to_owned()),
+                causation_id: Some("tool-causation".to_owned()),
+                delegation_reference: None,
+                lease_generation: 0,
+                state: call_state.to_owned(),
+                completed_at: call_is_terminal.then_some(now().unix_timestamp() - 90),
+            },
+        )
+        .await
+        .expect("tool call should seed");
+        if let (Some(approval_id), Some(approval_state)) = (approval_id, approval_state) {
+            let decided = approval_state != "pending";
+            let consumed = approval_state == "consumed";
+            AiApprovalRecord::insert(
+                database,
+                CreateAiApprovalRecordInput {
+                    id: approval_id,
+                    tool_call_id: call_id,
+                    session_id,
+                    principal_subject: "retention-user".to_owned(),
+                    principal_reference_fingerprint: "principal-fingerprint".to_owned(),
+                    delegated_actor_subject: None,
+                    delegation_reference: None,
+                    argument_hash: "argument-hash".to_owned(),
+                    tool_fingerprint: "tool-fingerprint".to_owned(),
+                    binding_hash: "binding-hash".to_owned(),
+                    execution_target_id: "local".to_owned(),
+                    target_schema_fingerprint: "schema-fingerprint".to_owned(),
+                    operation_name: "RetentionTest".to_owned(),
+                    operation_document_hash: "document-hash".to_owned(),
+                    result_projection_fingerprint: "projection-fingerprint".to_owned(),
+                    disclosure_schema_fingerprint: "disclosure-fingerprint".to_owned(),
+                    policy_version: "policy-v1".to_owned(),
+                    authorization_state_digest: "auth-state".to_owned(),
+                    protected_resource_bindings: Some(
+                        serde_json::json!({"protected": "resources"}),
+                    ),
+                    protected_action_preview: Some(serde_json::json!({"protected": "preview"})),
+                    payload_purged_at: None,
+                    action_preview_hash: "preview-hash".to_owned(),
+                    state: approval_state.to_owned(),
+                    recent_mfa_required: true,
+                    approver_subject: decided.then(|| "retention-reviewer".to_owned()),
+                    expires_at: now().unix_timestamp() + 3_600,
+                    decided_at: decided.then_some(now().unix_timestamp() - 95),
+                    maximum_uses: 1,
+                    consumed_uses: i64::from(consumed),
+                    consumed_at: consumed.then_some(now().unix_timestamp() - 90),
+                },
+            )
+            .await
+            .expect("tool approval should seed");
+        }
+        (call_id, approval_id)
     }
 
     async fn seed_events(database: &Database<SqliteBackend>, session_id: Uuid) {
@@ -2931,6 +3622,245 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_session_tool_and_approval_payloads_precede_message_scrubbing() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let (call_id, approval_id) =
+            seed_tool_call(&database, session_id, run_id, "completed", Some("consumed")).await;
+        let checkpoint_ids = seed_run_checkpoints(&database, run_id, 1).await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let tool_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("retention should scrub terminal tool authority first");
+        assert_eq!(tool_pass.sessions_changed, 1);
+        assert_eq!(tool_pass.deleting_session_tool_payloads_purged, 1);
+        assert_eq!(tool_pass.deleting_session_approval_payloads_purged, 1);
+        assert_eq!(tool_pass.tool_payload_purges_blocked, 0);
+        assert_eq!(tool_pass.message_contents_purged, 0);
+        assert_eq!(
+            tool_pass.deleting_session_run_checkpoint_references_cleared,
+            0
+        );
+        assert_eq!(tool_pass.deleting_session_run_checkpoints_deleted, 0);
+        let call = AiToolCallRecord::find_by_id(&database, &call_id)
+            .await
+            .expect("tool-call lookup should succeed")
+            .expect("tool-call metadata should remain");
+        assert_eq!(call.state, "completed");
+        assert!(call.protected_arguments.is_none());
+        assert!(call.protected_result.is_none());
+        assert_eq!(call.payload_purged_at, Some(now().unix_timestamp()));
+        assert_eq!(call.argument_hash, "argument-hash");
+        let approval_id = approval_id.expect("approval should exist");
+        let approval = AiApprovalRecord::find_by_id(&database, &approval_id)
+            .await
+            .expect("approval lookup should succeed")
+            .expect("approval metadata should remain");
+        assert_eq!(approval.state, "consumed");
+        assert!(approval.protected_resource_bindings.is_none());
+        assert!(approval.protected_action_preview.is_none());
+        assert_eq!(approval.payload_purged_at, Some(now().unix_timestamp()));
+        assert_eq!(approval.consumed_uses, 1);
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should remain");
+        assert!(message.protected_preview.is_some());
+
+        let message_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("later retention should scrub message content");
+        assert_eq!(message_pass.deleting_session_tool_payloads_purged, 0);
+        assert_eq!(message_pass.deleting_session_approval_payloads_purged, 0);
+        assert_eq!(message_pass.message_contents_purged, 1);
+        assert_eq!(
+            message_pass.deleting_session_run_checkpoint_references_cleared,
+            0
+        );
+        assert_eq!(message_pass.deleting_session_run_checkpoints_deleted, 0);
+
+        let checkpoint_pass = service
+            .prune_session_content(None)
+            .await
+            .expect("later retention should re-prove tombstones and purge checkpoints");
+        assert_eq!(
+            checkpoint_pass.deleting_session_run_checkpoint_references_cleared,
+            1
+        );
+        assert_eq!(checkpoint_pass.deleting_session_run_checkpoints_deleted, 1);
+        let checkpoints = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunCheckpointRecord>()
+                        .filter(AiRunCheckpointRecordWhereInput {
+                            id: Some(UuidFilter {
+                                in_list: Some(checkpoint_ids),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("checkpoint proof should load");
+        assert!(checkpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_tool_authority_blocks_deleting_session_payload_retention() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (message_id, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let (call_id, approval_id) = seed_tool_call(
+            &database,
+            session_id,
+            run_id,
+            "waiting_approval",
+            Some("approved"),
+        )
+        .await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            AiSessionRetentionLimits::default(),
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("active tool authority should remain closed");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.tool_payload_purges_blocked, 1);
+        assert_eq!(report.deleting_session_tool_payloads_purged, 0);
+        assert_eq!(report.message_contents_purged, 0);
+        let call = AiToolCallRecord::find_by_id(&database, &call_id)
+            .await
+            .expect("tool-call lookup should succeed")
+            .expect("active tool call should remain");
+        assert!(call.protected_arguments.is_some());
+        assert!(call.payload_purged_at.is_none());
+        let approval =
+            AiApprovalRecord::find_by_id(&database, &approval_id.expect("approval should exist"))
+                .await
+                .expect("approval lookup should succeed")
+                .expect("active approval should remain");
+        assert!(approval.protected_action_preview.is_some());
+        assert!(approval.payload_purged_at.is_none());
+        let message = AiMessageRecord::find_by_id(&database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("message should remain");
+        assert!(message.protected_preview.is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_lookahead_blocks_the_whole_deleting_session_set() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (_, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let first = seed_tool_call(&database, session_id, run_id, "completed", None)
+            .await
+            .0;
+        let second = seed_tool_call(&database, session_id, run_id, "completed", None)
+            .await
+            .0;
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_tool_payload_limits(1, 100)
+            .expect("tool lookahead limit should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("over-bound tools should remain closed");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.tool_payload_purges_blocked, 1);
+        assert_eq!(report.deleting_session_tool_payloads_purged, 0);
+        for call_id in [first, second] {
+            let call = AiToolCallRecord::find_by_id(&database, &call_id)
+                .await
+                .expect("tool-call lookup should succeed")
+                .expect("over-bound tool call should remain");
+            assert!(call.protected_arguments.is_some());
+            assert!(call.payload_purged_at.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_lookahead_blocks_the_whole_deleting_session_set() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let (_, run_id) = seed_message(&database, session_id, "completed", false).await;
+        let first =
+            seed_tool_call(&database, session_id, run_id, "completed", Some("consumed")).await;
+        let second =
+            seed_tool_call(&database, session_id, run_id, "completed", Some("consumed")).await;
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_tool_payload_limits(100, 1)
+            .expect("approval lookahead limit should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("over-bound approvals should remain closed");
+        assert_eq!(report.sessions_changed, 0);
+        assert_eq!(report.tool_payload_purges_blocked, 1);
+        assert_eq!(report.deleting_session_tool_payloads_purged, 0);
+        assert_eq!(report.deleting_session_approval_payloads_purged, 0);
+        for (call_id, approval_id) in [first, second] {
+            let call = AiToolCallRecord::find_by_id(&database, &call_id)
+                .await
+                .expect("tool-call lookup should succeed")
+                .expect("over-bound tool call should remain");
+            assert!(call.protected_arguments.is_some());
+            assert!(call.payload_purged_at.is_none());
+            let approval = AiApprovalRecord::find_by_id(
+                &database,
+                &approval_id.expect("approval should exist"),
+            )
+            .await
+            .expect("approval lookup should succeed")
+            .expect("over-bound approval should remain");
+            assert!(approval.protected_resource_bindings.is_some());
+            assert!(approval.protected_action_preview.is_some());
+            assert!(approval.payload_purged_at.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn deleting_session_attachment_cleanup_precedes_message_scrubbing() {
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
@@ -3151,7 +4081,8 @@ mod tests {
             .await
             .expect("blocked run-checkpoint retention pass should be safe");
         assert_eq!(report.sessions_changed, 0);
-        assert_eq!(report.run_checkpoint_purges_blocked, 1);
+        assert_eq!(report.tool_payload_purges_blocked, 1);
+        assert_eq!(report.run_checkpoint_purges_blocked, 0);
         assert_eq!(report.deleting_session_run_checkpoint_references_cleared, 0);
         assert_eq!(report.deleting_session_run_checkpoints_deleted, 0);
 
@@ -3255,6 +4186,16 @@ mod tests {
         assert_eq!(proposal_limits.maximum_proposal_items_per_session(), 3);
         assert!(matches!(
             proposal_limits.with_proposal_limits(0, 3),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        let tool_limits = AiSessionRetentionLimits::new(1, 10, 10, 10)
+            .expect("base retention limits should validate")
+            .with_tool_payload_limits(2, 3)
+            .expect("independent tool limits should validate");
+        assert_eq!(tool_limits.maximum_tool_calls_per_session(), 2);
+        assert_eq!(tool_limits.maximum_approvals_per_session(), 3);
+        assert!(matches!(
+            tool_limits.with_tool_payload_limits(2, 0),
             Err(AiError::InvalidConfiguration(_))
         ));
     }

@@ -158,6 +158,16 @@ retry exhaustion, and any changed current access/policy remain
 `RecoveryRequired`. Operators must never manually relink a checkpoint or
 reconstruct a continuation.
 
+For a deleting session past its current cutoff, checkpoint purge remains later
+than proposal and tool/approval payload tombstoning. The ordinary retention
+transaction proves the complete bounded terminal call/step/approval graph and
+clears only protected arguments, results, resource bindings, and canonical
+previews. The append-only checkpoint maintenance transaction independently
+re-proves those tombstones, terminal runs, empty earlier content sources, and
+cleared current pointers before deleting an exact ordered checkpoint page.
+Active or uncertain authority can therefore never be discarded merely to make
+a checkpoint purge eligible.
+
 Final assistant output retains its stronger same-transaction message/block
 checkpoint and may be finalized by ordinary expired-lease recovery as already
 documented.

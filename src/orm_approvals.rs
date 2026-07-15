@@ -584,7 +584,10 @@ impl OrmAiApprovalService {
                     "protected_action_preview",
                     &binding.scope,
                 ),
-                &record.protected_action_preview,
+                record
+                    .protected_action_preview
+                    .as_ref()
+                    .ok_or(AiError::Forbidden)?,
             )
             .await?;
         let stored_resources = self
@@ -596,7 +599,10 @@ impl OrmAiApprovalService {
                     "protected_resource_bindings",
                     &binding.scope,
                 ),
-                &record.protected_resource_bindings,
+                record
+                    .protected_resource_bindings
+                    .as_ref()
+                    .ok_or(AiError::Forbidden)?,
             )
             .await?;
         if stored_preview
@@ -801,7 +807,10 @@ impl OrmAiApprovalService {
                     "protected_action_preview",
                     &scope,
                 ),
-                &record.protected_action_preview,
+                record
+                    .protected_action_preview
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?,
             )
             .await?;
         let state = if matches!(

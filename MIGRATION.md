@@ -4,6 +4,59 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: deleting-session tool and approval tombstones (crate 0.39.0 to 0.40.0; schema 0.37.0 to 0.38.0)
+
+Apply AI schema module `0.38.0` while session, run, tool, approval, proposal,
+attachment, coordinator, retention, and restore workers are closed. Do not run
+0.40.0 code against a module still registered as 0.37.0. The generated
+migration keeps the existing 39 private entities, adds nullable
+`payload_purged_at` columns to the tool-call and approval tables, makes tool
+`protected_arguments` nullable, and makes approval
+`protected_resource_bindings`/`protected_action_preview` nullable. Tool
+`protected_result` was already nullable. Use only the generated `graphql-orm`
+migration; no application SQL, consumer-table change, blob-key rewrite, or
+application-authored data copy is required. Existing protected values remain
+unchanged until retention proves them eligible.
+
+At and after the exact current deleting-session cutoff, repeated bounded scan
+cycles now order protected content as context summaries, proposal payloads,
+tool/approval payloads, attachment cleanup, message bodies, and terminal
+coordinator checkpoints. A tool pass first proves the complete session run,
+tool-call, and approval sets under lookahead bounds. Every run must be terminal;
+each call must have a matching finished application-tool step and one of the
+closed terminal outcomes; and each referenced approval must be exact,
+one-shot, terminal, and state-compatible with that call. Pending, approved,
+resume-claimed, nonterminal, recovery-required, over-bound, malformed, or
+inconsistently tombstoned state retains every tool/approval payload and blocks
+later content cleanup.
+
+For an eligible whole-session set, one transaction clears approval resource
+bindings and canonical previews before clearing tool arguments/results, writes
+both tombstone timestamps, and appends redacted audit. IDs, provider/tool
+references, canonical hashes, risk, authorization and egress decisions,
+application audit references, approval decision/use state, timestamps, and CAS
+versions remain. A later checkpoint-purge transaction independently re-proves
+the bounded terminal graph and complete tombstone shape before deleting any
+append-only checkpoint. Ordinary approval, checkpoint, and consequential-tool
+paths treat missing protected payload as unusable and fail closed.
+
+The existing `AiSessionRetentionLimits` constructors remain source-compatible
+and derive tool/approval defaults from the message limit. Call
+`with_tool_payload_limits` for independent `1..=5_000` tool-call and approval
+bounds; new getters return both. `AiSessionRetentionReport` adds
+`deleting_session_tool_payloads_purged`,
+`deleting_session_approval_payloads_purged`, and
+`tool_payload_purges_blocked`. Downstream exhaustive struct literals must
+initialize the new fields or use `..Default::default()`.
+
+This is a pre-1.0 public Rust API, private persistent-shape,
+backup/schema-fingerprint, and retention-behavior change. It changes no public
+GraphQL SDL, Cargo feature/default, table/entity count, append-only policy, or
+consumer schema. Deploy the generated schema migration, then run retention in
+complete repeated cycles. One pass is not an erasure certificate; tool and
+approval metadata, provider raw payloads, proposal metadata, attachment
+artifacts, session shells, and immutable audit/usage/history facts remain.
+
 ## Unreleased: deleting-session proposal tombstones (crate 0.38.0 to 0.39.0; schema 0.36.0 to 0.37.0)
 
 Apply AI schema module `0.37.0` while session, proposal, retention, attachment,

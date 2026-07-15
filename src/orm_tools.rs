@@ -1249,7 +1249,9 @@ impl OrmAiConsequentialToolCallService {
                     "protected_arguments",
                     &scope,
                 ),
-                &call.protected_arguments,
+                call.protected_arguments
+                    .as_ref()
+                    .ok_or(AiError::PersistenceFailed)?,
             )
             .await?;
         if canonical_json_hash(&arguments)? != call.argument_hash {

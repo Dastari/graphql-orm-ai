@@ -10,7 +10,10 @@ for narrowly defined classes of protected chat data:
 - after that cutoff, protected context-summary checkpoints;
 - after context summaries are exhausted, terminal proposal and optional
   proposal-item protected content under whole-session lookahead bounds;
-- after proposal payloads are exhausted, artifact-free attachments coordinated
+- after proposal payloads are exhausted, protected arguments/results and
+  approval resource bindings/action previews for a completely bounded,
+  terminal, exactly linked run/tool/approval graph;
+- after tool and approval payloads are exhausted, artifact-free attachments coordinated
   through separately verified exact-reference blob cleanup, followed by their
   ordinary metadata rows;
 - after attachments are exhausted, the same safely detachable terminal message
@@ -31,7 +34,8 @@ and validated `AiSessionRetentionLimits`. Use
 from the message-row limit, and chain `with_run_checkpoint_limits` when run
 proofs and immutable checkpoint pages need independent bounds. Chain
 `with_proposal_limits` when whole-session proposal and proposal-item proofs need
-independent bounds. Chain
+independent bounds. Chain `with_tool_payload_limits` when whole-session tool
+call and approval proofs need independent bounds. Chain
 `with_attachment_limit` when a whole-session attachment proof needs its own
 bound. Schedule `OrmAiAttachmentService::cleanup_once` independently; session
 retention never performs storage I/O. Start a complete scan cycle by calling
@@ -45,9 +49,9 @@ states only what that completed page changed; it is not a global erasure
 certificate. Persist worker scheduling/telemetry outside model-visible state,
 alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
-`proposal_payload_purges_blocked`, or `run_checkpoint_purges_blocked`. Also
-alert on attachment cleanup failures and never treat a partial scan cycle as
-complete.
+`proposal_payload_purges_blocked`, `tool_payload_purges_blocked`, or
+`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
+never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -96,7 +100,30 @@ non-content metadata. Any over-bound set, nonterminal run, unresolved accepted
 state, malformed binding, or CAS race leaves all proposal content in place.
 Attachment coordination and message scrubbing wait until a later pass.
 
-Only after proposal payloads are exhausted does retention load the session's
+Only after proposal payloads are exhausted does retention load the complete
+bounded run, tool-call, and approval sets without opening protected values.
+Every run must belong to the deleting session and be terminal. Every eligible
+call must use a known terminal outcome and have an exact finished
+`application_tool` step with matching run, state, and lease generation. Any
+approval must bind exactly once in both directions, belong to the same session,
+be terminal, and match its call outcome: consumed approvals bind completed or
+closed execution outcomes, while denied/revoked/expired approvals bind only the
+matching closed call state.
+
+Before changing anything, the transaction validates the complete graph and
+pre-purge payload shape. Active calls, pending/approved/resume-claimed
+approvals, nonterminal or recovery-required runs, missing steps, cross-session
+or duplicate linkage, incompatible states, malformed tombstones, and any
+lookahead overflow block the whole set. For an eligible set, approval resource
+bindings and canonical previews are cleared before tool arguments/results; each
+row receives `payload_purged_at`. IDs, provider and tool references, hashes,
+risk, state, authorization and egress evidence, application audit references,
+approval decision/use metadata, timestamps, and row versions remain. Later
+attachment and message phases wait for a separate pass. Ordinary approval,
+checkpoint, and consequential-tool paths treat a tombstoned protected value as
+unusable and fail closed.
+
+Only after tool and approval payloads are exhausted does retention load the session's
 entire attachment set under a configured lookahead bound. Any over-bound set
 blocks the session. An attachment artifact also blocks its parent immediately
 because artifact blobs, protected derivatives, and provider-file references
@@ -133,22 +160,23 @@ The transaction clears the protected preview, deletes exact block rows, writes
 fact. Any failure rolls back the whole session change.
 
 Run-checkpoint purge starts only in a later pass that proves no protected
-session event, context checkpoint, proposal/item payload, attachment row, or
-unpurged message content remains. The run query uses a lookahead bound and every
-returned run must belong to the session, have valid fencing metadata, and be
-terminal. Each non-null current checkpoint pointer must identify an exact,
-structurally valid checkpoint for that run. The ordinary state-machine
-transaction clears those pointers with CAS before any physical deletion can
-start.
+session event, context checkpoint, proposal/item payload, tool/approval
+payload, attachment row, or unpurged message content remains. The run query
+uses a lookahead bound and every returned run must belong to the session, have
+valid fencing metadata, and be terminal. Each non-null current checkpoint
+pointer must identify an exact, structurally valid checkpoint for that run. The
+ordinary state-machine transaction clears those pointers with CAS before any
+physical deletion can start.
 
 The worker then opens a generated `graphql-orm` retention transaction. It
 reloads and validates the deleting session, current scope policy, cutoff,
-empty-source proofs, bounded terminal runs, and absent pointers. It selects one
+empty-source proofs, bounded terminal runs, complete tool/approval tombstones,
+exact call/step/approval linkage, and absent pointers. It selects one
 created-time/primary-key-ordered checkpoint page, validates only redacted
 structure without opening protected state, deletes the exact typed ID set under
-a nonzero `MutationLimit`, and appends a redacted purge audit atomically. A crash between
-pointer clearing and purge leaves an unreferenced checkpoint for a later pass;
-it cannot leave a run pointing at a deleted row.
+a nonzero `MutationLimit`, and appends a redacted purge audit atomically. A
+crash between pointer clearing and purge leaves an unreferenced checkpoint for
+a later pass; it cannot leave a run pointing at a deleted row.
 
 Constructing the service grants `RetentionMaintenance` only for the exact run-
 checkpoint entity and policy key on its private database-handle clone.
@@ -172,22 +200,25 @@ retention never requires loading the complete transcript into the DOM.
 ## Deliberate limits
 
 This workflow does not delete session or message metadata, attachment artifacts
-or provider-persistent files, runs, run attempts/outcomes, tool calls/results,
-proposal metadata, approvals, provider raw payloads, usage, egress decisions,
-audit facts, pricing/skill history, or restore evidence. It therefore advances
-but does not complete the `deleting` session lifecycle. Proposal protected
-content is eligible only through the terminal whole-session proof above; an
-unresolved accepted proposal remains deliberately closed. Basic attachment
-objects and metadata are eligible only through the two-worker proof above;
-artifacts remain deliberately closed. Unsafe message or run dependencies
-remain in place and are counted as blocked. The remaining resources require
-separate workers with their own dependency ordering, external delete
-confirmation, fencing, restore reconciliation, and audit contracts.
+or provider-persistent files, runs, run attempts/outcomes, tool-call or
+approval metadata, proposal metadata, provider raw payloads, usage, egress
+decisions, audit facts, pricing/skill history, or restore evidence. It therefore
+advances but does not complete the `deleting` session lifecycle. Proposal
+protected content and tool/approval protected payloads are eligible only
+through their terminal whole-session proofs above; unresolved accepted
+proposals and active or uncertain tool authority remain deliberately closed.
+Basic attachment objects and metadata are eligible only through the two-worker
+proof above; artifacts remain deliberately closed. Unsafe message or run
+dependencies remain in place and are counted as blocked. The remaining
+resources require separate workers with their own dependency ordering,
+external delete confirmation, fencing, restore reconciliation, and audit
+contracts.
 
 Ordinary message-retention expiry does not yet delete context checkpoints. The
 context-compaction producer remains unimplemented and must stay disabled until
 its ordinary-retention invalidation and exact source-coverage contract lands.
 
 Restore collectors must distinguish validated retention gaps from corruption
-and must validate the tombstone invariant. A nonzero
+and must validate message, proposal, tool, and approval tombstone invariants,
+including exact terminal call/step/approval linkage. A nonzero
 `invalid_session_retention_count` is fatal and keeps runtime readiness closed.

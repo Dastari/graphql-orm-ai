@@ -1199,7 +1199,7 @@ impl OrmAiCoordinatorCheckpointService {
                     field: "protected_arguments".to_owned(),
                     scope: scope.clone(),
                 },
-                &call.protected_arguments,
+                call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
             )
             .await?;
         let result = self
@@ -1223,7 +1223,10 @@ impl OrmAiCoordinatorCheckpointService {
                     field: "protected_resource_bindings".to_owned(),
                     scope: scope.clone(),
                 },
-                &approval.protected_resource_bindings,
+                approval
+                    .protected_resource_bindings
+                    .as_ref()
+                    .ok_or(AiError::Conflict)?,
             )
             .await?;
         let mut resources: Vec<crate::AiApprovalResourceBinding> =
@@ -1237,7 +1240,10 @@ impl OrmAiCoordinatorCheckpointService {
                     field: "protected_action_preview".to_owned(),
                     scope: scope.clone(),
                 },
-                &approval.protected_action_preview,
+                approval
+                    .protected_action_preview
+                    .as_ref()
+                    .ok_or(AiError::Conflict)?,
             )
             .await?;
         let preview: crate::AiCanonicalActionPreview =
@@ -1848,7 +1854,7 @@ impl OrmAiCoordinatorCheckpointService {
                         field: "protected_arguments".to_owned(),
                         scope: scope.clone(),
                     },
-                    &call.protected_arguments,
+                    call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
                 )
                 .await?;
             let result = self
@@ -2001,7 +2007,7 @@ impl OrmAiCoordinatorCheckpointService {
                             field: "protected_arguments".to_owned(),
                             scope: scope.clone(),
                         },
-                        &call.protected_arguments,
+                        call.protected_arguments.as_ref().ok_or(AiError::Conflict)?,
                     )
                     .await?;
                 let result = self

@@ -868,7 +868,7 @@ async fn deleting_session_retention_waits_for_confirmed_attachment_cleanup() {
         .finalize_upload(&owner, ready.id)
         .await
         .expect("retention attachment should release");
-    fixture
+    let sent = fixture
         .session_service
         .send_message(
             &owner,
@@ -881,6 +881,31 @@ async fn deleting_session_retention_waits_for_confirmed_attachment_cleanup() {
         )
         .await
         .expect("released attachment should link to a message");
+    let run_service = OrmAiRunService::new(
+        fixture.database.clone(),
+        Arc::new(clock.clone()),
+        AiRunServiceLimits::new(Duration::minutes(5), Duration::hours(1), 16, 2, 8)
+            .expect("run limits should validate"),
+    );
+    let lease = run_service
+        .claim_next("attachment-retention-test")
+        .await
+        .expect("queued attachment run should be claimable")
+        .expect("attachment run should exist");
+    assert_eq!(lease.run_id(), AiRunId(sent.run_id));
+    run_service
+        .finish(
+            &lease,
+            AiRunCompletion::new(
+                AiRunState::Cancelled,
+                "session_deleted_before_execution",
+                Some("session_deleted_before_execution".to_owned()),
+                None,
+            )
+            .expect("redacted cancellation should validate"),
+        )
+        .await
+        .expect("attachment run should close before deletion retention");
     fixture
         .session_service
         .delete_session(&owner, AiSessionId(session.id))

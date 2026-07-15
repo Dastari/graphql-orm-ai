@@ -173,6 +173,15 @@ provider execution, or a lost continuation fence closes as
 An ambiguous approved mutation outcome is returned without calling the
 provider and is never replayed.
 
+If the owning session later reaches its deleting-session cutoff, retention
+still cannot clear a supervised tool or approval payload until the entire
+bounded run set is terminal and the exact call, finished step, consumed
+one-shot approval, and compatible outcome all revalidate. Approval hashes,
+decision/use metadata, authorization and egress evidence, and application audit
+references remain after protected arguments/results/resources/previews are
+tombstoned. Any active wait, recovery-required run, or ambiguous binding keeps
+the payloads and every later deletion phase closed.
+
 An exact complete provider-retained result can be requeued after lease loss,
 reopened under current principal/rule/protection authority, and consumed once
 before later transport without executing the resolver again. The coordinator

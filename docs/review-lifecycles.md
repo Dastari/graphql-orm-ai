@@ -56,6 +56,17 @@ proposals remain blocked because a domain mutation/outcome boundary may be
 unresolved; operators must reconcile that state rather than treating deletion
 as proof that an application effect did or did not occur.
 
+After proposal content is exhausted, deleting-session retention separately
+proves the complete bounded terminal run/tool/approval graph. Only exact
+finished tool steps and state-compatible terminal one-shot approvals are
+eligible. It clears the approval's protected resource bindings and canonical
+preview plus the tool's protected arguments/result, while preserving hashes,
+states, decision/use timestamps, authorization/egress evidence, and audit
+references. Pending, approved, resume-claimed, recovery-required, malformed,
+or over-bound authority stays intact and blocks later attachment/message and
+checkpoint cleanup. Tombstoned terminal approvals cannot be read, consumed, or
+reconstructed as fresh authority.
+
 ## Approval request
 
 The host builds `AiCanonicalActionPreview` from current server-owned policy and

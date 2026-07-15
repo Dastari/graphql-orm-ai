@@ -5,13 +5,28 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.39.0` and the
-AI schema module to `0.37.0`. It keeps 39 private entities, adds a nullable
-proposal-payload purge timestamp, and makes the proposal and proposal-item
-protected payload/source columns nullable so deleting-session retention can
-leave durable non-content review/provenance metadata after exact tombstoning.
+This development line advances the pre-1.0 crate version to `0.40.0` and the
+AI schema module to `0.38.0`. It keeps 39 private entities, adds nullable
+tool-call and approval payload-purge timestamps, and makes the protected tool
+arguments plus approval resource bindings/action preview nullable so exact
+deleting-session tombstones can retain non-content authority and audit facts.
 
 ### Added
+
+- Deleting-session retention now tombstones protected tool arguments/results
+  and approval resource bindings/action previews after proposal content and
+  before attachment or message cleanup. It first proves the complete bounded
+  run/call/approval set, terminal runs and tool states, exact call/step and
+  one-shot approval linkage, compatible terminal approval state, and intact
+  pre-purge payload shape. Active or uncertain authority remains blocked.
+- `AiSessionRetentionLimits::with_tool_payload_limits` and its call/approval
+  getters configure independent whole-session proof bounds. The report now
+  counts tool and approval payload tombstones plus sessions blocked by bounds,
+  nonterminal work, or inconsistent authority. Tool/approval IDs, hashes,
+  state, authorization/egress evidence, audit references, use counts,
+  timestamps, and row versions remain as non-content metadata. Coordinator
+  checkpoint maintenance independently re-proves these tombstones before
+  physically purging an append-only checkpoint page.
 
 - Deleting-session retention now tombstones protected proposal and optional
   proposal-item content only after context summaries are exhausted, the whole
