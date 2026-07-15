@@ -54,7 +54,9 @@ Construct `OrmAiAttachmentService` with:
 Install one clone as `Arc<dyn AiAttachmentService>` in the GraphQL schema and
 use the same service through `AiAttachmentUploadService` in the streaming
 handler. Run that service as `AiAttachmentCleanupService` from a trusted
-host-owned scheduler; it is intentionally not a GraphQL operation. Deployment
+host-owned scheduler; it is intentionally not a GraphQL operation. If
+provider-persistent artifacts are enabled, install the reviewed exact-reference
+boundary with `with_provider_file_deletion_service`. Deployment
 hard defaults are 25 MiB, 255 UTF-8 filename bytes, a ten-minute ticket, and a
 one-hour uninterrupted processing lease. Cleanup defaults to 50 rows and a
 five-minute claim lease. Validated limits may be stricter or up to the
@@ -85,15 +87,28 @@ closed `deleting` state for future cleanup rather than falsely claiming the
 object is gone. Once a message links an attachment, this mutation refuses to
 remove it and break transcript integrity.
 
-The bounded cleanup worker selects only durable `pending_upload`, `uploading`,
-`deleting`, or cleanup states. It reloads and CAS-claims each row with a new
-generation and expiring lease before touching either exact stored reference.
+The bounded cleanup worker processes deleting-session artifact claims before
+parent attachment candidates, then selects only durable `pending_upload`,
+`uploading`, `deleting`, or cleanup states. It reloads and CAS-claims each row
+with a new generation and expiring lease before touching any exact stored
+reference.
 Deletion is treated as successful only when absence is confirmed. Ambiguous
 storage errors retain the references, append a redacted failed audit fact, and
 enter capped retry backoff. A worker crash leaves a reclaimable lease; an old
 worker cannot finalize after another generation wins. Expired tickets are
 soft-deleted, while interrupted uploads remain failed metadata for owner
 inspection. The worker never lists a prefix or reads attachment content.
+
+An artifact claim independently re-proves its exact parent, deleting session,
+current retention policy, and deletion cutoff. It confirms an exact local blob
+is absent before invoking an optional provider boundary. Provider expiry is not
+absence. `AiProviderFileDeletionService::delete_and_confirm_absent` may return
+success only after authoritative absence of the exact opaque reference; a
+missing service or ambiguous response retains the local/provider references
+and protected derivative for retry. Successful cleanup clears those values and
+writes a tombstone. Session retention must physically delete that artifact row
+before it can request cleanup of the parent attachment or scrub the linked
+message.
 
 Restore reconciliation must keep runtime startup closed until AI migrations
 are applied. Nullable legacy `uploading` rows fall back to their expired ticket
@@ -137,5 +152,7 @@ reject animated GIFs. Direct files must be under 50 MiB each, and all inline
 image/file content must be no more than 50 MiB combined. The executor's safer
 default is at most eight attachments, 25 MiB each, and 50 MiB total. Hosts
 should normally narrow those limits and MIME acceptance. Inline input creates
-no provider-side delete obligation; provider-file upload/search lifecycle
-remains a separate future capability.
+no provider-side delete obligation. The artifact cleanup seam can safely retire
+provider references created by a future host-owned persistent-file lifecycle,
+but this crate still does not upload, search, or otherwise create provider file
+objects.

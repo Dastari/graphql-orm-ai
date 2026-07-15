@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.40.0`) and 39 private records
+- AI schema-module identity (currently version `0.41.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -290,17 +290,21 @@ production-ready behavior.
   stay blocked. A later whole-session proof tombstones protected tool
   arguments/results and approval resources/previews only for bounded terminal
   runs, exact finished steps, and compatible terminal one-shot approvals;
-  active or uncertain authority blocks the session. Artifact-free attachments
-  next enter a separately claimed exact-reference blob cleanup state; that
-  worker re-proves the current cutoff, retains ambiguous deletes for retry, and
-  only a later retention pass removes confirmed ordinary metadata before
+  active or uncertain authority blocks the session. The complete bounded
+  attachment-artifact set next enters separately claimed generation/lease-
+  fenced cleanup before any parent attachment. That worker re-proves each
+  parent, current cutoff, and exact local object absence; provider references
+  require a host-supplied authoritative delete-and-confirm-absent boundary.
+  Ambiguity retains references and protected derivatives under backoff. Only a
+  later retention pass removes confirmed artifact metadata, then coordinates
+  the parent exact-reference blob cleanup, before
   eligible terminal message scrubbing, even when ordinary message retention is
   disabled. After all ordinary protected sources are exhausted, retention
   clears validated terminal run pointers before a separate generated-ORM
   transaction independently re-proves tool/approval tombstones, purges bounded
   immutable coordinator-checkpoint pages, and atomically appends redacted
   audit. Message, proposal, tool, and approval metadata tombstones remain,
-  event gaps request a client reset, attachment artifacts and unsafe
+  event gaps request a client reset, ambiguous artifacts and unsafe
   dependencies remain blocked, and all other append-only security facts stay
   non-purgeable.
 - Project-neutral hierarchical rule management and runtime resolution through
@@ -366,9 +370,10 @@ production-ready behavior.
   file retention workflows.
   Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
-  context-summary/terminal-proposal/terminal-tool-and-approval/basic-attachment/
+  context-summary/terminal-proposal/terminal-tool-and-approval/artifact/basic-attachment/
   message-content pruning are implemented; unresolved accepted proposals,
-  active or uncertain tool authority, attachment artifacts/provider files,
+  active or uncertain tool authority, artifact/provider objects without exact
+  absence proof,
   session shells, unsafe message dependencies, runs and attempt history,
   ordinary-retention context invalidation, non-checkpoint append-only facts,
   and other external content remain, so reports do not claim complete erasure.
@@ -378,12 +383,13 @@ production-ready behavior.
 - Application-encrypted field/keyring and production mutable secret-store
   implementations. Database-managed protection and the safe service seams are
   implemented.
-- Attachment quotas, derivative-artifact retention purge, and
-  provider-persistent file upload/search/deletion. Core ticketed quarantine/
+- Attachment quotas, derivative-artifact production, and provider-persistent
+  file upload/search. Core ticketed quarantine/
   scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
   image/file input, expired/interrupted exact-reference cleanup, and verified
-  deleting-session cleanup for artifact-free attachment objects/metadata are
-  implemented.
+  deleting-session cleanup for artifacts and parent attachment
+  objects/metadata are implemented. Provider artifact deletion is an exact
+  host seam; no provider file is created or searched by this crate.
 - Multi-call, mixed, parallel, or stateless supervised coordination. The
   sequential provider-retained top-level coordinator and bounded live
   human-wait reconciliation are implemented; the read-only coordinator still
@@ -391,7 +397,7 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- OpenAI background/webhooks, provider-persistent file upload/search/deletion,
+- OpenAI background/webhooks and provider-persistent file upload/search,
   richer provider file-type preflight, and full built-in result normalization.
   Exact inline image/file input is implemented and remains independently gated
   by host MIME policy, budget, egress, current authority, and reopening limits.
@@ -425,10 +431,8 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Continue dependency-ordered attachment-artifact/provider-file retention.
-   Keep externally ambiguous object deletion, session shells, and every other
-   append-only entity closed until independent scope, age, history, and
-   dependency proofs exist.
+1. Implement protected bounded context-summary/compaction checkpoints with
+   exact source coverage/hash and invalidation after retention or deletion.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -456,7 +460,7 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - Release-policy and `cargo-semver-checks` gates passed against the reviewed
-  public PR base; the current crate/schema versions are `0.42.0`/`0.40.0`.
+  public PR base; the current crate/schema versions are `0.43.0`/`0.41.0`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

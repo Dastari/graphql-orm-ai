@@ -51,6 +51,7 @@ pub struct AiSessionRetentionLimits {
     maximum_tool_calls_per_session: usize,
     maximum_approvals_per_session: usize,
     maximum_attachments_per_session: usize,
+    maximum_attachment_artifacts_per_session: usize,
     maximum_runs_per_session: usize,
     maximum_run_checkpoints_per_session: usize,
 }
@@ -114,6 +115,7 @@ impl AiSessionRetentionLimits {
             maximum_tool_calls_per_session: maximum_messages_per_session,
             maximum_approvals_per_session: maximum_messages_per_session,
             maximum_attachments_per_session: maximum_messages_per_session,
+            maximum_attachment_artifacts_per_session: maximum_messages_per_session,
             maximum_runs_per_session: maximum_messages_per_session,
             maximum_run_checkpoints_per_session: maximum_context_checkpoints_per_session,
         })
@@ -161,6 +163,26 @@ impl AiSessionRetentionLimits {
             ));
         }
         self.maximum_attachments_per_session = maximum_attachments_per_session;
+        Ok(self)
+    }
+
+    /// Sets an independent whole-session bound for proving and coordinating
+    /// dependency-ordered attachment-artifact cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the limit is in
+    /// `1..=5_000`.
+    pub fn with_attachment_artifact_limit(
+        mut self,
+        maximum_attachment_artifacts_per_session: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=5_000).contains(&maximum_attachment_artifacts_per_session) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid session-retention attachment-artifact limit".to_owned(),
+            ));
+        }
+        self.maximum_attachment_artifacts_per_session = maximum_attachment_artifacts_per_session;
         Ok(self)
     }
 
@@ -244,6 +266,11 @@ impl AiSessionRetentionLimits {
         self.maximum_attachments_per_session
     }
 
+    /// Maximum attachment-artifact rows proved for one deleting session.
+    pub const fn maximum_attachment_artifacts_per_session(self) -> usize {
+        self.maximum_attachment_artifacts_per_session
+    }
+
     /// Maximum proposal rows proved for one deleting session.
     pub const fn maximum_proposals_per_session(self) -> usize {
         self.maximum_proposals_per_session
@@ -289,6 +316,7 @@ impl Default for AiSessionRetentionLimits {
             maximum_tool_calls_per_session: 100,
             maximum_approvals_per_session: 100,
             maximum_attachments_per_session: 100,
+            maximum_attachment_artifacts_per_session: 100,
             maximum_runs_per_session: 100,
             maximum_run_checkpoints_per_session: 100,
         }
@@ -342,15 +370,15 @@ impl EntityPolicy<DefaultWriteBackend> for SessionRetentionEntityPolicy {
 /// before terminal proposal/item payloads are tombstoned under whole-session
 /// bounds. A later whole-session proof tombstones every remaining protected
 /// tool/approval payload only for exact terminal call/step/approval graphs.
-/// Linked attachments then enter the independently
-/// scheduled, exact-reference storage cleanup state; only confirmed,
-/// artifact-free tombstones are deleted before eligible finalized message
-/// blocks are scrubbed, retaining explicit metadata tombstones. Once those
+/// Attachment artifacts then enter independently scheduled generation-fenced
+/// exact-reference local/provider cleanup before their parent attachments;
+/// only confirmed tombstones are deleted before eligible finalized message
+/// blocks are scrubbed. Once those
 /// sources are exhausted and every bounded run is terminal, the worker clears
 /// current checkpoint pointers before a separate retention transaction
 /// physically deletes append-only coordinator checkpoints. Unresolved accepted
-/// proposals, active or uncertain tool authority, nonterminal runs, ambiguous
-/// storage deletion, and attachment artifacts remain blocked. Redacted audit,
+/// proposals, active or uncertain tool authority, nonterminal runs, and
+/// ambiguous local/provider deletion remain blocked. Redacted audit,
 /// usage, egress, attempt, pricing, and skill facts remain non-purgeable.
 pub struct OrmAiSessionRetentionService {
     database: Database<DefaultWriteBackend>,
@@ -440,6 +468,14 @@ impl OrmAiSessionRetentionService {
         let attachment_limit_with_lookahead = attachment_limit
             .checked_add(1)
             .ok_or_else(|| AiError::InvalidConfiguration("invalid attachment limit".to_owned()))?;
+        let attachment_artifact_limit =
+            i64::try_from(self.limits.maximum_attachment_artifacts_per_session).map_err(|_| {
+                AiError::InvalidConfiguration("invalid attachment-artifact limit".to_owned())
+            })?;
+        let attachment_artifact_limit_with_lookahead =
+            attachment_artifact_limit.checked_add(1).ok_or_else(|| {
+                AiError::InvalidConfiguration("invalid attachment-artifact limit".to_owned())
+            })?;
         let run_limit = i64::try_from(self.limits.maximum_runs_per_session)
             .map_err(|_| AiError::InvalidConfiguration("invalid run limit".to_owned()))?;
         let run_limit_with_lookahead = run_limit
@@ -1091,6 +1127,8 @@ impl OrmAiSessionRetentionService {
 
                     let mut attachment_cleanups_requested = 0usize;
                     let mut attachments_deleted = 0usize;
+                    let mut attachment_artifact_cleanups_requested = 0usize;
+                    let mut attachment_artifacts_deleted = 0usize;
                     let mut attachment_cleanup_blocked = false;
                     if deletion_cutoff_reached
                         && context_checkpoint_ids.is_empty()
@@ -1120,8 +1158,24 @@ impl OrmAiSessionRetentionService {
                         {
                             attachment_cleanup_blocked = true;
                         } else {
+                            let mut remaining_artifact_capacity =
+                                usize::try_from(attachment_artifact_limit).map_err(|_| {
+                                    OrmPublicError::new(OrmErrorCode::InternalError)
+                                })?;
+                            let mut attachments_with_artifacts =
+                                Vec::with_capacity(attachments.len());
                             for attachment in attachments {
                                 validate_attachment(&attachment, session.id)?;
+                                let artifact_query_limit =
+                                    i64::try_from(remaining_artifact_capacity)
+                                        .map_err(|_| {
+                                            OrmPublicError::new(OrmErrorCode::InternalError)
+                                        })?
+                                        .checked_add(1)
+                                        .ok_or_else(|| {
+                                            OrmPublicError::new(OrmErrorCode::InternalError)
+                                        })?
+                                        .min(attachment_artifact_limit_with_lookahead);
                                 let artifacts = tx
                                     .query::<AiAttachmentArtifactRecord>()
                                     .filter(AiAttachmentArtifactRecordWhereInput {
@@ -1131,62 +1185,129 @@ impl OrmAiSessionRetentionService {
                                         }),
                                         ..Default::default()
                                     })
-                                    .limit(1)
+                                    .default_order()
+                                    .limit(artifact_query_limit)
                                     .fetch_all()
                                     .await
                                     .map_err(OrmPublicError::from)?;
-                                if !artifacts.is_empty() {
+                                if artifacts.len() > remaining_artifact_capacity {
                                     attachment_cleanup_blocked = true;
-                                    continue;
+                                    break;
                                 }
-                                if attachment_ready_for_metadata_delete(&attachment) {
-                                    if !tx
-                                        .delete_by_id::<AiAttachmentRecord>(&attachment.id)
-                                        .await
-                                        .map_err(OrmPublicError::from)?
-                                    {
-                                        return Err(OrmPublicError::new(
-                                            OrmErrorCode::InternalError,
-                                        ));
+                                remaining_artifact_capacity -= artifacts.len();
+                                for artifact in &artifacts {
+                                    validate_attachment_artifact(artifact, attachment.id)?;
+                                }
+                                attachments_with_artifacts.push((attachment, artifacts));
+                            }
+                            if !attachment_cleanup_blocked {
+                                for (attachment, artifacts) in attachments_with_artifacts {
+                                    let mut artifact_dependency_remains = false;
+                                    for artifact in artifacts {
+                                        if attachment_artifact_ready_for_metadata_delete(&artifact)
+                                        {
+                                            if !tx
+                                                .delete_by_id::<AiAttachmentArtifactRecord>(
+                                                    &artifact.id,
+                                                )
+                                                .await
+                                                .map_err(OrmPublicError::from)?
+                                            {
+                                                return Err(OrmPublicError::new(
+                                                    OrmErrorCode::InternalError,
+                                                ));
+                                            }
+                                            attachment_artifacts_deleted += 1;
+                                            continue;
+                                        }
+                                        artifact_dependency_remains = true;
+                                        if attachment_artifact_cleanup_pending(&artifact) {
+                                            attachment_cleanup_blocked = true;
+                                            continue;
+                                        }
+                                        let updated = tx
+                                            .compare_and_swap::<AiAttachmentArtifactRecord>(
+                                                &artifact.id,
+                                                artifact.row_version,
+                                                AiAttachmentArtifactRecordWhereInput {
+                                                    attachment_id: Some(UuidFilter {
+                                                        eq: Some(attachment.id),
+                                                        ..Default::default()
+                                                    }),
+                                                    ..Default::default()
+                                                },
+                                                UpdateAiAttachmentArtifactRecordInput {
+                                                    cleanup_state: Some(Some(
+                                                        "cleanup_required".to_owned(),
+                                                    )),
+                                                    cleanup_lease_expires_at: Some(None),
+                                                    cleanup_next_attempt_at: Some(None),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                            .await
+                                            .map_err(OrmPublicError::from)?;
+                                        if !matches!(updated, ConditionalUpdateOutcome::Updated(_))
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::Conflict,
+                                            ));
+                                        }
+                                        attachment_artifact_cleanups_requested += 1;
+                                        attachment_cleanup_blocked = true;
                                     }
-                                    attachments_deleted += 1;
-                                    continue;
-                                }
-                                if attachment_cleanup_pending(&attachment) {
-                                    attachment_cleanup_blocked = true;
-                                    continue;
-                                }
-                                let updated = tx
-                                    .compare_and_swap::<AiAttachmentRecord>(
-                                        &attachment.id,
-                                        attachment.row_version,
-                                        AiAttachmentRecordWhereInput {
-                                            session_id: Some(UuidFilter {
-                                                eq: Some(session.id),
+                                    if artifact_dependency_remains {
+                                        continue;
+                                    }
+                                    if attachment_ready_for_metadata_delete(&attachment) {
+                                        if !tx
+                                            .delete_by_id::<AiAttachmentRecord>(&attachment.id)
+                                            .await
+                                            .map_err(OrmPublicError::from)?
+                                        {
+                                            return Err(OrmPublicError::new(
+                                                OrmErrorCode::InternalError,
+                                            ));
+                                        }
+                                        attachments_deleted += 1;
+                                        continue;
+                                    }
+                                    if attachment_cleanup_pending(&attachment) {
+                                        attachment_cleanup_blocked = true;
+                                        continue;
+                                    }
+                                    let updated = tx
+                                        .compare_and_swap::<AiAttachmentRecord>(
+                                            &attachment.id,
+                                            attachment.row_version,
+                                            AiAttachmentRecordWhereInput {
+                                                session_id: Some(UuidFilter {
+                                                    eq: Some(session.id),
+                                                    ..Default::default()
+                                                }),
                                                 ..Default::default()
-                                            }),
-                                            ..Default::default()
-                                        },
-                                        UpdateAiAttachmentRecordInput {
-                                            upload_token_hash: Some(None),
-                                            upload_expires_at: Some(None),
-                                            quarantine_state: Some("deleting".to_owned()),
-                                            processing_state: Some(
-                                                "retention_cleanup_required".to_owned(),
-                                            ),
-                                            processing_expires_at: Some(None),
-                                            cleanup_lease_expires_at: Some(None),
-                                            cleanup_next_attempt_at: Some(None),
-                                            ..Default::default()
-                                        },
-                                    )
-                                    .await
-                                    .map_err(OrmPublicError::from)?;
-                                if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
-                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                            },
+                                            UpdateAiAttachmentRecordInput {
+                                                upload_token_hash: Some(None),
+                                                upload_expires_at: Some(None),
+                                                quarantine_state: Some("deleting".to_owned()),
+                                                processing_state: Some(
+                                                    "retention_cleanup_required".to_owned(),
+                                                ),
+                                                processing_expires_at: Some(None),
+                                                cleanup_lease_expires_at: Some(None),
+                                                cleanup_next_attempt_at: Some(None),
+                                                ..Default::default()
+                                            },
+                                        )
+                                        .await
+                                        .map_err(OrmPublicError::from)?;
+                                    if !matches!(updated, ConditionalUpdateOutcome::Updated(_)) {
+                                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                    }
+                                    attachment_cleanups_requested += 1;
+                                    attachment_cleanup_blocked = true;
                                 }
-                                attachment_cleanups_requested += 1;
-                                attachment_cleanup_blocked = true;
                             }
                         }
                     }
@@ -1573,6 +1694,8 @@ impl OrmAiSessionRetentionService {
                         && expired_approval_payloads_purged == 0
                         && attachment_cleanups_requested == 0
                         && attachments_deleted == 0
+                        && attachment_artifact_cleanups_requested == 0
+                        && attachment_artifacts_deleted == 0
                         && messages_purged == 0
                         && run_checkpoint_references_cleared == 0
                     {
@@ -1618,6 +1741,8 @@ impl OrmAiSessionRetentionService {
                         raw_payload_purge_blocked,
                         attachment_cleanups_requested,
                         attachments_deleted,
+                        attachment_artifact_cleanups_requested,
+                        attachment_artifacts_deleted,
                         attachment_cleanup_blocked,
                         messages_purged,
                         blocks_deleted,
@@ -2813,6 +2938,8 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     raw_payload_purge_blocked,
                     attachment_cleanups_requested,
                     attachments_deleted,
+                    attachment_artifact_cleanups_requested,
+                    attachment_artifacts_deleted,
                     attachment_cleanup_blocked,
                     messages_purged,
                     blocks_deleted,
@@ -2878,6 +3005,14 @@ impl AiSessionRetentionService for OrmAiSessionRetentionService {
                     report.deleting_session_attachments_deleted = add_count(
                         report.deleting_session_attachments_deleted,
                         attachments_deleted,
+                    )?;
+                    report.deleting_session_attachment_artifact_cleanups_requested = add_count(
+                        report.deleting_session_attachment_artifact_cleanups_requested,
+                        attachment_artifact_cleanups_requested,
+                    )?;
+                    report.deleting_session_attachment_artifacts_deleted = add_count(
+                        report.deleting_session_attachment_artifacts_deleted,
+                        attachment_artifacts_deleted,
                     )?;
                     report.message_contents_purged =
                         add_count(report.message_contents_purged, messages_purged)?;
@@ -2974,6 +3109,8 @@ enum SessionPruneOutcome {
         raw_payload_purge_blocked: bool,
         attachment_cleanups_requested: usize,
         attachments_deleted: usize,
+        attachment_artifact_cleanups_requested: usize,
+        attachment_artifacts_deleted: usize,
         attachment_cleanup_blocked: bool,
         messages_purged: usize,
         blocks_deleted: usize,
@@ -3233,7 +3370,7 @@ fn tool_approval_states_match(
     }
 }
 
-fn validate_attachment(
+pub(crate) fn validate_attachment(
     attachment: &AiAttachmentRecord,
     session_id: Uuid,
 ) -> Result<(), OrmPublicError> {
@@ -3257,6 +3394,88 @@ fn validate_attachment(
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
     }
     Ok(())
+}
+
+pub(crate) fn validate_attachment_artifact(
+    artifact: &AiAttachmentArtifactRecord,
+    attachment_id: Uuid,
+) -> Result<(), OrmPublicError> {
+    if artifact.id.is_nil()
+        || artifact.attachment_id != attachment_id
+        || artifact.artifact_kind.trim().is_empty()
+        || artifact.artifact_kind.len() > 128
+        || artifact.artifact_kind.chars().any(char::is_control)
+        || artifact.byte_count < 0
+        || artifact.blob_reference.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
+        })
+        || artifact.provider_reference.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
+        })
+        || artifact
+            .cleanup_generation
+            .is_some_and(|generation| generation <= 0)
+        || artifact
+            .cleanup_retry_count
+            .is_some_and(|retry_count| retry_count < 0)
+        || (artifact.provider_expires_at.is_some() && artifact.provider_reference.is_none())
+        || artifact.cleanup_state.as_deref().is_some_and(|state| {
+            !matches!(
+                state,
+                "cleanup_required" | "cleanup_in_progress" | "cleanup_backoff" | "complete"
+            )
+        })
+        || (artifact.cleanup_state.as_deref() == Some("cleanup_required")
+            && (artifact.deleted_at.is_some()
+                || artifact.cleanup_lease_expires_at.is_some()
+                || artifact.cleanup_next_attempt_at.is_some()))
+        || (artifact.cleanup_state.as_deref() == Some("cleanup_in_progress")
+            && (artifact.deleted_at.is_some()
+                || artifact.cleanup_generation.is_none()
+                || artifact.cleanup_lease_expires_at.is_none()
+                || artifact.cleanup_next_attempt_at.is_some()))
+        || (artifact.cleanup_state.as_deref() == Some("cleanup_backoff")
+            && (artifact.deleted_at.is_some()
+                || artifact.cleanup_generation.is_none()
+                || artifact.cleanup_lease_expires_at.is_some()
+                || artifact
+                    .cleanup_retry_count
+                    .is_none_or(|retry_count| retry_count <= 0)
+                || artifact.cleanup_next_attempt_at.is_none()))
+        || (artifact.cleanup_state.as_deref() == Some("complete")
+            && (artifact.blob_reference.is_some()
+                || artifact.protected_content.is_some()
+                || artifact.provider_reference.is_some()
+                || artifact.provider_expires_at.is_some()
+                || artifact.deleted_at.is_none()
+                || artifact.cleanup_generation.is_none()
+                || artifact.cleanup_lease_expires_at.is_some()
+                || artifact.cleanup_next_attempt_at.is_some()))
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn attachment_artifact_ready_for_metadata_delete(artifact: &AiAttachmentArtifactRecord) -> bool {
+    artifact.cleanup_state.as_deref() == Some("complete")
+        && artifact
+            .cleanup_generation
+            .is_some_and(|generation| generation > 0)
+        && artifact.blob_reference.is_none()
+        && artifact.protected_content.is_none()
+        && artifact.provider_reference.is_none()
+        && artifact.provider_expires_at.is_none()
+        && artifact.cleanup_lease_expires_at.is_none()
+        && artifact.cleanup_next_attempt_at.is_none()
+        && artifact.deleted_at.is_some()
+}
+
+fn attachment_artifact_cleanup_pending(artifact: &AiAttachmentArtifactRecord) -> bool {
+    matches!(
+        artifact.cleanup_state.as_deref(),
+        Some("cleanup_required" | "cleanup_in_progress" | "cleanup_backoff")
+    )
 }
 
 fn attachment_ready_for_metadata_delete(attachment: &AiAttachmentRecord) -> bool {
@@ -3354,10 +3573,23 @@ fn map_orm(error: impl Into<OrmPublicError>) -> AiError {
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
-    use crate::AiSessionService;
+    use crate::{
+        AiAttachmentAcceptancePolicy, AiAttachmentCandidate, AiAttachmentCleanupService,
+        AiAttachmentScanReport, AiAttachmentScanRequest, AiAttachmentScanner,
+        AiProviderFileDeletionRequest, AiProviderFileDeletionService, AiSessionService,
+        DatabaseManagedContentProtector, OrmAiAttachmentService,
+    };
     use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
     use graphql_orm::prelude::SqliteBackend;
+    use graphql_orm_storage::{
+        BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
+        StorageBackend, StorageByteStream, StorageError,
+    };
+    use std::collections::BTreeSet;
+    use std::ops::Range;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use time::OffsetDateTime;
 
     struct AllowAll;
@@ -3399,6 +3631,158 @@ mod tests {
                 version: 1,
                 ready: true,
             })
+        }
+    }
+
+    struct UnusedScanner;
+
+    #[async_trait]
+    impl AiAttachmentScanner for UnusedScanner {
+        async fn scan(
+            &self,
+            _request: &AiAttachmentScanRequest,
+            _body: StorageByteStream,
+        ) -> Result<AiAttachmentScanReport, AiError> {
+            Err(AiError::PersistenceFailed)
+        }
+    }
+
+    struct DenyAttachmentAcceptance;
+
+    #[async_trait]
+    impl AiAttachmentAcceptancePolicy for DenyAttachmentAcceptance {
+        async fn authorize(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _candidate: &AiAttachmentCandidate,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::deny("unused", "unused")
+        }
+    }
+
+    #[derive(Default)]
+    struct ArtifactBlobStore {
+        references: Mutex<BTreeSet<String>>,
+    }
+
+    impl ArtifactBlobStore {
+        fn insert(&self, reference: &str) {
+            self.references
+                .lock()
+                .expect("artifact blob lock")
+                .insert(reference.to_owned());
+        }
+
+        fn contains(&self, reference: &str) -> bool {
+            self.references
+                .lock()
+                .expect("artifact blob lock")
+                .contains(reference)
+        }
+
+        fn unsupported() -> StorageError {
+            StorageError::Provider {
+                backend: "artifact-test".to_owned(),
+                message: "unused operation".to_owned(),
+                retryable: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlobStore for ArtifactBlobStore {
+        fn backend(&self) -> StorageBackend {
+            StorageBackend::Local
+        }
+
+        async fn put_blob(
+            &self,
+            _key: &str,
+            _body: StorageByteStream,
+            _options: BlobPutOptions,
+        ) -> Result<BlobWriteOutcome, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn put_blob_if_not_exists(
+            &self,
+            _key: &str,
+            _body: StorageByteStream,
+            _options: BlobPutOptions,
+        ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn get_blob(&self, _key: &str) -> Result<BlobBody, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn get_blob_range(
+            &self,
+            _key: &str,
+            _range: Range<u64>,
+        ) -> Result<BlobBody, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
+            Ok(self.contains(key))
+        }
+
+        async fn head_blob(&self, _key: &str) -> Result<Option<BlobMetadata>, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn list_blobs_page(
+            &self,
+            _prefix: &str,
+            _continuation: Option<String>,
+            _limit: usize,
+        ) -> Result<BlobListPage, StorageError> {
+            Err(Self::unsupported())
+        }
+
+        async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
+            self.references
+                .lock()
+                .expect("artifact blob lock")
+                .remove(key);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ProviderFileDeletion {
+        fail: AtomicBool,
+        deleted: Mutex<Vec<String>>,
+    }
+
+    impl ProviderFileDeletion {
+        fn set_fail(&self, fail: bool) {
+            self.fail.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl AiProviderFileDeletionService for ProviderFileDeletion {
+        async fn delete_and_confirm_absent(
+            &self,
+            request: &AiProviderFileDeletionRequest,
+        ) -> Result<(), AiError> {
+            let debug = format!("{request:?}");
+            assert!(!debug.contains(request.provider_reference()));
+            assert!(!request.artifact_id().is_nil());
+            assert!(!request.attachment_id().is_nil());
+            assert_eq!(request.artifact_kind(), "provider_file");
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(AiError::PersistenceFailed);
+            }
+            self.deleted
+                .lock()
+                .expect("provider deletion lock")
+                .push(request.provider_reference().to_owned());
+            Ok(())
         }
     }
 
@@ -3471,6 +3855,55 @@ mod tests {
         )
         .await
         .expect("retention policy should seed");
+    }
+
+    async fn set_provider_file_delete_required(
+        database: &Database<SqliteBackend>,
+        scope: &AiScope,
+        required: bool,
+    ) {
+        let scope_key = crate::ai_scope_key(scope);
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let policies = tx
+                        .query::<AiRetentionPolicyRecord>()
+                        .filter(AiRetentionPolicyRecordWhereInput {
+                            scope_key: Some(StringFilter {
+                                eq: Some(scope_key),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if policies.len() != 1 {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    let policy = &policies[0];
+                    let outcome = tx
+                        .compare_and_swap::<AiRetentionPolicyRecord>(
+                            &policy.id,
+                            policy.row_version,
+                            AiRetentionPolicyRecordWhereInput::default(),
+                            UpdateAiRetentionPolicyRecordInput {
+                                provider_file_delete_required: Some(required),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("provider-file retention setting should update");
     }
 
     async fn mark_session_deleting(
@@ -5407,7 +5840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attachment_artifacts_keep_external_cleanup_closed() {
+    async fn attachment_artifacts_are_cleaned_before_parent_attachments() {
         let database = database().await;
         let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
         seed_policy(&database, &scope).await;
@@ -5435,10 +5868,11 @@ mod tests {
             .into_iter()
             .next()
             .expect("attachment should exist");
+        let artifact_id = Uuid::new_v4();
         AiAttachmentArtifactRecord::insert(
             &database,
             CreateAiAttachmentArtifactRecordInput {
-                id: Uuid::new_v4(),
+                id: artifact_id,
                 attachment_id: attachment.id,
                 artifact_kind: "provider_file".to_owned(),
                 blob_reference: None,
@@ -5448,6 +5882,11 @@ mod tests {
                 sha256: None,
                 provider_reference: Some("provider-file-safe-reference".to_owned()),
                 provider_expires_at: None,
+                cleanup_state: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
                 deleted_at: None,
             },
         )
@@ -5463,11 +5902,25 @@ mod tests {
         let report = service
             .prune_session_content(None)
             .await
-            .expect("unsupported provider artifact should remain closed");
+            .expect("provider artifact should enter exact-reference cleanup");
         assert_eq!(report.deleting_session_attachment_cleanups_requested, 0);
         assert_eq!(report.deleting_session_attachments_deleted, 0);
+        assert_eq!(
+            report.deleting_session_attachment_artifact_cleanups_requested,
+            1
+        );
+        assert_eq!(report.deleting_session_attachment_artifacts_deleted, 0);
         assert_eq!(report.attachment_cleanups_blocked, 1);
         assert_eq!(report.message_contents_purged, 0);
+        let artifact = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+            .await
+            .expect("artifact lookup should succeed")
+            .expect("artifact should remain for exact-reference cleanup");
+        assert_eq!(artifact.cleanup_state.as_deref(), Some("cleanup_required"));
+        assert_eq!(
+            artifact.provider_reference.as_deref(),
+            Some("provider-file-safe-reference")
+        );
         let retained = AiAttachmentRecord::find_by_id(&database, &attachment.id)
             .await
             .expect("attachment lookup should succeed")
@@ -5478,6 +5931,332 @@ mod tests {
             .expect("message lookup should succeed")
             .expect("blocked message should remain");
         assert!(message.protected_preview.is_some());
+
+        let replay = service
+            .prune_session_content(None)
+            .await
+            .expect("pending artifact cleanup should be idempotent");
+        assert_eq!(
+            replay.deleting_session_attachment_artifact_cleanups_requested,
+            0
+        );
+        assert_eq!(replay.attachment_cleanups_blocked, 1);
+
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiAttachmentArtifactRecord>(&artifact_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiAttachmentArtifactRecord>(
+                            &artifact_id,
+                            current.row_version,
+                            AiAttachmentArtifactRecordWhereInput::default(),
+                            UpdateAiAttachmentArtifactRecordInput {
+                                provider_reference: Some(None),
+                                provider_expires_at: Some(None),
+                                cleanup_state: Some(Some("complete".to_owned())),
+                                cleanup_generation: Some(Some(1)),
+                                cleanup_lease_expires_at: Some(None),
+                                cleanup_next_attempt_at: Some(None),
+                                deleted_at: Some(Some(now().unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        Ok(())
+                    } else {
+                        Err(OrmPublicError::new(OrmErrorCode::Conflict))
+                    }
+                })
+            })
+            .await
+            .expect("confirmed provider absence should finalize the artifact");
+
+        let artifact_deleted = service
+            .prune_session_content(None)
+            .await
+            .expect("artifact metadata should delete before parent cleanup starts");
+        assert_eq!(
+            artifact_deleted.deleting_session_attachment_artifacts_deleted,
+            1
+        );
+        assert_eq!(
+            artifact_deleted.deleting_session_attachment_cleanups_requested,
+            1
+        );
+        assert!(
+            AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+                .await
+                .expect("artifact lookup should succeed")
+                .is_none()
+        );
+        let parent = AiAttachmentRecord::find_by_id(&database, &attachment.id)
+            .await
+            .expect("parent lookup should succeed")
+            .expect("parent should await its independent cleanup");
+        assert_eq!(parent.quarantine_state, "deleting");
+        assert_eq!(parent.processing_state, "retention_cleanup_required");
+    }
+
+    #[tokio::test]
+    async fn artifact_worker_retries_ambiguous_provider_delete_and_fences_races() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let _ = seed_message(&database, session_id, "completed", true).await;
+        let attachment = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attachment should load")
+            .into_iter()
+            .next()
+            .expect("attachment should exist");
+        let artifact_id = Uuid::new_v4();
+        let local_reference = "artifact:local:exact";
+        let provider_reference = "provider:file:exact";
+        AiAttachmentArtifactRecord::insert(
+            &database,
+            CreateAiAttachmentArtifactRecordInput {
+                id: artifact_id,
+                attachment_id: attachment.id,
+                artifact_kind: "provider_file".to_owned(),
+                blob_reference: Some(local_reference.to_owned()),
+                protected_content: Some(serde_json::json!({"ciphertext": "protected"})),
+                detected_mime: Some("text/plain".to_owned()),
+                byte_count: 9,
+                sha256: Some("0".repeat(64)),
+                provider_reference: Some(provider_reference.to_owned()),
+                provider_expires_at: Some(now().unix_timestamp() - 1),
+                cleanup_state: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .expect("artifact should seed");
+        mark_session_deleting(&database, session_id, 120).await;
+        let clock = Arc::new(FixedClock::new(now()));
+        let retention = OrmAiSessionRetentionService::new(
+            database.clone(),
+            clock.clone(),
+            AiSessionRetentionLimits::default(),
+        );
+        let requested = retention
+            .prune_session_content(None)
+            .await
+            .expect("artifact cleanup should be requested");
+        assert_eq!(
+            requested.deleting_session_attachment_artifact_cleanups_requested,
+            1
+        );
+
+        let blobs = Arc::new(ArtifactBlobStore::default());
+        blobs.insert(local_reference);
+        let provider = Arc::new(ProviderFileDeletion::default());
+        let cleanup = OrmAiAttachmentService::new(
+            database.clone(),
+            Arc::new(AllowAll),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            blobs.clone(),
+            Arc::new(UnusedScanner),
+            Arc::new(DenyAttachmentAcceptance),
+            clock.clone(),
+        )
+        .with_provider_file_deletion_service(provider.clone());
+
+        set_provider_file_delete_required(&database, &scope, false).await;
+        let policy_blocked = cleanup
+            .cleanup_once()
+            .await
+            .expect("current policy should keep provider deletion closed");
+        assert_eq!(policy_blocked.artifacts_examined, 1);
+        assert_eq!(policy_blocked.artifacts_deferred, 1);
+        assert_eq!(policy_blocked.artifacts_cleaned, 0);
+        assert!(blobs.contains(local_reference));
+        assert!(
+            provider
+                .deleted
+                .lock()
+                .expect("provider deletion lock")
+                .is_empty()
+        );
+
+        set_provider_file_delete_required(&database, &scope, true).await;
+        provider.set_fail(true);
+
+        let ambiguous = cleanup
+            .cleanup_once()
+            .await
+            .expect("ambiguous provider deletion should remain retryable");
+        assert_eq!(ambiguous.artifacts_examined, 1);
+        assert_eq!(ambiguous.artifacts_cleaned, 0);
+        assert_eq!(ambiguous.artifacts_failed, 1);
+        assert!(!blobs.contains(local_reference));
+        let retained = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+            .await
+            .expect("artifact lookup should succeed")
+            .expect("ambiguous artifact should remain");
+        assert_eq!(retained.cleanup_state.as_deref(), Some("cleanup_backoff"));
+        assert_eq!(
+            retained.blob_reference.as_deref(),
+            Some(local_reference),
+            "metadata remains until every external absence proof succeeds"
+        );
+        assert_eq!(
+            retained.provider_reference.as_deref(),
+            Some(provider_reference)
+        );
+        assert!(retained.protected_content.is_some());
+
+        provider.set_fail(false);
+        clock.advance_seconds(121);
+        let (left, right) = tokio::join!(cleanup.cleanup_once(), cleanup.cleanup_once());
+        let left = left.expect("left artifact worker should converge");
+        let right = right.expect("right artifact worker should converge");
+        assert_eq!(left.artifacts_cleaned + right.artifacts_cleaned, 1);
+        assert_eq!(left.artifacts_failed + right.artifacts_failed, 0);
+        assert!(left.artifacts_deferred + right.artifacts_deferred <= 1);
+        assert_eq!(
+            provider
+                .deleted
+                .lock()
+                .expect("provider deletion lock")
+                .as_slice(),
+            &[provider_reference.to_owned()]
+        );
+        let cleaned = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+            .await
+            .expect("artifact lookup should succeed")
+            .expect("artifact tombstone should remain until retention");
+        assert_eq!(cleaned.cleanup_state.as_deref(), Some("complete"));
+        assert!(cleaned.blob_reference.is_none());
+        assert!(cleaned.provider_reference.is_none());
+        assert!(cleaned.provider_expires_at.is_none());
+        assert!(cleaned.protected_content.is_none());
+        assert!(cleaned.deleted_at.is_some());
+
+        let finalized = retention
+            .prune_session_content(None)
+            .await
+            .expect("retention should delete artifact metadata before parent cleanup");
+        assert_eq!(finalized.deleting_session_attachment_artifacts_deleted, 1);
+        assert_eq!(finalized.deleting_session_attachment_cleanups_requested, 1);
+        assert!(
+            AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+                .await
+                .expect("artifact lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn overbound_artifact_set_makes_no_partial_cleanup_claims() {
+        let database = database().await;
+        let scope = AiScope::new("tenant", "retention").with_tenant_id("retention");
+        seed_policy(&database, &scope).await;
+        let session_id = seed_session(&database, &scope).await;
+        let _ = seed_message(&database, session_id, "completed", true).await;
+        let attachment = database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAttachmentRecord>()
+                        .filter(AiAttachmentRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attachment should load")
+            .into_iter()
+            .next()
+            .expect("attachment should exist");
+        let artifact_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        for (index, artifact_id) in artifact_ids.into_iter().enumerate() {
+            AiAttachmentArtifactRecord::insert(
+                &database,
+                CreateAiAttachmentArtifactRecordInput {
+                    id: artifact_id,
+                    attachment_id: attachment.id,
+                    artifact_kind: format!("derived_{index}"),
+                    blob_reference: Some(format!("artifact:exact:{index}")),
+                    protected_content: Some(serde_json::json!({"protected": index})),
+                    detected_mime: Some("text/plain".to_owned()),
+                    byte_count: 1,
+                    sha256: Some("0".repeat(64)),
+                    provider_reference: None,
+                    provider_expires_at: None,
+                    cleanup_state: None,
+                    cleanup_generation: None,
+                    cleanup_lease_expires_at: None,
+                    cleanup_retry_count: None,
+                    cleanup_next_attempt_at: None,
+                    deleted_at: None,
+                },
+            )
+            .await
+            .expect("artifact should seed");
+        }
+        mark_session_deleting(&database, session_id, 120).await;
+        let limits = AiSessionRetentionLimits::default()
+            .with_attachment_artifact_limit(1)
+            .expect("artifact lookahead bound should validate");
+        let service = OrmAiSessionRetentionService::new(
+            database.clone(),
+            Arc::new(FixedClock::new(now())),
+            limits,
+        );
+        let report = service
+            .prune_session_content(None)
+            .await
+            .expect("overbound artifact proof should fail closed");
+        assert_eq!(report.attachment_cleanups_blocked, 1);
+        assert_eq!(
+            report.deleting_session_attachment_artifact_cleanups_requested,
+            0
+        );
+        for artifact_id in artifact_ids {
+            let artifact = AiAttachmentArtifactRecord::find_by_id(&database, &artifact_id)
+                .await
+                .expect("artifact lookup should succeed")
+                .expect("overbound artifact should remain");
+            assert!(artifact.cleanup_state.is_none());
+            assert!(artifact.blob_reference.is_some());
+            assert!(artifact.protected_content.is_some());
+        }
     }
 
     #[tokio::test]
@@ -5616,6 +6395,18 @@ mod tests {
         assert_eq!(attachment_limits.maximum_attachments_per_session(), 2);
         assert!(matches!(
             attachment_limits.with_attachment_limit(0),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+        let artifact_limits = AiSessionRetentionLimits::new(1, 10, 10, 10)
+            .expect("base retention limits should validate")
+            .with_attachment_artifact_limit(3)
+            .expect("independent attachment-artifact limit should validate");
+        assert_eq!(
+            artifact_limits.maximum_attachment_artifacts_per_session(),
+            3
+        );
+        assert!(matches!(
+            artifact_limits.with_attachment_artifact_limit(0),
             Err(AiError::InvalidConfiguration(_))
         ));
         let proposal_limits = AiSessionRetentionLimits::new(1, 10, 10, 10)

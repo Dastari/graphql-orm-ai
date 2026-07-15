@@ -204,6 +204,7 @@ pub mod prelude {
         AiInboxPruningService, AiInboxService, AiLiveDeltaCoalescerLimits, AiPricingCatalogService,
         AiPricingQuoteService, AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor,
         AiProvider, AiProviderAttachmentRequest, AiProviderAttachmentResolver,
+        AiProviderFileDeletionRequest, AiProviderFileDeletionService,
         AiRemoteAuthenticatedGraphqlAdapter, AiRemoteGraphqlAuthority,
         AiRemoteGraphqlAuthorityIssuer, AiRemoteGraphqlDelegationRequest,
         AiRemoteGraphqlExecutionLimits, AiRemoteGraphqlTransport, AiResolvedProviderAttachment,

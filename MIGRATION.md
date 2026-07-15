@@ -4,6 +4,57 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: attachment-artifact retention (crate 0.42.0 to 0.43.0; schema 0.40.0 to 0.41.0)
+
+Apply AI schema module `0.41.0` while session-retention, attachment-cleanup,
+provider-file, backup/restore, and runtime workers are closed. Do not run
+0.43.0 code against a module still registered as 0.40.0. The generated
+migration keeps the existing 39 private entities and adds five nullable
+cleanup columns to `graphql_orm_ai_attachment_artifacts`: state, generation,
+lease expiry, retry count, and next-attempt time. It also adds stable
+created-time/ID keyset metadata and redacts provider references from generated
+backup descriptors. Existing artifact rows retain null cleanup state and no row
+data is rewritten. No consumer table, protected value, local object key, or
+provider reference needs an application-authored migration or copy.
+
+After the deleting-session cutoff, retention now loads the complete artifact
+set under `maximum_attachment_artifacts_per_session` with one-row lookahead.
+It first CAS-moves each valid artifact into private cleanup state. The separate
+attachment worker re-proves the exact parent attachment, deleting session,
+current scope policy, and cutoff before rotating a generation and lease. Local
+blob deletion must be followed by exact absence confirmation. A provider
+reference additionally requires `provider_file_delete_required = true` and an
+installed `AiProviderFileDeletionService`; its `Ok(())` contract must mean the
+exact provider object is authoritatively absent. Provider expiry, an
+unconfigured boundary, or an ambiguous response is not deletion proof.
+
+Only after every external object is confirmed absent does one CAS clear the
+artifact blob/provider references and protected derivative, write a tombstone,
+and append redacted audit. A later retention pass physically deletes that
+artifact metadata, then requests cleanup of the parent attachment. Parent
+metadata and linked message content cannot be removed earlier. Retry backoff,
+expired leases, concurrent workers, and over-bound sets retain the unsafe
+dependency.
+
+Public Rust additions are `AiProviderFileDeletionRequest`,
+`AiProviderFileDeletionService`,
+`OrmAiAttachmentService::with_provider_file_deletion_service`,
+`AiSessionRetentionLimits::with_attachment_artifact_limit`, and its getter.
+`AiAttachmentCleanupReport` adds four artifact counters;
+`AiSessionRetentionReport` adds artifact cleanup-request and metadata-delete
+counters. Downstream exhaustive struct literals must initialize the new fields
+or use `..Default::default()`. The cleanup report's original four counters
+continue to describe parent attachment rows only.
+
+This is a pre-1.0 public Rust API, private persistent-shape,
+backup/schema-fingerprint, keyset-metadata, and retention-behavior change. It
+changes no public GraphQL SDL, Cargo feature/default, table/entity count,
+append-only policy, or consumer schema. Restore fact collectors must count an
+invalid artifact cleanup state, broken parent link, or unconfirmed object
+reference in `invalid_attachment_count`; nonzero restore facts keep readiness
+closed. Run complete repeated retention and cleanup cycles after migration;
+one report is not an erasure certificate.
+
 ## Unreleased: orphaned protected-checkpoint retention (crate 0.41.0 to 0.42.0; schema 0.39.0 to 0.40.0)
 
 Apply AI schema module `0.40.0` while session, run, coordinator, retention, and

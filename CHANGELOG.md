@@ -5,12 +5,36 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.42.0` and the
-AI schema module to `0.40.0`. It keeps 39 private entities and extends the
-existing raw-payload retention setting to protected normalized coordinator
-checkpoints only after their recovery authority and dependencies are closed.
+This development line advances the pre-1.0 crate version to `0.43.0` and the
+AI schema module to `0.41.0`. It keeps 39 private entities and adds a fenced,
+dependency-ordered deletion lifecycle for attachment artifacts and their exact
+local or provider-persistent object references.
 
 ### Added
+
+- Deleting-session retention now proves the complete attachment-artifact set
+  under an independent lookahead bound, requests artifact cleanup before its
+  parent attachment, and physically removes only fully tombstoned artifact
+  metadata. Artifact blobs, protected derivatives, and provider references
+  stay intact while cleanup is pending or ambiguous; parent attachment cleanup
+  and linked message scrubbing cannot start early.
+- `AiProviderFileDeletionService` receives only an exact provider reference
+  selected by a current-policy, cutoff-checked, generation-fenced artifact
+  claim. `Ok(())` must mean authoritative absence; expiry, an unconfigured
+  service, or an ambiguous provider result enters capped retry backoff without
+  clearing metadata. `AiProviderFileDeletionRequest` redacts that reference
+  from `Debug`.
+- `AiAttachmentCleanupReport` now distinguishes artifact candidates, cleaned
+  tombstones, races, and failed absence proofs. `AiSessionRetentionLimits` adds
+  an independent attachment-artifact bound, while `AiSessionRetentionReport`
+  counts artifact cleanup requests and metadata deletion. Cleanup processes
+  artifacts before parent attachments and appends only redacted audit facts.
+
+### Changed
+
+- `AiAttachmentArtifactRecord` adds nullable cleanup state, generation, lease,
+  retry, and backoff fields plus stable created-time/ID keyset ordering. The
+  provider reference is now redacted from generated backup descriptors.
 
 - The generated-ORM retention worker now physically deletes bounded,
   age-expired `provider_turn_persisted`, `tool_batch_persisted`, and

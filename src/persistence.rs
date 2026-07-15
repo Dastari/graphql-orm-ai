@@ -906,7 +906,8 @@ pub(crate) struct AiAttachmentRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_attachment_artifacts",
     plural = "GraphqlOrmAiAttachmentArtifacts",
-    default_sort = "created_at ASC"
+    default_sort = "created_at ASC, id ASC",
+    keyset = "created_at asc, id asc"
 )]
 pub(crate) struct AiAttachmentArtifactRecord {
     #[primary_key]
@@ -923,8 +924,20 @@ pub(crate) struct AiAttachmentArtifactRecord {
     pub detected_mime: Option<String>,
     pub byte_count: i64,
     pub sha256: Option<String>,
+    #[backup(redact)]
     pub provider_reference: Option<String>,
     pub provider_expires_at: Option<i64>,
+    /// Private retention state; absent means the artifact remains active.
+    #[filterable(type = "string")]
+    pub cleanup_state: Option<String>,
+    /// Monotonic maintenance claim generation.
+    pub cleanup_generation: Option<i64>,
+    /// Deadline after which another artifact worker may reclaim the row.
+    pub cleanup_lease_expires_at: Option<i64>,
+    /// Failed exact-reference cleanup attempts used for bounded backoff.
+    pub cleanup_retry_count: Option<i64>,
+    /// Earliest retry time after ambiguous local or provider deletion.
+    pub cleanup_next_attempt_at: Option<i64>,
     #[sortable]
     pub created_at: i64,
     pub deleted_at: Option<i64>,
@@ -1833,7 +1846,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.40.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.41.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

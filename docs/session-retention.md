@@ -19,9 +19,9 @@ for narrowly defined classes of protected chat data:
 - after proposal payloads are exhausted, protected arguments/results and
   approval resource bindings/action previews for a completely bounded,
   terminal, exactly linked run/tool/approval graph;
-- after tool and approval payloads are exhausted, artifact-free attachments
-  coordinated through separately verified exact-reference blob cleanup,
-  followed by their ordinary metadata rows;
+- after tool and approval payloads are exhausted, attachment artifacts and
+  then their parent attachments coordinated through separately verified exact-
+  reference local/provider cleanup, followed by their ordinary metadata rows;
 - after attachments are exhausted, the same safely detachable terminal message
   content even when ordinary message retention is disabled; and
 - after all those protected sources are exhausted, immutable coordinator
@@ -43,8 +43,10 @@ proofs and immutable checkpoint pages need independent bounds. Chain
 independent bounds. Chain `with_tool_payload_limits` when whole-session tool
 call and approval proofs need independent bounds. Chain
 `with_attachment_limit` when a whole-session attachment proof needs its own
-bound. Schedule `OrmAiAttachmentService::cleanup_once` independently; session
-retention never performs storage I/O. Start a complete scan cycle by calling
+bound, and `with_attachment_artifact_limit` for the independent complete
+artifact-set proof. Schedule `OrmAiAttachmentService::cleanup_once`
+independently; session retention never performs storage or provider I/O. Start
+a complete scan cycle by calling
 `prune_session_content(None)`. If the report contains
 `next_session_cursor`, pass that opaque value unchanged to the next call.
 Continue until the cursor is absent, then begin a later scheduled cycle from
@@ -57,8 +59,8 @@ alert on repeated `sessions_not_ready`, `sessions_conflicted`,
 `messages_blocked`, `attachment_cleanups_blocked`, or
 `proposal_payload_purges_blocked`, `tool_payload_purges_blocked`,
 `raw_payload_purges_blocked`, `raw_checkpoint_purges_blocked`, or
-`run_checkpoint_purges_blocked`. Also alert on attachment cleanup failures and
-never treat a partial scan cycle as complete.
+`run_checkpoint_purges_blocked`. Also alert on parent or artifact cleanup
+failures/deferred claims and never treat a partial scan cycle as complete.
 
 ## Policy and deletion rules
 
@@ -170,11 +172,33 @@ checkpoint, and consequential-tool paths treat a tombstoned protected value as
 unusable and fail closed.
 
 Only after tool and approval payloads are exhausted does retention load the
-session's entire attachment set under a configured lookahead bound. Any
-over-bound set blocks the session. An attachment artifact also blocks its
-parent immediately because artifact blobs, protected derivatives, and
-provider-file references need an independent deletion lifecycle. For an
-artifact-free row, retention either:
+session's entire attachment set and its complete artifact set under independent
+lookahead bounds. Any over-bound set blocks the whole phase without a partial
+claim. Each artifact is validated against its exact parent without opening
+protected content. Retention either deletes metadata already carrying a fully
+cleaned generation-fenced tombstone, leaves an existing claim/backoff intact,
+or CAS-moves the artifact into private `cleanup_required` state without
+clearing its blob reference, provider reference, expiry, or protected
+derivative. While any artifact remains, its parent attachment is not moved into
+cleanup.
+
+The independently scheduled attachment worker processes artifact candidates
+before parent candidates. Its claim transaction reloads the exact artifact and
+parent, deleting session, current scope policy, and cutoff, then rotates a
+monotonic generation and expiring lease. It deletes only the stored exact local
+blob reference and confirms absence. A provider reference is eligible only
+when the current policy has `provider_file_delete_required = true` and the host
+installed `AiProviderFileDeletionService`. That boundary receives a redacted-
+debug exact reference request; `Ok(())` must mean authoritative absence. An
+expiry timestamp, missing service, rate limit, successful request without
+absence semantics, or any other ambiguity is not proof and retains all
+metadata/protected content under capped retry backoff.
+
+After every external object is proven absent, one fenced CAS clears both
+references, provider expiry, and protected derivative, writes `deleted_at`,
+and appends redacted audit. A later retention pass physically deletes that
+artifact metadata. Only once no artifact row remains does the parent attachment
+follow the existing lifecycle:
 
 - deletes ordinary metadata already proven fully cleaned and tombstoned by a
   positive cleanup generation;
@@ -182,14 +206,13 @@ artifact-free row, retention either:
 - CAS-moves the row to private `deleting` / `retention_cleanup_required` state
   without clearing either object reference.
 
-The attachment cleanup worker recognizes that private state but claims it only
-after reloading the deleting session, exact scope policy, and current cutoff in
-the same transaction. It deletes only the row's opaque final and quarantine
-references and confirms their absence. Failure or ambiguous absence retains
-the references under bounded backoff. Successful cleanup clears the references
-and records a deleted tombstone; only a later retention transaction deletes
-that metadata. This crash ordering can leave an object-free tombstone, never a
-metadata deletion that merely assumes external success.
+The attachment worker claims that parent state only after reloading the same
+deleting-session proof. It deletes only the row's opaque final and quarantine
+references and confirms their absence. Failure or ambiguity retains the
+references under bounded backoff. Successful cleanup clears the references and
+records a deleted tombstone; only a later retention transaction deletes that
+metadata. Both levels can therefore leave an object-free tombstone after a
+crash, never a metadata deletion that merely assumes external success.
 
 Message content is scrubbed only when all of these are true:
 
@@ -245,9 +268,10 @@ retention never requires loading the complete transcript into the DOM.
 
 ## Deliberate limits
 
-This workflow does not delete session or message metadata, attachment artifacts
-or provider-persistent files, runs, run attempts/outcomes, tool-call or
-approval metadata, proposal metadata, current or ineligible protected
+This workflow does not delete session or message metadata, active/ineligible
+attachment artifacts or provider-persistent files lacking exact absence proof,
+runs, run attempts/outcomes, tool-call or approval metadata, proposal metadata,
+current or ineligible protected
 normalized coordinator state, usage, egress decisions, audit facts,
 pricing/skill history, or restore evidence. It therefore
 advances but does not complete the `deleting` session lifecycle. Proposal
@@ -258,9 +282,10 @@ accepted proposals and active or uncertain tool authority remain deliberately
 closed. No raw provider HTTP envelope is persisted. Eligible orphaned protected
 coordinator state follows the independent age-based proof above; current or
 ambiguous checkpoint state remains.
-Basic attachment objects and metadata are eligible only through the two-worker
-proof above; artifacts remain deliberately closed. Unsafe message or run
-dependencies remain in place and are counted as blocked. The remaining
+Attachment artifacts and basic attachment objects/metadata are eligible only
+through the dependency-ordered two-worker proof above. Unsafe or ambiguous
+artifact, message, or run dependencies remain in place and are counted as
+blocked. The remaining
 resources require separate workers with their own dependency ordering,
 external delete confirmation, fencing, restore reconciliation, and audit
 contracts.
@@ -270,6 +295,7 @@ context-compaction producer remains unimplemented and must stay disabled until
 its ordinary-retention invalidation and exact source-coverage contract lands.
 
 Restore collectors must distinguish validated retention gaps from corruption
-and must validate message, proposal, tool, and approval tombstone invariants,
-including exact terminal call/step/approval linkage. A nonzero
+and must validate message, proposal, tool, approval, attachment, and artifact
+tombstone invariants, including exact terminal call/step/approval linkage and
+every artifact parent/cleanup/reference state. A nonzero
 `invalid_session_retention_count` is fatal and keeps runtime readiness closed.

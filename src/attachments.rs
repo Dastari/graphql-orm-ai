@@ -413,31 +413,137 @@ pub trait AiAttachmentUploadService: Send + Sync {
 /// Counts contain no owner, filename, storage reference, or content data.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AiAttachmentCleanupReport {
-    /// Candidate rows examined after bounded state queries.
+    /// Parent attachment rows examined after bounded state queries.
     pub examined: u32,
-    /// Rows whose referenced objects were proven absent and durably finalized.
+    /// Parent rows whose referenced objects were proven absent and durably
+    /// finalized.
     pub cleaned: u32,
-    /// Rows another worker claimed or changed before this worker could fence.
+    /// Parent rows another worker claimed or changed before this worker could
+    /// fence.
     pub deferred: u32,
-    /// Rows retained for retry because storage deletion could not be proven.
+    /// Parent rows retained for retry because storage deletion could not be
+    /// proven.
     pub failed: u32,
+    /// Artifact rows examined before their parent attachment rows.
+    pub artifacts_examined: u32,
+    /// Artifact rows whose local and provider objects were proven absent and
+    /// whose protected derivatives were durably tombstoned.
+    pub artifacts_cleaned: u32,
+    /// Artifact rows another worker claimed or changed before fencing.
+    pub artifacts_deferred: u32,
+    /// Artifact rows retained because exact local or provider absence could
+    /// not be proven.
+    pub artifacts_failed: u32,
 }
 
-/// Host-only maintenance boundary for expired or interrupted attachments.
+/// Exact provider-persistent file selected by durable artifact retention.
+///
+/// This host-only request is not general provider authority. It is constructed
+/// only after a deleting session, its current scope retention policy, the
+/// deletion cutoff, the parent attachment, and a fenced artifact cleanup claim
+/// have been re-proved. The provider reference is deliberately redacted from
+/// `Debug`, but remains sensitive deployment metadata and must not be logged,
+/// persisted elsewhere, or exposed to a model or client.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiProviderFileDeletionRequest {
+    artifact_id: Uuid,
+    attachment_id: Uuid,
+    artifact_kind: String,
+    provider_reference: String,
+}
+
+impl AiProviderFileDeletionRequest {
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn new(
+        artifact_id: Uuid,
+        attachment_id: Uuid,
+        artifact_kind: String,
+        provider_reference: String,
+    ) -> Self {
+        Self {
+            artifact_id,
+            attachment_id,
+            artifact_kind,
+            provider_reference,
+        }
+    }
+
+    /// AI-owned artifact identifier.
+    pub const fn artifact_id(&self) -> Uuid {
+        self.artifact_id
+    }
+
+    /// Parent attachment identifier.
+    pub const fn attachment_id(&self) -> Uuid {
+        self.attachment_id
+    }
+
+    /// Validated artifact kind used to route the trusted provider adapter.
+    pub fn artifact_kind(&self) -> &str {
+        &self.artifact_kind
+    }
+
+    /// Exact opaque provider reference selected by the fenced cleanup claim.
+    pub fn provider_reference(&self) -> &str {
+        &self.provider_reference
+    }
+}
+
+impl fmt::Debug for AiProviderFileDeletionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderFileDeletionRequest")
+            .field("artifact_id", &self.artifact_id)
+            .field("attachment_id", &self.attachment_id)
+            .field("artifact_kind", &self.artifact_kind)
+            .field("provider_reference", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Trusted exact-reference deletion boundary for provider-persistent files.
+///
+/// Implementations must treat `Ok(())` as a strong assertion that the exact
+/// referenced provider object is absent after the call, including a provider
+/// "not found" response. A successful delete request without an authoritative
+/// absence guarantee is not sufficient. Implementations must never list or
+/// delete by prefix, infer absence from expiry, or expose the reference beyond
+/// the configured provider adapter.
+#[async_trait]
+pub trait AiProviderFileDeletionService: Send + Sync {
+    /// Deletes the exact provider object and confirms its absence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe error whenever deletion or authoritative absence is
+    /// unavailable, ambiguous, rate-limited, or rejected. The artifact worker
+    /// then retains every reference and protected derivative for bounded retry.
+    async fn delete_and_confirm_absent(
+        &self,
+        request: &AiProviderFileDeletionRequest,
+    ) -> Result<(), AiError>;
+}
+
+/// Host-only maintenance boundary for expired or interrupted attachments and
+/// dependency-ordered deleting-session artifacts.
 ///
 /// This service is intentionally not exposed through GraphQL. Scheduling it
 /// grants authority only to delete objects already selected by durable AI
 /// lifecycle state; it grants no ability to read attachment bytes or inspect
-/// user content. A linked attachment selected by deleting-session retention is
-/// accepted only after this worker re-proves the exact current scope policy
-/// and deletion cutoff in its cleanup claim transaction.
+/// user content. Artifact claims run before parent claims. A linked attachment
+/// or artifact selected by deleting-session retention is accepted only after
+/// this worker re-proves the exact parent, current scope policy, and deletion
+/// cutoff in its cleanup claim transaction. Provider objects remain closed
+/// unless a trusted [`AiProviderFileDeletionService`] is installed.
 #[async_trait]
 pub trait AiAttachmentCleanupService: Send + Sync {
     /// Runs one bounded, lease-fenced cleanup pass.
     ///
-    /// Storage ambiguity is reported in [`AiAttachmentCleanupReport::failed`]
-    /// and retained for a later retry. A database or query failure aborts the
-    /// pass with a safe error.
+    /// Parent storage ambiguity is reported in
+    /// [`AiAttachmentCleanupReport::failed`]; artifact local/provider ambiguity
+    /// is reported in [`AiAttachmentCleanupReport::artifacts_failed`]. Both are
+    /// retained for a later retry. A database or query failure aborts the pass
+    /// with a safe error.
     ///
     /// # Errors
     ///

@@ -104,8 +104,11 @@ blocks everything later. Eligible terminal messages whose attachment rows have
 been independently cleaned and removed retain metadata but replace
 preview/blocks with a structural tombstone. Event readers detect resulting
 gaps and require a bounded client reset. Basic attachment objects require a
-separate verified cleanup worker; attachment artifacts/provider files and all
-immutable audit/usage/fence evidence remain separate lifecycle obligations.
+separate verified cleanup worker. That worker now fences artifact cleanup ahead
+of parent cleanup, confirms exact local absence, and requires a host-supplied
+authoritative deletion/absence contract for provider references; ambiguous
+artifacts and all immutable audit/usage/fence evidence remain lifecycle
+obligations.
 
 Schema migration, backup, restore, and runtime readiness use the dependency-
 owned `AiSchemaModule`. A restored database is not runnable until leases,

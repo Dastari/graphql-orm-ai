@@ -9,8 +9,9 @@ use crate::AiError;
 /// This report proves only the exact ORM rows removed or scrubbed by one
 /// completed pass. Attachment counts prove only cleanup coordination or exact
 /// metadata deletion after a separate worker confirmed object absence. They
-/// do not prove that provider-persistent files, artifact rows, tool content, an
-/// unresolved accepted proposal, or an entire deleting session were purged.
+/// do not prove that every provider-persistent file, artifact row, tool
+/// dependency, unresolved accepted proposal, or an entire deleting session was
+/// purged.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AiSessionRetentionReport {
     /// Session rows considered in this scan page.
@@ -55,6 +56,12 @@ pub struct AiSessionRetentionReport {
     /// Fully cleaned attachment metadata rows physically deleted before their
     /// linked message content was scrubbed.
     pub deleting_session_attachments_deleted: u32,
+    /// Attachment-artifact rows moved into exact-reference cleanup before
+    /// their parent attachment can enter cleanup.
+    pub deleting_session_attachment_artifact_cleanups_requested: u32,
+    /// Fully tombstoned attachment-artifact metadata rows physically deleted
+    /// before their parent attachment was cleaned.
+    pub deleting_session_attachment_artifacts_deleted: u32,
     /// Sessions skipped because their GraphQL-managed retention policy was
     /// absent or invalid.
     pub sessions_not_ready: u32,
@@ -63,8 +70,8 @@ pub struct AiSessionRetentionReport {
     /// Eligible messages retained because their run was nonterminal or a
     /// linked attachment still owned external/protected content.
     pub messages_blocked: u32,
-    /// Deleting sessions still waiting for bounded attachment proof, external
-    /// object deletion, or unsupported artifact/provider-file cleanup.
+    /// Deleting sessions still waiting for bounded attachment/artifact proof,
+    /// exact external absence, or a configured provider-file cleanup boundary.
     pub attachment_cleanups_blocked: u32,
     /// Deleting sessions whose proposal set was over-bound, nonterminal, or
     /// still accepted without an authoritative applied outcome.

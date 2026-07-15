@@ -45,14 +45,15 @@ waits without polling, resuming, or executing them.
   covered content, tombstones only terminal
   proposal/item payloads under whole-session bounds, tombstone only exactly
   linked terminal tool/approval payloads after a complete bounded authority
-  proof, coordinate artifact-free attachment objects through independently
-  verified exact-reference cleanup, delete only confirmed attachment
-  tombstones, scrub eligible terminal message content, clear validated terminal
+  proof, coordinate attachment artifacts before their parents through
+  independently verified exact-reference local/provider cleanup, delete only
+  confirmed artifact and attachment tombstones, scrub eligible terminal
+  message content, clear validated terminal
   run-checkpoint pointers, and finally purge bounded immutable checkpoint pages
   under the exact current GraphQL-managed scope policy. Newer/live tool
   authority and all non-content metadata remain; unresolved accepted proposals,
-  attachment artifacts, nonterminal work, and other append-only security facts
-  stay closed.
+  ambiguous external deletion, nonterminal work, and other append-only security
+  facts stay closed.
 - Local or remote authenticated GraphQL execution through deployment-owned
   logical targets. A model never selects an endpoint, audience, credential,
   schema, operation document, projection, or disclosure contract.
@@ -305,8 +306,9 @@ Attachments use opaque AI-owned references. Ticketed streaming upload,
 ownership, byte/hash checks, quarantine, scanning, acceptance, promotion,
 release, protected events, and message linkage are implemented. Provider
 file/image reopening and OpenAI inline input are implemented; derivative
-artifacts, quotas, retention purge, and provider-persistent file/search
-lifecycle remain gated.
+artifact cleanup/retention is implemented for deleting sessions through a
+host-supplied exact provider-absence seam. Artifact production, quotas, and
+provider-persistent file upload/search remain gated.
 
 ## Current maturity
 
@@ -338,7 +340,7 @@ tool-batch adoption, authoritative built-in-tool
 pricing/unit catalogs, privileged uncertain-call
 recovery, completion of deleting-session/provider-raw/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,
-attachment quotas/derivatives/retention purge, production mutable secret
+attachment quotas/derivative production, production mutable secret
 stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,
 generated resolver disclosure metadata, and production OS/container local-

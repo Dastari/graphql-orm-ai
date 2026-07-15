@@ -90,13 +90,16 @@ camelCase to PascalCase.
    events, then protected context-summary checkpoints, tombstones terminal
    proposal/item protected content under whole-session bounds, then tombstones
    terminal tool/approval protected payloads only after proving the complete
-   bounded run/call/step/approval graph. It next coordinates artifact-free
-   attachment objects through the separately scheduled
-   `OrmAiAttachmentService::cleanup_once`, deletes only confirmed attachment
-   tombstones, scrubs eligible terminal message content, clears validated
+   bounded run/call/step/approval graph. It next coordinates attachment
+   artifacts and then their parent objects through the separately scheduled
+   `OrmAiAttachmentService::cleanup_once`. Install a reviewed
+   `AiProviderFileDeletionService` if artifacts may carry provider references;
+   success must mean authoritative exact-reference absence. The worker deletes
+   only confirmed artifact/attachment tombstones, scrubs eligible terminal
+   message content, clears validated
    terminal-run checkpoint pointers, and purges bounded immutable coordinator
    checkpoints. It does not erase unresolved accepted proposals, active or
-   uncertain tool authority, attachment artifacts/provider files, other
+   uncertain tool authority, ambiguous artifact/provider files, other
    append-only facts, runs, or the session shell; see the
    [retention guide](session-retention.md).
 13. Install `OrmAiUsageService` as `Arc<dyn AiUsageService>` with a host
@@ -296,9 +299,9 @@ ambiguous replay remain closed. See the
 
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
-upload/search/deletion, attachment quotas/derivatives, authoritative
+upload/search, attachment quotas/derivative production, authoritative
 provider-built-in unit pricing, completion of deleting-session and external-
-artifact retention,
+content retention,
 provider-turn and partial-batch restart adoption and stateless/parallel
 supervised continuation remain
 under implementation. Protected provisional live output is opt-in and documented in
