@@ -363,6 +363,8 @@ the opt-in sink, provisional-event contract, client reconciliation rules, and
 failure model.
 See [protected context compaction](docs/context-compaction.md) for exact source,
 provider, budget, persistence, retention, and restore binding.
+See [operational telemetry](docs/operational-telemetry.md) for the content-free
+typed sink, OpenTelemetry mapping, cardinality boundary, and failure model.
 See [attachment intake](docs/attachments.md) for the streaming endpoint,
 scanner, policy, promotion, and GraphQL contracts.
 

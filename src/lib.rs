@@ -103,6 +103,7 @@ mod session_retention;
 mod sessions;
 mod skills;
 mod subscriptions;
+mod telemetry;
 mod tools;
 mod ui_intents;
 mod usage;
@@ -192,6 +193,7 @@ pub use session_retention::*;
 pub use sessions::*;
 pub use skills::*;
 pub use subscriptions::*;
+pub use telemetry::*;
 pub use tools::*;
 pub use ui_intents::*;
 pub use usage::*;
@@ -205,7 +207,8 @@ pub mod prelude {
         AiAttachmentScanner, AiAttachmentService, AiAttachmentUploadService, AiBudgetReservation,
         AiBudgetService, AiContentProtectionPolicy, AiDataSourceRef, AiDisclosureSchema,
         AiEgressDecision, AiEgressDecisionAudit, AiEgressManifest, AiEgressPolicy, AiError,
-        AiInboxPruningService, AiInboxService, AiLiveDeltaCoalescerLimits, AiPricingCatalogService,
+        AiInboxPruningService, AiInboxService, AiLiveDeltaCoalescerLimits, AiOperationalTelemetry,
+        AiOperationalTelemetryEvent, AiOperationalTelemetrySink, AiPricingCatalogService,
         AiPricingQuoteService, AiProposalAccessPolicy, AiProposalCatalog, AiProposalTypeDescriptor,
         AiProvider, AiProviderAttachmentRequest, AiProviderAttachmentResolver,
         AiProviderFileDeletionRequest, AiProviderFileDeletionService,

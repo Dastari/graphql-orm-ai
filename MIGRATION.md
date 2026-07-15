@@ -4,6 +4,38 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: content-free operational telemetry (crate 0.45.0 to 0.46.0; schema remains 0.43.0)
+
+No database migration, private entity change, GraphQL SDL change, persistent
+semantic change, backup change, or restore-fact format change is required. The
+AI schema module remains `0.43.0` with 39 private entities.
+
+Hosts may install an exporter-neutral `AiOperationalTelemetrySink` behind the
+cloneable `AiOperationalTelemetry` emitter. Emitters pass an owned typed event
+to a synchronous, infallible method; sinks should enqueue and return promptly,
+may drop events under bounded backpressure, and must not make telemetry
+availability affect provider, tool, recovery, retention, or restore outcomes.
+There is intentionally no built-in OpenTelemetry dependency or network
+exporter.
+
+Use one fresh `AiTelemetryOperationId` to correlate a start/finish pair. It is
+random telemetry-only state, not derived from a session, run, attempt,
+principal, tool, or provider reference. Do not use it as a metric attribute.
+Provider observations expose `gen_ai.operation.name = chat`, authoritative
+token counts after success, and well-known native provider values only. Model
+and profile names remain excluded because their registry/cardinality and
+classification are deployment-owned.
+
+The typed vocabulary cannot carry prompts, model output, tool arguments or
+results, GraphQL documents, principal/durable resource IDs, provider response
+IDs, endpoint URLs, secret references, arbitrary errors, restore fingerprints,
+restore issue/resource text, or retention cursors. `AiRetentionTelemetry`,
+`AiRestorePlanTelemetry`, and `AiRestoreReadinessTelemetry` project existing
+reports into content-free aggregates; the projections are operational signals,
+not audit, erasure, recovery, or runtime-readiness proofs. Existing integrations
+need no code change unless they choose to install a sink. This is an additive
+public Rust API change with no data migration.
+
 ## Unreleased: deleting-session lifecycle closure (crate 0.44.0 to 0.45.0; schema 0.42.0 to 0.43.0)
 
 Apply AI schema module `0.43.0` while session, inbox, retention, attachment,

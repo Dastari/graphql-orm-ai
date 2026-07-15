@@ -5,12 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.45.0` and the
-AI schema module to `0.43.0`. It keeps 39 private entities and adds protected,
-bounded context compaction plus dependency-proved deleting-session lifecycle
-closure.
+This development line advances the pre-1.0 crate version to `0.46.0` while the
+AI schema module remains `0.43.0`. It keeps 39 private entities and adds a
+content-free, exporter-neutral operational telemetry contract.
 
 ### Added
+
+- `AiOperationalTelemetrySink`, `AiOperationalTelemetry`, and typed provider,
+  durable run, application/internal tool, expired-run recovery, retention, and
+  restore observations. The public vocabulary contains only reviewed enums,
+  counts, durations, booleans, provider family, and a fresh telemetry-only
+  operation ID; it cannot carry prompts, output, tool arguments/results,
+  GraphQL documents, principal/durable resource IDs, model/profile names,
+  provider response IDs, endpoints, credentials, or arbitrary error text.
+- Provider observations expose the stable OpenTelemetry `chat` operation and
+  only well-known native provider values. Profiled compatible endpoints,
+  Ollama, and local harnesses require an independently reviewed host mapping.
+  Retention and restore projections deliberately discard opaque cursors,
+  fingerprints, issue/resource text, and durable IDs. The synchronous,
+  infallible sink contract makes exporter outage/backpressure nonauthoritative;
+  implementations must enqueue promptly and may drop under bounded pressure.
 
 - Deleting-session retention now CAS-tombstones bounded protected principal-
   inbox payloads before message content while retaining their monotonic stream

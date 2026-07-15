@@ -11,6 +11,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Protected context compaction](context-compaction.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Bounded session retention](session-retention.md)
+- [Content-free operational telemetry](operational-telemetry.md)
 - [Protected skills and typed UI intents](skills-and-ui-intents.md)
 - [Hierarchical AI rule narrowing](hierarchical-rules.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)

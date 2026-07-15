@@ -379,6 +379,13 @@ production-ready behavior.
 - Root README, documentation index/guides, changelog, migration guide,
   repository rules, release-policy script, SemVer CI, and warnings-denied
   Rustdoc/SDL checks.
+- Exporter-neutral `AiOperationalTelemetrySink` and typed content-free
+  provider, durable run/tool, expired-run recovery, retention, restore-plan,
+  and restore-readiness observations. The vocabulary excludes content,
+  arbitrary strings, durable/principal IDs, endpoints, credentials, provider
+  response/model/profile identities, restore issue text/fingerprints, and
+  retention cursors. A random telemetry-only operation ID supports trace/event
+  correlation but is explicitly prohibited from metric labels.
 
 ## Not yet production-ready
 
@@ -420,10 +427,10 @@ production-ready behavior.
   Exact inline image/file input is implemented and remains independently gated
   by host MIME policy, budget, egress, current authority, and reopening limits.
 - Provider webhooks/background processing.
-- Privileged uncertain-call
-  recovery, retention/purge, and telemetry sinks. Budget-policy management,
-  ordinary transactional reservation/reconciliation, and authenticated usage
-  reporting are implemented.
+- Privileged uncertain-call recovery and complete retention/purge application.
+  Budget-policy management, ordinary transactional reservation/reconciliation,
+  authenticated usage reporting, and the content-free operational telemetry
+  sink contract are implemented.
 - Cross-generation adoption for validated provider-turn or partially completed
   application-tool checkpoints. Exact completed provider-retained supervised
   and provider-retained/bounded-stateless read-only tool-batch adoption, the
@@ -449,8 +456,10 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add reviewed operational telemetry sink contracts for provider, run/tool,
-   recovery, retention, and restore lifecycle observations without content.
+1. Add provider-persistent file/search/deletion and background/webhook
+   lifecycles plus authoritative built-in-tool unit pricing only behind their
+   independent authority, egress, budget, fencing, retention, and restore
+   proofs.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -478,8 +487,8 @@ intentional.
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
 - The full local release matrix and `cargo-semver-checks` gate passed against
-  the reviewed public PR base through 0.44.0 for crate/schema versions
-  `0.45.0`/`0.43.0`. The committed release-policy gate and branch CI remain
+  the prior reviewed `0.45.0` branch head for crate/schema versions
+  `0.46.0`/`0.43.0`. The committed release-policy gate and branch CI remain
   required before review.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
