@@ -1679,16 +1679,24 @@ pub(crate) struct AiUsageEntryRecord {
 #[graphql_entity(
     table = "graphql_orm_ai_provider_webhook_receipts",
     plural = "GraphqlOrmAiProviderWebhookReceipts",
-    default_sort = "received_at DESC"
+    default_sort = "received_at DESC",
+    repository_mutations = true
 )]
 pub(crate) struct AiProviderWebhookReceiptRecord {
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    pub receipt_key: String,
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "string")]
     pub provider_kind: String,
+    pub provider_profile_id: String,
     #[filterable(type = "string")]
     pub provider_event_id: String,
+    pub provider_event_kind: String,
+    pub provider_created_at: i64,
     pub provider_response_id: Option<String>,
     pub run_id: Option<graphql_orm::uuid::Uuid>,
     pub attempt_id: Option<graphql_orm::uuid::Uuid>,
@@ -1864,7 +1872,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.45.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.46.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

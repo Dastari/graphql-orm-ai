@@ -91,6 +91,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_rule_policy_count: 0,
         invalid_coordinator_checkpoint_count: 0,
         invalid_context_checkpoint_count: 0,
+        invalid_provider_webhook_receipt_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
@@ -195,21 +196,22 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_rule_policy_count: 1,
         invalid_coordinator_checkpoint_count: 1,
         invalid_context_checkpoint_count: 1,
+        invalid_provider_webhook_receipt_count: 1,
         invalid_ui_intent_event_count: 1,
         invalid_session_retention_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 13);
+    assert_eq!(plan.fatal_issue_count(), 14);
     assert_eq!(
         plan.readiness_report_after_apply(true).fatal_issue_count,
-        13
+        14
     );
 }
 
 #[test]
-fn legacy_restore_facts_default_context_checkpoint_count_to_zero() {
+fn legacy_restore_facts_default_new_validation_counts_to_zero() {
     let facts = AiRestoreSnapshotFacts {
         module_fingerprint: "expected".to_owned(),
         missing_key_versions: Vec::new(),
@@ -224,6 +226,7 @@ fn legacy_restore_facts_default_context_checkpoint_count_to_zero() {
         invalid_rule_policy_count: 0,
         invalid_coordinator_checkpoint_count: 0,
         invalid_context_checkpoint_count: 0,
+        invalid_provider_webhook_receipt_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
@@ -234,7 +237,12 @@ fn legacy_restore_facts_default_context_checkpoint_count_to_zero() {
         .as_object_mut()
         .expect("restore facts should be an object")
         .remove("invalid_context_checkpoint_count");
+    value
+        .as_object_mut()
+        .expect("restore facts should be an object")
+        .remove("invalid_provider_webhook_receipt_count");
     let decoded: AiRestoreSnapshotFacts =
         serde_json::from_value(value).expect("legacy restore facts should decode");
     assert_eq!(decoded.invalid_context_checkpoint_count, 0);
+    assert_eq!(decoded.invalid_provider_webhook_receipt_count, 0);
 }

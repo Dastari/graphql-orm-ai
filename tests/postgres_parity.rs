@@ -17,6 +17,17 @@ use graphql_orm_ai::*;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+#[cfg(feature = "provider-openai")]
+use base64::Engine;
+#[cfg(feature = "provider-openai")]
+use base64::engine::general_purpose::STANDARD;
+#[cfg(feature = "provider-openai")]
+use hmac::{Hmac, Mac};
+#[cfg(feature = "provider-openai")]
+use secrecy::SecretString;
+#[cfg(feature = "provider-openai")]
+use sha2::Sha256;
+
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
 const POSTGRES_IMAGE: &str = "postgres:17-alpine";
 
@@ -276,6 +287,93 @@ impl AiRuleHierarchyResolver for ExactRuleHierarchy {
     }
 }
 
+#[cfg(feature = "provider-openai")]
+struct PostgresWebhookSecrets(SecretRef, String);
+
+#[cfg(feature = "provider-openai")]
+#[async_trait]
+impl AiSecretStore for PostgresWebhookSecrets {
+    async fn resolve(&self, reference: &SecretRef) -> Result<SecretString, SecretError> {
+        if reference == &self.0 {
+            Ok(SecretString::from(self.1.clone()))
+        } else {
+            Err(SecretError::Unavailable)
+        }
+    }
+
+    async fn put(
+        &self,
+        _reference: Option<&SecretRef>,
+        _value: SecretString,
+    ) -> Result<SecretRef, SecretError> {
+        Err(SecretError::ReadOnly)
+    }
+
+    async fn delete(&self, _reference: &SecretRef) -> Result<(), SecretError> {
+        Err(SecretError::ReadOnly)
+    }
+}
+
+#[cfg(feature = "provider-openai")]
+async fn verify_webhook_receipt_parity(database: &Database<PostgresBackend>, now: OffsetDateTime) {
+    let reference = SecretRef::parse("openai/postgres-webhook-parity")
+        .expect("webhook secret reference should validate");
+    let secret = "synthetic-postgres-webhook-secret";
+    let verifier = OpenAiWebhookVerifier::new(
+        "postgres-parity-profile",
+        reference.clone(),
+        Arc::new(PostgresWebhookSecrets(reference, secret.to_owned())),
+        Arc::new(FixedClock::new(now)),
+    )
+    .expect("PostgreSQL webhook verifier should build");
+    let timestamp = now.unix_timestamp();
+    let body = format!(
+        r#"{{"id":"evt_postgres_parity","type":"response.completed","created_at":{},"data":{{"id":"resp_postgres_parity"}}}}"#,
+        timestamp.saturating_sub(1)
+    );
+    let webhook_id = "delivery_postgres_parity";
+    let mut signed = format!("{webhook_id}.{timestamp}.").into_bytes();
+    signed.extend_from_slice(body.as_bytes());
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("synthetic webhook secret should validate");
+    mac.update(&signed);
+    let signature = STANDARD.encode(mac.finalize().into_bytes());
+    let headers =
+        OpenAiWebhookHeaders::new(webhook_id, timestamp.to_string(), format!("v1,{signature}"))
+            .expect("PostgreSQL webhook headers should validate");
+    let event = verifier
+        .verify(&headers, body.as_bytes())
+        .await
+        .expect("PostgreSQL webhook signature should verify");
+    let receipts = OrmAiProviderWebhookReceiptService::new(database.clone());
+    let first_receipts = receipts.clone();
+    let first_event = event.clone();
+    let second_receipts = receipts.clone();
+    let second_event = event.clone();
+    let (first, second) = tokio::join!(
+        first_receipts.record(&first_event),
+        second_receipts.record(&second_event)
+    );
+    let outcomes = [
+        first.expect("first PostgreSQL webhook intake should succeed"),
+        second.expect("second PostgreSQL webhook intake should succeed"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, AiProviderWebhookReceiptOutcome::Recorded))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, AiProviderWebhookReceiptOutcome::AlreadyRecorded))
+            .count(),
+        1
+    );
+}
+
 fn rule_deployment_limits() -> AiRuleDeploymentLimits {
     AiRuleDeploymentLimits::new(
         4,
@@ -361,6 +459,8 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
         .expect("current whole-second test time should validate");
     let principal = principal(now);
+    #[cfg(feature = "provider-openai")]
+    verify_webhook_receipt_parity(&database, now).await;
     let session = sessions
         .create_session(
             &principal,

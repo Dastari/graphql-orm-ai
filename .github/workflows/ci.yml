@@ -62,7 +62,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
-        run: cargo test --no-default-features --features postgres --test postgres_parity -- --test-threads=1
+        run: cargo test --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
 
   release-policy:
     if: github.event_name == 'pull_request'

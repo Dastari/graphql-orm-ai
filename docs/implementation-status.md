@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.45.0`) and 39 private records
+- AI schema-module identity (currently version `0.46.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -180,6 +180,14 @@ production-ready behavior.
   profile, fixed official Files endpoint, just-in-time credentials, exact
   acknowledgement validation, and authoritative same-ID absence confirmation.
   It cannot list, upload, search, or retrieve file content.
+- Exact-profile OpenAI webhook verification over bounded raw request bytes,
+  just-in-time signing secrets, exact delivery headers, HMAC-SHA256, and a
+  bounded replay window. SQLite/PostgreSQL intake atomically stores one
+  content-free receipt plus redacted audit; concurrent/later redelivery is
+  idempotent, immutable collisions fail closed, and unsupported signed events
+  are ignored durably. Restore preflight makes an invalid deterministic
+  identity/binding/state/audit count fatal. No provider output is retrieved and
+  no run is mutated.
 - Provider-neutral exact attachment reopening with private-field request and
   resolved payloads, deployment raw-byte/cardinality limits, current owner/
   session/scope checks, released/clean/message-linked enforcement, object
@@ -430,11 +438,13 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- OpenAI background/webhooks and provider-persistent file upload/search,
-  richer provider file-type preflight, and full built-in result normalization.
-  Exact inline image/file input is implemented and remains independently gated
+- OpenAI background submission, receipt-to-run reconciliation, provider output
+  retrieval, and provider-persistent file upload/search, plus richer provider
+  file-type preflight and full built-in result normalization. Exact raw-body
+  webhook verification and durable content-free receipt intake are implemented,
+  but receipts intentionally remain pending until an independently fenced
+  reconciler exists. Exact inline image/file input remains independently gated
   by host MIME policy, budget, egress, current authority, and reopening limits.
-- Provider webhooks/background processing.
 - Privileged uncertain-call recovery and complete retention/purge application.
   Budget-policy management, ordinary transactional reservation/reconciliation,
   authenticated usage reporting, and the content-free operational telemetry
@@ -464,12 +474,15 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add provider-persistent file upload/search and background/webhook lifecycles
-   behind their independent authority, egress, budget, fencing, retention, and
-   restore proofs, building on exact profile-bound deletion. Extend
-   authoritative unit pricing only when each additional billing dimension is
-   complete.
-2. Design complete ordering/history proofs before considering multi-call or
+1. Complete the OpenAI background lifecycle after this receipt-only intake:
+   bind submission to the exact run/attempt/fence/profile/response and add a
+   bounded reconciler that independently re-proves current authority, budget,
+   egress, retention, and provider output before any run mutation.
+2. Add provider-persistent file upload/search behind independent authority,
+   egress, budget, fencing, retention, and restore proofs, building on exact
+   profile-bound deletion. Extend authoritative unit pricing only when each
+   additional billing dimension is complete.
+3. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
 
@@ -495,11 +508,13 @@ intentional.
 - Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
-- The prior `0.47.0`/`0.44.0` release matrix and branch CI are fully green.
-  The current `0.48.0`/`0.45.0` exact OpenAI deletion slice passes the full
-  local release matrix, owned disposable PostgreSQL parity, package/privacy
-  review, and SemVer comparison. The committed release-policy gate and branch
-  CI remain required before review.
+- The prior `0.48.0`/`0.45.0` exact OpenAI deletion release matrix and branch
+  CI run are fully green. The current `0.49.0`/`0.46.0` verified webhook-intake
+  slice passes the full local release matrix, legacy empty-placeholder schema
+  upgrade, concurrent SQLite and owned-disposable-PostgreSQL receipt parity,
+  package/privacy review, backend isolation, and SemVer comparison against
+  0.48.0. The ordinary committed release-policy gate and branch CI remain
+  required before review.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

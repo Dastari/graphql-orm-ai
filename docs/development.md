@@ -28,7 +28,7 @@ cargo check --no-default-features --features mssql
 Run PostgreSQL behavioral parity only through the self-owning harness:
 
 ```bash
-cargo test --no-default-features --features postgres \
+cargo test --no-default-features --features postgres,provider-openai \
   --test postgres_parity -- --test-threads=1
 ```
 

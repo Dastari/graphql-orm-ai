@@ -86,6 +86,11 @@ mod orm_tools;
 mod orm_ui_intents;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_usage;
+#[cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    feature = "provider-openai"
+))]
+mod orm_webhooks;
 mod persistence;
 mod pricing;
 mod proposals;
@@ -174,6 +179,11 @@ pub use orm_tools::*;
 pub use orm_ui_intents::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_usage::*;
+#[cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    feature = "provider-openai"
+))]
+pub use orm_webhooks::*;
 pub use persistence::{
     AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
 };
@@ -253,6 +263,16 @@ pub mod prelude {
         OrmAiProposalService, OrmAiProviderOutputService, OrmAiRulePolicyService, OrmAiRunService,
         OrmAiSessionRetentionService, OrmAiSkillCatalogService, OrmAiSupervisedResumeService,
         OrmAiUiIntentDeliveryService, OrmAiUsageService,
+    };
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub use crate::{AiProviderWebhookReceiptOutcome, OrmAiProviderWebhookReceiptService};
+    #[cfg(feature = "provider-openai")]
+    pub use crate::{
+        OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind, OpenAiWebhookHeaders,
+        OpenAiWebhookVerifier, OpenAiWebhookVerifierLimits,
     };
     pub use agql_auth::{CurrentPrincipalResolver, PrincipalReference, ResolvedPrincipal};
 }

@@ -20,7 +20,10 @@ Exactly one persistence backend is currently required:
 
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter and its separately installed exact-reference file-deletion
-service. `provider-anthropic` enables the native Anthropic Messages
+service. It also enables raw-body OpenAI webhook verification and, with a
+writable backend, content-free durable receipt intake; neither capability
+enables background submission or reconciliation. `provider-anthropic` enables
+the native Anthropic Messages
 adapter with a fixed official endpoint and secret-store credential reference.
 `provider-xai` enables the native xAI Responses adapter with a fixed official
 endpoint and zero-data-retention verification enabled by default.
@@ -50,6 +53,10 @@ camelCase to PascalCase.
    operation contracts, and static disclosure schemas. Registration does not
    enable a tool.
 6. Register proposal types, exact UI-intent descriptors, and provider adapters.
+   If accepting OpenAI webhooks, preserve the exact raw body and delivery
+   headers, verify them with one exact-profile `OpenAiWebhookVerifier`, then
+   pass only the verified event to `OrmAiProviderWebhookReceiptService` and
+   acknowledge after commit. See [verified OpenAI webhook intake](openai-webhooks.md).
 7. Install `OrmAiSkillCatalogService` as `Arc<dyn AiSkillCatalogService>` when
    composing the separate skill roots. Supply exact scope access, recent-MFA,
    trusted clock, and content-protection implementations. Skill resolution is
@@ -328,4 +335,7 @@ always followed by fresh ordinary resolver authorization in that path. See the
 [proposal and approval lifecycle guide](review-lifecycles.md) and
 [supervised tool guide](supervised-tool-loop.md). Exact profile-bound native
 OpenAI file deletion is implemented through the host-only attachment cleanup
-worker; see the [attachment guide](attachments.md).
+worker; see the [attachment guide](attachments.md). Exact raw-body OpenAI
+webhook verification and content-free durable receipt intake are implemented,
+while response retrieval and run reconciliation remain closed; see the
+[webhook intake guide](openai-webhooks.md).

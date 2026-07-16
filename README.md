@@ -206,6 +206,9 @@ waits without polling, resuming, or executing them.
 - A separately installed native OpenAI artifact-deletion boundary that binds an
   exact logical profile, deletes only a selected `file-...` reference, validates
   its acknowledgement, and authoritatively confirms same-ID absence.
+- Bounded exact-raw-body OpenAI webhook verification plus atomic content-free
+  receipt/audit intake for terminal response events. Intake is idempotent and
+  profile-bound but deliberately does not retrieve output or mutate a run.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -248,7 +251,7 @@ Exactly one persistence backend should be selected:
 | `sqlite` | yes | ORM persistence and in-memory automated tests |
 | `postgres` | no | ORM persistence plus test-owned disposable-Docker parity |
 | `mssql` | no | Schema/compile support pending ORM write parity |
-| `provider-openai` | no | Native OpenAI Responses/SSE adapter |
+| `provider-openai` | no | Native OpenAI Responses/SSE, exact file deletion, and verified webhook intake |
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
 | `provider-xai` | no | Native xAI Responses/SSE: text/JSON, structured output, strict parallel application tools |
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |

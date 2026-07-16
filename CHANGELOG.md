@@ -5,11 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.48.0` and AI
-schema module to `0.45.0`. It keeps 39 private entities and adds a native,
-profile-bound OpenAI exact-reference file-deletion boundary.
+This development line advances the pre-1.0 crate version to `0.49.0` and AI
+schema module to `0.46.0`. It keeps 39 private entities and adds verified,
+content-free durable OpenAI webhook receipt intake.
 
 ### Added
+
+- Feature-gated `OpenAiWebhookVerifier` verifies bounded exact raw bodies using
+  the profile's just-in-time webhook signing secret, OpenAI's three exact
+  delivery headers, HMAC-SHA256, and a bounded replay window before minimally
+  parsing JSON. It recognizes only terminal response events, redacts provider/
+  profile/response identities from `Debug`, and grants no retrieval, run,
+  fence, budget, egress, or completion authority.
+- On SQLite/PostgreSQL, `OrmAiProviderWebhookReceiptService` atomically inserts
+  one content-free private receipt and one redacted audit through generated ORM
+  operations. Concurrent and later exact redeliveries are idempotent; changed
+  immutable facts under the same profile/event identity conflict; unsupported
+  signed events are durably ignored. Bounded whole-transaction retries absorb
+  PostgreSQL serialization races without duplicating the audit. No raw body,
+  signature, signing secret, prompt, output, or provider error is persisted.
 
 - Feature-gated `OpenAiFileDeletionService` implements only exact OpenAI Files
   deletion for artifacts selected by the existing fenced attachment cleanup
@@ -113,6 +127,20 @@ profile-bound OpenAI exact-reference file-deletion boundary.
   artifacts before parent attachments and appends only redacted audit facts.
 
 ### Changed
+
+- Schema module `0.46.0` adds deterministic receipt/profile/event-kind/time
+  bindings to the existing private webhook receipt placeholder and combines
+  its deterministic UUID with the existing provider family as private key
+  metadata for atomic insert-if-absent. Supported events
+  remain `pending_reconciliation`: this release does not submit background
+  responses, retrieve provider output, bind receipts to runs, settle usage, or
+  mutate run state.
+- Restore snapshot facts add `invalid_provider_webhook_receipt_count`; any
+  malformed deterministic identity, exact provider/profile/event/response
+  binding, signature fact, lifecycle state, or creation-audit linkage is fatal
+  to restored-runtime readiness. The field defaults only when decoding legacy
+  serialized facts; the changed module fingerprint remains independently
+  fail-closed.
 
 - Schema module `0.45.0` adds nullable provider-family and logical-profile
   bindings to private attachment artifacts. A provider reference is valid only

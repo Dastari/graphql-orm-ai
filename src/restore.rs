@@ -93,6 +93,11 @@ pub struct AiRestoreSnapshotFacts {
     /// evidence, or retention invalidation state.
     #[serde(default)]
     pub invalid_context_checkpoint_count: u64,
+    /// Provider webhook receipts with invalid deterministic identity,
+    /// provider/profile/event/response binding, signature fact, lifecycle
+    /// state, or creation-audit linkage.
+    #[serde(default)]
+    pub invalid_provider_webhook_receipt_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
     pub invalid_ui_intent_event_count: u64,
@@ -274,6 +279,13 @@ impl AiRestoreReconciler {
         if facts.invalid_context_checkpoint_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_CONTEXT_CHECKPOINT_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
+        if facts.invalid_provider_webhook_receipt_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_PROVIDER_WEBHOOK_RECEIPT_INVALID".to_owned(),
                 severity: AiRestoreIssueSeverity::Fatal,
                 resource_ref: None,
             });

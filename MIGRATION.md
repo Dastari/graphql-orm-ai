@@ -4,6 +4,59 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: verified OpenAI webhook receipt intake (crate 0.48.0 to 0.49.0; schema 0.45.0 to 0.46.0)
+
+Apply AI schema module `0.46.0` while provider routes/workers, backup/restore,
+and runtime start are closed. The generated migration keeps 39 private entities
+and extends the existing webhook-receipt placeholder with `receipt_key`,
+`provider_profile_id`, `provider_event_kind`, and `provider_created_at`. Its
+private primary-key metadata becomes the deterministic receipt UUID plus the
+existing provider-family column so generated `insert_if_absent` works
+atomically on SQLite and PostgreSQL. The full SHA-256 receipt key remains a
+separate exact collision check. No generic GraphQL CRUD root is added.
+
+No supported 0.48 deployment can contain a webhook receipt because the crate
+previously exposed no writer. Therefore no data migration is needed for a
+supported deployment, and the private receipt table must be empty before this
+migration. A nonempty table is unsupported state: stop, keep the runtime
+closed, and investigate through reviewed backup/restore or migration tooling.
+Do not infer profile/event bindings or use application-authored SQL to make the
+migration pass.
+
+With `provider-openai`, construct `OpenAiWebhookHeaders` from the exact
+`webhook-id`, `webhook-timestamp`, and `webhook-signature` values and pass those
+with the unparsed request bytes to an exact-profile `OpenAiWebhookVerifier`.
+The verifier now adds `hmac` to that feature's dependency graph. Its
+`SecretRef` must resolve the profile's OpenAI webhook signing secret, not grant
+provider request authority. `OpenAiWebhookVerifierLimits` can narrow the body
+and replay-window bounds. Verification failures remain redacted and produce no
+receipt.
+
+On SQLite/PostgreSQL, pass only `OpenAiVerifiedWebhookEvent` to
+`OrmAiProviderWebhookReceiptService::record`. Return route success only after
+`Recorded` or `AlreadyRecorded`; later exact deliveries preserve the first
+receipt. A same-profile/provider-event collision with changed immutable facts
+returns `AiError::Conflict`. Validly signed unsupported events are recorded as
+ignored. Hosts must not persist or log the raw body, signature, signing secret,
+or `Debug`-redacted identifiers around this boundary.
+
+Restore fact collectors must populate
+`AiRestoreSnapshotFacts::invalid_provider_webhook_receipt_count` after checking
+each receipt's deterministic identity, exact provider/profile/event/response
+binding, verified-signature fact, lifecycle state, and redacted creation-audit
+link. Any nonzero count is fatal to readiness. Legacy serialized fact payloads
+default the new count to zero for decoding compatibility, but their old module
+fingerprint still fails against schema `0.46.0` until a trusted adapter has
+collected and validated current facts.
+
+This is an additive public Rust API, feature dependency, private schema,
+backup/restore metadata, and operational route contract change. It adds no
+public GraphQL SDL, entity, credential persistence, background response
+submission/retrieval, run binding/mutation, usage settlement, or reconciliation
+worker. Supported receipts intentionally remain `pending_reconciliation` until
+a future worker can re-prove the original run, attempt, fence, provider,
+profile, response, budget, egress, retention, and current-authority bindings.
+
 ## Unreleased: native OpenAI exact-reference deletion (crate 0.47.0 to 0.48.0; schema 0.44.0 to 0.45.0)
 
 Apply AI schema module `0.45.0` while attachment, retention, backup/restore,

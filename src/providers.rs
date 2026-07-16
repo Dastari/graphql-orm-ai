@@ -12,6 +12,9 @@ mod anthropic;
 ))]
 mod openai;
 
+#[cfg(feature = "provider-openai")]
+mod openai_webhooks;
+
 #[cfg(feature = "provider-openai-compatible")]
 mod openai_compatible;
 
@@ -28,6 +31,12 @@ pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
 
 #[cfg(feature = "provider-openai")]
 pub use openai::{OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig};
+
+#[cfg(feature = "provider-openai")]
+pub use openai_webhooks::{
+    OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind, OpenAiWebhookHeaders,
+    OpenAiWebhookVerifier, OpenAiWebhookVerifierLimits,
+};
 
 #[cfg(feature = "provider-openai-compatible")]
 pub use openai_compatible::{
