@@ -1068,6 +1068,23 @@ impl ProviderRequestContext {
         matched
     }
 
+    #[cfg(feature = "provider-openai")]
+    pub(crate) fn permits_background_response(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+        provider_profile_id: &str,
+    ) -> bool {
+        !self.transfers.is_empty()
+            && self.transfers.iter().all(|transfer| {
+                transfer.manifest.provider_kind == provider_kind.as_str()
+                    && transfer.manifest.provider_profile_id == provider_profile_id
+                    && transfer.manifest.model == request.model
+                    && transfer.manifest.retention == AI_EGRESS_RETENTION_PROVIDER_RESPONSE
+                    && transfer.manifest.stable_hash() == transfer.proof.manifest_hash()
+            })
+    }
+
     #[cfg(feature = "provider-openai-compatible")]
     pub(crate) fn permits_profile_destination_retention(
         &self,
@@ -1242,6 +1259,147 @@ pub enum ProviderError {
 pub type ProviderEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send + 'static>>;
 
+/// Opaque durable binding embedded in one provider background request.
+///
+/// Values identify a prepared ORM submission without disclosing its owning
+/// session, run, principal, or request content. Possession of this value is
+/// not retrieval, reconciliation, budget, egress, or run-mutation authority.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderBackgroundBinding {
+    submission_id: Uuid,
+    submission_key: String,
+    provider_profile_id: String,
+}
+
+impl ProviderBackgroundBinding {
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        submission_id: Uuid,
+        submission_key: String,
+        provider_profile_id: String,
+    ) -> Self {
+        Self {
+            submission_id,
+            submission_key,
+            provider_profile_id,
+        }
+    }
+
+    /// Opaque submission identifier safe for provider response metadata.
+    pub const fn submission_id(&self) -> Uuid {
+        self.submission_id
+    }
+
+    /// Full collision-check key safe for provider response metadata.
+    pub fn submission_key(&self) -> &str {
+        &self.submission_key
+    }
+
+    /// Exact logical provider profile selected by the egress manifest.
+    pub fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+}
+
+impl std::fmt::Debug for ProviderBackgroundBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderBackgroundBinding")
+            .field("submission_id", &"[REDACTED]")
+            .field("submission_key", &"[REDACTED]")
+            .field("provider_profile_id", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Content-free acknowledgement returned when a provider accepts background
+/// response generation.
+///
+/// This value proves only what the provider returned at submission time. It
+/// contains no response output and grants no authority to retrieve or persist
+/// a later result.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderBackgroundSubmission {
+    response_id: String,
+    status: String,
+    created_at: i64,
+    provider_model: String,
+    maximum_output_tokens: u64,
+    provider_store: bool,
+}
+
+impl std::fmt::Debug for ProviderBackgroundSubmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderBackgroundSubmission")
+            .field("response_id", &"[REDACTED]")
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("provider_model", &self.provider_model)
+            .field("maximum_output_tokens", &self.maximum_output_tokens)
+            .field("provider_store", &self.provider_store)
+            .finish()
+    }
+}
+
+impl ProviderBackgroundSubmission {
+    /// Creates the content-free acknowledgement returned by a trusted adapter.
+    ///
+    /// Construction does not grant retrieval or reconciliation authority. The
+    /// adapter must first validate every supplied fact against its exact wire
+    /// acknowledgement. The ORM background service independently validates
+    /// provider-specific ID, status, timestamp, model, output ceiling, and
+    /// original durable-binding requirements before it mutates a run.
+    pub fn new(
+        response_id: String,
+        status: String,
+        created_at: i64,
+        provider_model: String,
+        maximum_output_tokens: u64,
+        provider_store: bool,
+    ) -> Self {
+        Self {
+            response_id,
+            status,
+            created_at,
+            provider_model,
+            maximum_output_tokens,
+            provider_store,
+        }
+    }
+
+    /// Provider response identifier.
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+
+    /// Provider status observed in the create acknowledgement.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Provider response creation timestamp.
+    pub const fn created_at(&self) -> i64 {
+        self.created_at
+    }
+
+    /// Exact model/routing key echoed in the provider response.
+    pub fn provider_model(&self) -> &str {
+        &self.provider_model
+    }
+
+    /// Exact provider-enforced output-token ceiling echoed in the response.
+    pub const fn maximum_output_tokens(&self) -> u64 {
+        self.maximum_output_tokens
+    }
+
+    /// Whether the provider reports retaining the response beyond temporary
+    /// background execution storage.
+    pub const fn provider_store(&self) -> bool {
+        self.provider_store
+    }
+}
+
 /// Provider-neutral adapter.
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -1258,4 +1416,18 @@ pub trait AiProvider: Send + Sync {
         request: ModelRequest,
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError>;
+
+    /// Starts provider background processing for one exactly bound request.
+    ///
+    /// The default is fail-closed. Implementations must return only a bounded,
+    /// content-free acknowledgement and must embed the exact opaque binding
+    /// so a later reconciler can reject swapped responses.
+    async fn submit_background(
+        &self,
+        _request: ModelRequest,
+        _context: ProviderRequestContext,
+        _binding: ProviderBackgroundBinding,
+    ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
 }

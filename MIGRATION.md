@@ -4,6 +4,85 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: exact OpenAI background submission binding (crate 0.49.0 to 0.50.0; schema 0.46.0 to 0.47.0)
+
+Apply AI schema module `0.47.0` while provider workers, webhook intake,
+backup/restore, and runtime start are closed. The generated migration adds the
+fortieth private entity,
+`graphql_orm_ai_provider_background_submissions`, with unique deterministic
+submission, attempt, budget-reservation, and optional provider-response
+bindings plus the exact requested output ceiling and acknowledged provider
+storage choice. Existing 0.46 rows and tables need no rewrite, so no data
+migration is required. The module fingerprint and backup descriptor change.
+
+With `provider-openai` plus SQLite/PostgreSQL, hosts may construct
+`OrmAiOpenAiBackgroundSubmissionService` from the existing fenced run service,
+runtime, atomic budget service, egress audit, and trusted clock. Its `submit`
+method accepts an active `Running` lease and an `AiProviderCallPlan` only when:
+
+- the provider is exactly native `OpenAi`;
+- the request is an initial provider-retained turn with no continuation,
+  application tools, built-in tools, or attachments and with a nonzero
+  provider-enforced maximum-output-token ceiling;
+- exactly one model-inference manifest binds the same scope, session, run,
+  profile, model, and `provider_response` retention; and
+- current principal, scope/session write access, budget, egress, runtime
+  readiness, and provider background capability all pass.
+
+The service freshly rehydrates current authority, prepares a content-free
+deterministic binding, and renews the exact fence in one transaction. It then
+marks the reservation `uncertain`, periodically heartbeats the same fence
+while awaiting the acknowledgement, and performs one provider create call. It
+never retries that external boundary. Failures known to precede preparation or
+transport release unused reserved capacity. The native OpenAI adapter forces
+`background: true` and `stream: false`, retains the configured `store`
+setting, embeds only the opaque submission UUID and collision-check key in
+response metadata, bounds the JSON acknowledgement to 1 MiB, and validates its
+response ID, status, timestamp, background flag, object kind, model, output
+ceiling, configured storage choice, and exact echoed metadata.
+
+A valid acknowledgement binds the response atomically and changes the run to
+the new lease-free `AiRunState::WaitingProvider`. Any transport or malformed/
+unpersisted acknowledgement ambiguity conservatively changes both the binding
+and run to `RecoveryRequired`, retains the uncertain budget, and records only
+a safe error code plus the exact immutable attempt outcome. Callers must update
+exhaustive `AiRunState` matches for `WaitingProvider`; ordinary workers cannot
+transition out of that state.
+
+This slice does not retrieve provider output, match webhook receipts to a
+submission, settle usage, persist assistant output, or complete/requeue a run.
+Do not invoke background submission in a deployment that lacks an independently
+reviewed operational process for parked or recovery-required work. The next
+reconciler must freshly prove current authority, budget, egress, retention,
+exact submission/receipt/response binding, and bounded provider output before
+any run mutation.
+
+Trusted third-party adapters implementing the additive default-deny
+`AiProvider::submit_background` method can construct the content-free
+`ProviderBackgroundSubmission` only after validating and supplying the exact
+response ID/status/timestamp/model/output ceiling/storage choice;
+`ProviderBackgroundBinding` remains runtime-authored and redacted.
+`AiRuntime::submit_provider_background` checks runtime readiness, exact
+provider registration, request proofs, and the declared background capability.
+None of these values grants retrieval, reconciliation, or run-mutation
+authority.
+
+Restore fact collectors must populate the serde-defaulted but Rust-source-
+breaking
+`AiRestoreSnapshotFacts::invalid_provider_background_submission_count` after
+checking deterministic identity, exact run/attempt/fence/profile/request/
+budget/egress/response facts, output ceiling, acknowledged storage choice,
+lifecycle state, and preparation/acceptance audit links. Any nonzero count is
+fatal. Restored `WaitingProvider` runs always plan
+`RecoveryRequired`; they are never replayed. Legacy serialized fact payloads
+decode the new count as zero, but the old module fingerprint still fails until
+current facts are collected and validated.
+
+This is an additive public Rust API, new public enum variant, private schema,
+backup/restore, retention-authorization, provider, budget, and run-lifecycle
+contract change. It adds no public GraphQL SDL, credential persistence,
+provider-file lifecycle, generic CRUD root, or application data migration.
+
 ## Unreleased: verified OpenAI webhook receipt intake (crate 0.48.0 to 0.49.0; schema 0.45.0 to 0.46.0)
 
 Apply AI schema module `0.46.0` while provider routes/workers, backup/restore,

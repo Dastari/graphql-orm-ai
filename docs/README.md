@@ -16,6 +16,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Hierarchical AI rule narrowing](hierarchical-rules.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
 - [Verified OpenAI webhook intake](openai-webhooks.md)
+- [Exact OpenAI background submission](openai-background.md)
 - [Native Anthropic provider](anthropic.md)
 - [Native xAI provider](xai.md)
 - [Profiled OpenAI-compatible provider](openai-compatible.md)

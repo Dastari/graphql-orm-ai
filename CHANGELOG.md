@@ -5,11 +5,39 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.49.0` and AI
-schema module to `0.46.0`. It keeps 39 private entities and adds verified,
-content-free durable OpenAI webhook receipt intake.
+This development line advances the pre-1.0 crate version to `0.50.0` and AI
+schema module to `0.47.0`. It adds a fortieth private entity for exact,
+content-free OpenAI background-submission bindings.
 
 ### Added
+
+- With `provider-openai` plus SQLite/PostgreSQL,
+  `OrmAiOpenAiBackgroundSubmissionService` now prepares one exact
+  run/attempt/fence/profile/model/request/budget/egress binding, rehydrates
+  current scope/session authority, marks the reservation uncertain immediately
+  before transport, periodically renews the same fence while awaiting the
+  create acknowledgement, and issues exactly one initial tool-free,
+  attachment-free OpenAI background Responses request with an explicit
+  provider-enforced output-token ceiling. Any failure known to precede
+  preparation/transport releases unused reserved capacity. The native adapter
+  forces non-streaming background mode, embeds only opaque deterministic
+  binding metadata, and accepts only a bounded content-free acknowledgement
+  echoing the exact model, output ceiling, storage choice, and opaque binding.
+- Accepted submissions atomically bind the provider response and park the run
+  in the new lease-free `AiRunState::WaitingProvider`. Transport or
+  acknowledgement ambiguity closes the binding and run as
+  `RecoveryRequired`; the crate never retries the create request. Public
+  `ProviderBackgroundBinding`, `ProviderBackgroundSubmission`,
+  `AiOpenAiBackgroundSubmission`, and the default-deny
+  `AiProvider::submit_background` adapter seam expose no response content or
+  retrieval/run-mutation authority. Recovery closure also appends the exact
+  immutable attempt outcome in the same transaction.
+- Restore preflight adds the serde-defaulted
+  `invalid_provider_background_submission_count`; invalid deterministic
+  identities, original fences, provider/profile/request/budget/egress/response
+  bindings, output ceilings, storage/retention facts, states, or audit links
+  keep runtime readiness closed. Restored `WaitingProvider` runs always require
+  recovery review.
 
 - Feature-gated `OpenAiWebhookVerifier` verifies bounded exact raw bodies using
   the profile's just-in-time webhook signing secret, OpenAI's three exact

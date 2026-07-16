@@ -98,6 +98,11 @@ pub struct AiRestoreSnapshotFacts {
     /// state, or creation-audit linkage.
     #[serde(default)]
     pub invalid_provider_webhook_receipt_count: u64,
+    /// Provider background submissions with invalid deterministic identity,
+    /// run/attempt/fence/profile/request/budget/egress/response binding,
+    /// lifecycle state, or preparation/acceptance audit linkage.
+    #[serde(default)]
+    pub invalid_provider_background_submission_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
     pub invalid_ui_intent_event_count: u64,
@@ -290,6 +295,13 @@ impl AiRestoreReconciler {
                 resource_ref: None,
             });
         }
+        if facts.invalid_provider_background_submission_count > 0 {
+            issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_PROVIDER_BACKGROUND_SUBMISSION_INVALID".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: None,
+            });
+        }
         if facts.invalid_ui_intent_event_count > 0 {
             issues.push(AiRestoreIssue {
                 code: "AI_RESTORE_UI_INTENT_EVENT_INVALID".to_owned(),
@@ -350,7 +362,7 @@ fn restored_run_disposition(run: &AiRestoredRun) -> AiRestoredRunDisposition {
     }
     if matches!(
         run.state,
-        AiRunState::WaitingApproval | AiRunState::WaitingTool
+        AiRunState::WaitingApproval | AiRunState::WaitingTool | AiRunState::WaitingProvider
     ) {
         return AiRestoredRunDisposition::RecoveryRequired;
     }

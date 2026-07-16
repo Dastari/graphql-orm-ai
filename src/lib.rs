@@ -42,6 +42,11 @@ mod local_harness;
 mod orm_approvals;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_attachments;
+#[cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    feature = "provider-openai"
+))]
+mod orm_background;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -135,6 +140,11 @@ pub use local_harness::*;
 pub use orm_approvals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_attachments::*;
+#[cfg(all(
+    any(feature = "sqlite", feature = "postgres"),
+    feature = "provider-openai"
+))]
+pub use orm_background::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -268,7 +278,10 @@ pub mod prelude {
         any(feature = "sqlite", feature = "postgres"),
         feature = "provider-openai"
     ))]
-    pub use crate::{AiProviderWebhookReceiptOutcome, OrmAiProviderWebhookReceiptService};
+    pub use crate::{
+        AiOpenAiBackgroundSubmission, AiProviderWebhookReceiptOutcome,
+        OrmAiOpenAiBackgroundSubmissionService, OrmAiProviderWebhookReceiptService,
+    };
     #[cfg(feature = "provider-openai")]
     pub use crate::{
         OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind, OpenAiWebhookHeaders,

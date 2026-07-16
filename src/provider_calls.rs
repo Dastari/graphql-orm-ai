@@ -538,6 +538,38 @@ impl AiProviderCallPlan {
         &self.correlation_id
     }
 
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) fn provider_kind_ref(&self) -> &ProviderKind {
+        &self.provider_kind
+    }
+
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) fn request_ref(&self) -> &ModelRequest {
+        &self.request
+    }
+
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) fn budget_request(&self) -> &AiBudgetReservationRequest {
+        &self.budget
+    }
+
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) fn transfers(&self) -> &[AiEgressManifest] {
+        &self.transfers
+    }
+
     /// Returns whether this turn exposes at least one validated application
     /// tool definition.
     pub fn has_application_tools(&self) -> bool {
@@ -3038,6 +3070,594 @@ mod tests {
             "provider-call-test",
         )
         .expect("test provider plan should validate")
+    }
+
+    #[cfg(feature = "provider-openai")]
+    fn background_plan(fixture: &Fixture) -> AiProviderCallPlan {
+        let request = ModelRequest {
+            model: "mock-model".to_owned(),
+            instructions: vec!["Return a bounded background test response".to_owned()],
+            input: vec![ModelInputBlock::Text {
+                text: "hello in the background".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: vec![],
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
+            output_schema: None,
+            maximum_output_tokens: Some(100),
+        };
+        let budget = AiBudgetReservationRequest {
+            scope: fixture.scope.clone(),
+            session_id: fixture.lease.session_id(),
+            run_id: fixture.lease.run_id(),
+            attempt_id: fixture.lease.attempt_id(),
+            lease_generation: fixture.lease.lease_generation(),
+            provider_kind: ProviderKind::OpenAi,
+            model: request.model.clone(),
+            pricing_policy_version: "test-pricing-v1".to_owned(),
+            estimate: AiBudgetAmounts {
+                input_tokens: 100,
+                output_tokens: 100,
+                tool_units: 0,
+                image_units: 0,
+                cost_microunits: 100,
+                runs: 1,
+            },
+            idempotency_key: format!("provider-background:{}:1", fixture.lease.attempt_id()),
+            expires_at: OffsetDateTime::now_utc() + Duration::minutes(2),
+        };
+        let manifest = AiEgressManifest {
+            provider_profile_id: "mock-profile".to_owned(),
+            provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+            model: request.model.clone(),
+            destination: "local-mock".to_owned(),
+            destination_trust: AiDestinationTrust::Local,
+            capability: AiEgressCapability::ModelInference,
+            scope: fixture.scope.clone(),
+            session_id: Some(fixture.lease.session_id()),
+            run_id: Some(fixture.lease.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "message_block".to_owned(),
+                reference: "background-test-source".to_owned(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::UserProvided,
+            }],
+            estimated_bytes: request.conservative_egress_bytes(),
+            estimated_tokens: 100,
+            attachment_count: 0,
+            purpose: "test_background_inference".to_owned(),
+            retention: AI_EGRESS_RETENTION_PROVIDER_RESPONSE.to_owned(),
+            residency: None,
+            policy_version: "egress-v1".to_owned(),
+            consent_reference: None,
+        };
+        AiProviderCallPlan::new(
+            ProviderKind::OpenAi,
+            request,
+            budget,
+            vec![manifest],
+            "provider-background-test",
+        )
+        .expect("background provider plan should validate")
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_submission_binds_one_call_and_parks_run_without_a_lease() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                streaming: true,
+                structured_output: true,
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission("resp_background_orm_1", "queued", now);
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+
+        let accepted = service
+            .submit(&fixture.lease, background_plan(&fixture))
+            .await
+            .expect("exact background submission should be accepted");
+        assert_eq!(fixture.mock.request_count(), 1);
+        assert_eq!(accepted.run_id(), fixture.lease.run_id());
+        assert_eq!(accepted.attempt_id(), fixture.lease.attempt_id());
+        assert_eq!(
+            accepted.lease_generation(),
+            fixture.lease.lease_generation()
+        );
+        assert_eq!(accepted.provider_profile_id(), "mock-profile");
+        assert_eq!(accepted.maximum_output_tokens(), 100);
+        assert!(!accepted.provider_store());
+        assert_eq!(accepted.provider_response_id(), "resp_background_orm_1");
+        assert_eq!(accepted.provider_status(), "queued");
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &fixture.database,
+            &accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.run_id, fixture.lease.run_id().0);
+        assert_eq!(submission.attempt_id, fixture.lease.attempt_id());
+        assert_eq!(
+            submission.lease_generation,
+            fixture.lease.lease_generation()
+        );
+        assert_eq!(submission.provider_kind, "openai");
+        assert_eq!(submission.provider_profile_id, "mock-profile");
+        assert_eq!(submission.provider_model, "mock-model");
+        assert_eq!(submission.maximum_output_tokens, 100);
+        assert_eq!(submission.provider_store, Some(false));
+        assert_eq!(submission.state, "waiting_provider");
+        assert_eq!(
+            submission.provider_response_id.as_deref(),
+            Some("resp_background_orm_1")
+        );
+        assert_eq!(submission.provider_status.as_deref(), Some("queued"));
+        assert_eq!(submission.provider_created_at, Some(now));
+        assert!(submission.submitted_at.is_some());
+        assert_eq!(submission.row_version, 1);
+
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::WaitingProvider.as_str());
+        assert_eq!(run.attempt_id, Some(fixture.lease.attempt_id()));
+        assert_eq!(run.lease_generation, fixture.lease.lease_generation());
+        assert!(run.lease_owner.is_none());
+        assert!(run.lease_expires_at.is_none());
+        assert!(run.lease_heartbeat_at.is_none());
+
+        let reservation = AiBudgetReservationRecord::find_by_id(
+            &fixture.database,
+            &accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(reservation.state, "uncertain");
+        assert!(reservation.reconciled_at.is_some());
+        assert!(reservation.actual_input_tokens.is_none());
+        assert!(reservation.actual_output_tokens.is_none());
+
+        let audit_actions = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAuditEventRecord>()
+                        .fetch_all()
+                        .await
+                        .map(|rows| {
+                            rows.into_iter()
+                                .filter(|row| {
+                                    row.resource_kind == "ai_provider_background_submission"
+                                })
+                                .map(|row| row.action)
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("background audit events should query");
+        assert_eq!(audit_actions.len(), 2);
+        assert!(
+            audit_actions
+                .iter()
+                .any(|action| action == "prepare_provider_background_submission")
+        );
+        assert!(
+            audit_actions
+                .iter()
+                .any(|action| action == "accept_provider_background_submission")
+        );
+
+        let debug = format!("{accepted:?}");
+        assert!(!debug.contains("resp_background_orm_1"));
+        assert!(!debug.contains("mock-profile"));
+        assert!(!debug.contains(&fixture.lease.run_id().0.to_string()));
+
+        assert!(
+            service
+                .submit(&fixture.lease, background_plan(&fixture))
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.mock.request_count(), 1);
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_submission_releases_budget_when_egress_audit_fails() {
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            });
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            Arc::new(FailAudit),
+            Arc::new(SystemClock),
+        );
+
+        assert!(matches!(
+            service
+                .submit(&fixture.lease, background_plan(&fixture))
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
+        let submissions = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiProviderBackgroundSubmissionRecord>()
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("background submissions should query");
+        assert!(submissions.is_empty());
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_submission_releases_budget_when_prepare_fence_is_stale() {
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            });
+        let fixture = fixture_with_provider(mock).await;
+        fixture
+            .run_service
+            .heartbeat(&fixture.lease)
+            .await
+            .expect("test heartbeat should invalidate the original row version");
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+
+        assert!(matches!(
+            service
+                .submit(&fixture.lease, background_plan(&fixture))
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_state(&fixture.database).await, "released");
+        let submissions = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiProviderBackgroundSubmissionRecord>()
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("background submissions should query");
+        assert!(submissions.is_empty());
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_submission_requires_an_explicit_output_ceiling() {
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            });
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+        let mut plan = background_plan(&fixture);
+        plan.request.maximum_output_tokens = None;
+
+        assert!(matches!(
+            service.submit(&fixture.lease, plan).await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        let reservations = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiBudgetReservationRecord>()
+                        .limit(1)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("budget reservations should query");
+        assert!(reservations.is_empty());
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_submission_heartbeats_while_waiting_for_acknowledgement() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission("resp_background_heartbeat_1", "queued", now)
+            .with_background_delay(std::time::Duration::from_millis(1_200));
+        let fixture = fixture_with_provider(mock).await;
+        let before = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        let short_run_service = OrmAiRunService::new(
+            fixture.database.clone(),
+            Arc::new(SystemClock),
+            AiRunServiceLimits::new(Duration::seconds(3), Duration::hours(1), 16, 2, 8)
+                .expect("short test lease should validate"),
+        );
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            short_run_service,
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+
+        service
+            .submit(&fixture.lease, background_plan(&fixture))
+            .await
+            .expect("slow acknowledgement should retain its exact fence");
+        assert_eq!(fixture.mock.request_count(), 1);
+        let after = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(after.state, AiRunState::WaitingProvider.as_str());
+        assert!(after.row_version >= before.row_version + 3);
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn prior_ai_schema_migrates_to_background_submission_binding() {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        let module = AiSchemaModule;
+        let prior_entities = module
+            .entities()
+            .iter()
+            .copied()
+            .filter(|entity| entity.table_name != "graphql_orm_ai_provider_background_submissions")
+            .collect::<Vec<_>>();
+        let prior_plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "provider-background-prior-v1",
+                "prior AI schema",
+                &prior_entities,
+            )
+            .await
+            .expect("prior AI schema should plan");
+        database
+            .schema()
+            .apply_migration(&prior_plan, ApplyOptions::default())
+            .await
+            .expect("prior AI schema should apply");
+
+        let current_plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "provider-background-current-v1",
+                "current AI schema",
+                module.entities(),
+            )
+            .await
+            .expect("current AI schema should plan");
+        database
+            .schema()
+            .apply_migration(&current_plan, ApplyOptions::default())
+            .await
+            .expect("background submission table should migrate without row rewrites");
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn malformed_background_acknowledgement_closes_run_for_manual_recovery() {
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission(
+                "invalid-response-id",
+                "queued",
+                OffsetDateTime::now_utc().unix_timestamp(),
+            );
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+
+        assert!(matches!(
+            service
+                .submit(&fixture.lease, background_plan(&fixture))
+                .await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 1);
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("provider_acknowledgement_not_persisted")
+        );
+        assert!(run.lease_owner.is_none());
+        assert!(run.lease_expires_at.is_none());
+        assert!(run.lease_heartbeat_at.is_none());
+
+        let submissions = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiProviderBackgroundSubmissionRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("submission should query");
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].state, "recovery_required");
+        assert_eq!(
+            submissions[0].safe_error_code.as_deref(),
+            Some("provider_acknowledgement_not_persisted")
+        );
+        assert!(submissions[0].provider_response_id.is_none());
+        assert!(submissions[0].provider_status.is_none());
+        let reservation = AiBudgetReservationRecord::find_by_id(
+            &fixture.database,
+            &submissions[0].budget_reservation_id,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(reservation.state, "uncertain");
+
+        let outcomes = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunAttemptOutcomeRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attempt outcomes should query");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].attempt_id, fixture.lease.attempt_id());
+        assert_eq!(
+            outcomes[0].final_state,
+            AiRunState::RecoveryRequired.as_str()
+        );
+        assert_eq!(
+            outcomes[0].outcome_code,
+            "provider_acknowledgement_not_persisted"
+        );
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn swapped_background_acknowledgement_binding_requires_manual_recovery() {
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission(
+                "resp_background_swapped_1",
+                "queued",
+                OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .with_background_binding("swapped-model", 100, true);
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        );
+
+        assert!(matches!(
+            service
+                .submit(&fixture.lease, background_plan(&fixture))
+                .await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 1);
+        let submissions = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiProviderBackgroundSubmissionRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("submission should query");
+        assert_eq!(submissions.len(), 1);
+        assert_eq!(submissions[0].state, "recovery_required");
+        assert!(submissions[0].provider_store.is_none());
+        assert!(submissions[0].provider_response_id.is_none());
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
     }
 
     fn web_search_plan(fixture: &Fixture, maximum_builtin_tool_calls: u64) -> AiProviderCallPlan {

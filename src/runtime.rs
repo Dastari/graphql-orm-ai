@@ -13,8 +13,8 @@ use crate::{
     AiSecretStore, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog,
     AiToolDescriptor, AiToolId, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge,
     ConsumedAiApproval, GraphqlExecutionTargetRegistry, GraphqlRequestContextFactory, ModelRequest,
-    ProviderError, ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
-    ToolGraphqlResponse, ToolMaturity,
+    ProviderBackgroundBinding, ProviderBackgroundSubmission, ProviderError, ProviderEventStream,
+    ProviderKind, ProviderRequestContext, ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
 
@@ -458,6 +458,42 @@ impl AiRuntime {
             ));
         }
         provider.stream(request, context).await
+    }
+
+    /// Starts a registered provider background response after runtime,
+    /// capability, budget, and exact egress validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the runtime is closed, the provider is
+    /// absent or mismatched, background processing is unsupported, or any
+    /// request proof fails closed.
+    pub async fn submit_provider_background(
+        &self,
+        provider_kind: &ProviderKind,
+        request: ModelRequest,
+        context: ProviderRequestContext,
+        binding: ProviderBackgroundBinding,
+    ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        if !self.start_gate.is_ready() {
+            return Err(ProviderError::InvalidConfiguration(
+                "AI runtime is not ready".to_owned(),
+            ));
+        }
+        context.validate_request(provider_kind, &request)?;
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        if !provider.capabilities().background {
+            return Err(ProviderError::Unsupported);
+        }
+        provider.submit_background(request, context, binding).await
     }
 }
 

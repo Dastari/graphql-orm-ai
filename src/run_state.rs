@@ -21,6 +21,9 @@ pub enum AiRunState {
     WaitingTool,
     /// Waiting for the principal to reauthenticate.
     WaitingReauth,
+    /// Waiting for an exactly bound provider background response. This state
+    /// has no active worker lease and can only be advanced by reconciliation.
+    WaitingProvider,
     /// Eligible after a retry deadline.
     RetryScheduled,
     /// Restore/crash left an uncertain side effect requiring review.
@@ -43,6 +46,7 @@ impl AiRunState {
             Self::WaitingApproval => "waiting_approval",
             Self::WaitingTool => "waiting_tool",
             Self::WaitingReauth => "waiting_reauth",
+            Self::WaitingProvider => "waiting_provider",
             Self::RetryScheduled => "retry_scheduled",
             Self::RecoveryRequired => "recovery_required",
             Self::Completed => "completed",
@@ -60,6 +64,7 @@ impl AiRunState {
             "waiting_approval" => Some(Self::WaitingApproval),
             "waiting_tool" => Some(Self::WaitingTool),
             "waiting_reauth" => Some(Self::WaitingReauth),
+            "waiting_provider" => Some(Self::WaitingProvider),
             "retry_scheduled" => Some(Self::RetryScheduled),
             "recovery_required" => Some(Self::RecoveryRequired),
             "completed" => Some(Self::Completed),
@@ -84,6 +89,7 @@ impl AiRunState {
                 Self::WaitingApproval
                     | Self::WaitingTool
                     | Self::WaitingReauth
+                    | Self::WaitingProvider
                     | Self::RetryScheduled
                     | Self::Completed
                     | Self::Failed
@@ -111,6 +117,7 @@ impl AiRunState {
                 next,
                 Self::Queued | Self::Cancelled | Self::Failed | Self::RecoveryRequired
             ),
+            Self::WaitingProvider => false,
             Self::RecoveryRequired | Self::Completed | Self::Failed | Self::Cancelled => false,
         }
     }

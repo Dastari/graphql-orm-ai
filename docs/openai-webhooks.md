@@ -3,8 +3,10 @@
 The `provider-openai` feature includes a bounded verifier for the exact raw
 request format documented by OpenAI and, on SQLite/PostgreSQL, an ORM service
 that durably records a content-free receipt. This is an intake boundary only.
-It does not enable background submission, retrieve a response, resume a run,
-settle usage, or grant egress or budget authority.
+It does not authorize background submission, retrieve a response, resume a
+run, settle usage, or grant egress or budget authority. Exact submission is a
+separate fenced service described in the
+[background submission guide](openai-background.md).
 
 OpenAI documents the current delivery headers, raw-body verification rule, and
 event handling expectations in its [webhook guide](https://platform.openai.com/docs/guides/webhooks).
@@ -67,10 +69,11 @@ or generic CRUD root is involved.
 A verified event proves only possession of the configured signing secret for
 the exact delivered bytes within the replay window. It does not prove that the
 response belongs to a durable run. Supported events therefore remain
-`pending_reconciliation`. A future worker must independently re-prove the
-original run, attempt, fence, provider/profile/response, budget, egress,
-retention, and current-authority bindings before provider retrieval or any run
-mutation. Until that worker exists, intake creates no executable work.
+`pending_reconciliation`. A future worker must independently match an exact
+durable background submission and re-prove the original run, attempt, fence,
+provider/profile/response, budget, egress, retention, and current-authority
+bindings before provider retrieval or any run mutation. Until that worker
+exists, intake creates no executable work.
 
 Restore adapters must validate the deterministic receipt identity, exact
 provider/profile/event/response facts, verified-signature flag, current intake

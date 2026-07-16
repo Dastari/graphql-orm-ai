@@ -435,20 +435,40 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
-    let migration = database
+    let prior_entities = module
+        .entities()
+        .iter()
+        .copied()
+        .filter(|entity| entity.table_name != "graphql_orm_ai_provider_background_submissions")
+        .collect::<Vec<_>>();
+    let prior_migration = database
         .schema()
         .plan_migration_to_entities(
             "ai-postgres-parity-v026",
-            "graphql-orm-ai disposable PostgreSQL parity",
+            "graphql-orm-ai prior disposable PostgreSQL parity",
+            &prior_entities,
+        )
+        .await
+        .expect("prior generated AI schema should plan for PostgreSQL");
+    database
+        .schema()
+        .apply_migration(&prior_migration, ApplyOptions::default())
+        .await
+        .expect("prior generated AI schema should apply to the owned PostgreSQL database");
+    let migration = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-postgres-parity-v027",
+            "graphql-orm-ai current disposable PostgreSQL parity",
             module.entities(),
         )
         .await
-        .expect("generated AI schema should plan for PostgreSQL");
+        .expect("current generated AI schema should plan for PostgreSQL");
     database
         .schema()
         .apply_migration(&migration, ApplyOptions::default())
         .await
-        .expect("generated AI schema should apply to the owned PostgreSQL database");
+        .expect("background binding schema should migrate in owned PostgreSQL");
 
     let sessions = OrmAiSessionService::new(
         database.clone(),

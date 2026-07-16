@@ -21,8 +21,10 @@ Exactly one persistence backend is currently required:
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
 Responses adapter and its separately installed exact-reference file-deletion
 service. It also enables raw-body OpenAI webhook verification and, with a
-writable backend, content-free durable receipt intake; neither capability
-enables background submission or reconciliation. `provider-anthropic` enables
+writable backend, content-free durable receipt intake and exact initial
+background-response submission. Submission does not enable provider output
+retrieval, webhook reconciliation, usage settlement, or run completion.
+`provider-anthropic` enables
 the native Anthropic Messages
 adapter with a fixed official endpoint and secret-store credential reference.
 `provider-xai` enables the native xAI Responses adapter with a fixed official
@@ -57,6 +59,11 @@ camelCase to PascalCase.
    headers, verify them with one exact-profile `OpenAiWebhookVerifier`, then
    pass only the verified event to `OrmAiProviderWebhookReceiptService` and
    acknowledge after commit. See [verified OpenAI webhook intake](openai-webhooks.md).
+   If submitting an OpenAI background response, install
+   `OrmAiOpenAiBackgroundSubmissionService` and pass only an exact initial,
+   tool-free, attachment-free provider plan with authorized temporary provider
+   retention. Accepted runs remain parked until a separate reconciler exists;
+   see [OpenAI background submission](openai-background.md).
 7. Install `OrmAiSkillCatalogService` as `Arc<dyn AiSkillCatalogService>` when
    composing the separate skill roots. Supply exact scope access, recent-MFA,
    trusted clock, and content-protection implementations. Skill resolution is
@@ -337,5 +344,7 @@ always followed by fresh ordinary resolver authorization in that path. See the
 OpenAI file deletion is implemented through the host-only attachment cleanup
 worker; see the [attachment guide](attachments.md). Exact raw-body OpenAI
 webhook verification and content-free durable receipt intake are implemented,
-while response retrieval and run reconciliation remain closed; see the
-[webhook intake guide](openai-webhooks.md).
+and exact initial background submission can park a response-bound run without
+a lease. Receipt-to-submission matching, response retrieval, settlement, and
+run reconciliation remain closed; see the [webhook intake guide](openai-webhooks.md)
+and [background submission guide](openai-background.md).

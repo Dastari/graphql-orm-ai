@@ -617,6 +617,14 @@ impl OrmAiRunService {
         &self.database
     }
 
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) const fn lease_ttl(&self) -> Duration {
+        self.limits.lease_ttl
+    }
+
     /// Claims the oldest eligible queued/retry-scheduled run.
     ///
     /// The claim and immutable attempt fact commit atomically. Concurrent
@@ -3762,7 +3770,7 @@ fn session_matches_tool_finish(session: &AiSessionRecord, finish: &PreparedToolC
         && session.tenant_id == finish.expected_tenant_id
 }
 
-fn exact_state(state: &str) -> AiRunRecordWhereInput {
+pub(crate) fn exact_state(state: &str) -> AiRunRecordWhereInput {
     AiRunRecordWhereInput {
         state: Some(StringFilter {
             eq: Some(state.to_owned()),
@@ -3772,7 +3780,7 @@ fn exact_state(state: &str) -> AiRunRecordWhereInput {
     }
 }
 
-async fn load_and_validate_active_lease(
+pub(crate) async fn load_and_validate_active_lease(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     lease: &AiRunLease,
     now: OffsetDateTime,
@@ -3805,7 +3813,7 @@ async fn load_and_validate_active_lease(
     Ok(current)
 }
 
-fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmPublicError> {
+pub(crate) fn lease_from_record(record: &AiRunRecord) -> Result<AiRunLease, OrmPublicError> {
     let principal_reference = serde_json::from_value(record.principal_reference.clone())
         .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
     let attempt_id = record
@@ -3864,7 +3872,7 @@ fn reservation_usage_matches(
     )
 }
 
-async fn append_attempt_outcome(
+pub(crate) async fn append_attempt_outcome(
     tx: &mut MutationContext<'_, DefaultWriteBackend>,
     lease: &AiRunLease,
     final_state: AiRunState,
@@ -3985,7 +3993,7 @@ fn valid_safe_code(code: &str) -> bool {
         })
 }
 
-fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
+pub(crate) fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(value.unix_timestamp())
         .expect("an existing OffsetDateTime timestamp remains representable")
 }

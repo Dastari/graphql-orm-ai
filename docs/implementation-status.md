@@ -17,11 +17,12 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.46.0`) and 39 private records
+- AI schema-module identity (currently version `0.47.0`) and 40 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
-  proposals/items, checkpoints, skills/versions, usage, webhook receipts,
-  audit, secret cleanup, egress decisions, and restore readiness.
+  proposals/items, checkpoints, skills/versions, usage, background submissions,
+  webhook receipts, audit, secret cleanup, egress decisions, and restore
+  readiness.
 - Private repository generation for SQLite/PostgreSQL AI records without
   composing or exporting generic internal CRUD roots; MSSQL remains
   schema-only until write parity exists.
@@ -188,6 +189,18 @@ production-ready behavior.
   are ignored durably. Restore preflight makes an invalid deterministic
   identity/binding/state/audit count fatal. No provider output is retrieved and
   no run is mutated.
+- Exact initial OpenAI background submission under an active fenced run. The
+  ORM service binds one tool-free/attachment-free request to the exact
+  run/attempt/generation/profile/model/request hash, uncertain budget, and
+  model-inference egress allow event before performing one non-retried create.
+  Known pre-transport failures release unused capacity and the worker renews
+  the same fence while awaiting the bounded acknowledgement. The native adapter
+  forces non-streaming background mode and exact opaque echoed metadata. The
+  acknowledgement also binds exact model, output ceiling, and provider storage
+  choice. Acceptance parks the run lease-free as `WaitingProvider`; transport/
+  acknowledgement ambiguity closes it as `RecoveryRequired` with an immutable
+  attempt outcome. Restore makes invalid submission bindings fatal and never
+  replays restored waiting work.
 - Provider-neutral exact attachment reopening with private-field request and
   resolved payloads, deployment raw-byte/cardinality limits, current owner/
   session/scope checks, released/clean/message-linked enforcement, object
@@ -438,13 +451,14 @@ production-ready behavior.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- OpenAI background submission, receipt-to-run reconciliation, provider output
-  retrieval, and provider-persistent file upload/search, plus richer provider
+- OpenAI receipt-to-submission/run reconciliation, provider output retrieval,
+  and provider-persistent file upload/search, plus richer provider
   file-type preflight and full built-in result normalization. Exact raw-body
-  webhook verification and durable content-free receipt intake are implemented,
-  but receipts intentionally remain pending until an independently fenced
-  reconciler exists. Exact inline image/file input remains independently gated
-  by host MIME policy, budget, egress, current authority, and reopening limits.
+  webhook verification, durable content-free receipt intake, and exact initial
+  background submission are implemented, but accepted runs and receipts remain
+  inert until an independently fenced reconciler exists. Exact inline image/
+  file input remains independently gated by host MIME policy, budget, egress,
+  current authority, and reopening limits.
 - Privileged uncertain-call recovery and complete retention/purge application.
   Budget-policy management, ordinary transactional reservation/reconciliation,
   authenticated usage reporting, and the content-free operational telemetry
@@ -474,10 +488,11 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Complete the OpenAI background lifecycle after this receipt-only intake:
-   bind submission to the exact run/attempt/fence/profile/response and add a
-   bounded reconciler that independently re-proves current authority, budget,
-   egress, retention, and provider output before any run mutation.
+1. Complete the OpenAI background lifecycle after exact submission and receipt
+   intake: add a bounded reconciler that matches the exact prepared submission,
+   verified receipt, and provider response, then independently re-proves
+   current authority, budget, egress, retention, usage, and provider output
+   before any run mutation.
 2. Add provider-persistent file upload/search behind independent authority,
    egress, budget, fencing, retention, and restore proofs, building on exact
    profile-bound deletion. Extend authoritative unit pricing only when each
@@ -494,27 +509,29 @@ intentional.
 
 ## Current verification
 
-- `cargo test --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness`:
-  full SQLite, OpenAI/Anthropic/xAI/compatible mocks, and native Ollama loopback-mock
-  coverage passed; one explicit live-provider test remained ignored.
-  Deterministic installed-harness process conformance and generated private-ORM
-  doctests were included; the latter remained intentionally ignored.
-- `cargo clippy --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings`:
-  passed.
-- Warnings-denied Rustdoc passed for all native and profiled provider adapters and
-  `graphql-case-pascal`.
-- PascalCase SDL contract test passed with no camelCase aliases.
-- `cargo check --no-default-features --features postgres`: passed, compile-only.
-- Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
-  ownership-labeled container and unique database were removed afterward.
-- `cargo check --no-default-features --features mssql`: passed, schema-only.
-- The prior `0.48.0`/`0.45.0` exact OpenAI deletion release matrix and branch
-  CI run are fully green. The current `0.49.0`/`0.46.0` verified webhook-intake
-  slice passes the full local release matrix, legacy empty-placeholder schema
-  upgrade, concurrent SQLite and owned-disposable-PostgreSQL receipt parity,
-  package/privacy review, backend isolation, and SemVer comparison against
-  0.48.0. The ordinary committed release-policy gate and branch CI remain
-  required before review.
+- The complete `0.50.0` SQLite/provider matrix passed: 148 unit tests, all
+  integration tests, one explicit live OpenAI test ignored, and 31 generated
+  private-ORM doctests intentionally ignored.
+- Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
+  with all native/profiled provider adapters and the installed harness.
+  PascalCase SDL and missing-docs Rustdoc also passed with no lowercase aliases.
+- PostgreSQL and MSSQL feature combinations pass compile-only checks. Backend
+  dependency isolation remains exact: SQLite excludes `sqlx-postgres`,
+  PostgreSQL excludes `sqlx-sqlite`, MSSQL excludes both, and the combined
+  SQLite/PostgreSQL build resolves both.
+- SemVer comparison against pushed `0.49.0` passed. Package-file and tracked-
+  diff privacy review excludes ignored handoffs/plans, credentials, local
+  paths, and project-specific references.
+- The current owned-disposable-PostgreSQL prior-to-current migration rehearsal
+  is blocked by a confirmed pinned-`graphql-orm` introspection defect:
+  constraint-backing unique indexes are planned as ordinary `DROP INDEX`
+  operations. The test-owned container was removed. The rehearsal remains
+  unchanged pending a reviewed upstream fix; no downstream SQL or live/shared
+  database workaround is permitted.
+- Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
+  The `0.50.0`/schema `0.47.0` work may be carried on the draft branch as a
+  durable checkpoint, but it is not release-ready until the reviewed upstream
+  pin is integrated and the owned PostgreSQL upgrade plus branch CI pass.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

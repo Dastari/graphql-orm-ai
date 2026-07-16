@@ -34,6 +34,7 @@ fn restore_never_replays_uncertain_external_effect() {
     let uncertain_run_id = AiRunId::new();
     let safe_run_id = AiRunId::new();
     let approval_wait_run_id = AiRunId::new();
+    let provider_wait_run_id = AiRunId::new();
     let checkpointed_mutation_run_id = AiRunId::new();
     let uncheckpointed_mutation_run_id = AiRunId::new();
     let plan = reconciler.plan(&AiRestoreSnapshotFacts {
@@ -60,6 +61,14 @@ fn restore_never_replays_uncertain_external_effect() {
                 run_id: approval_wait_run_id,
                 state: AiRunState::WaitingApproval,
                 external_effect: AiExternalEffectState::None,
+                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
+                has_provider_continuation: true,
+                has_provider_file: false,
+            },
+            AiRestoredRun {
+                run_id: provider_wait_run_id,
+                state: AiRunState::WaitingProvider,
+                external_effect: AiExternalEffectState::ProvenIdempotent,
                 coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
                 has_provider_continuation: true,
                 has_provider_file: false,
@@ -92,6 +101,7 @@ fn restore_never_replays_uncertain_external_effect() {
         invalid_coordinator_checkpoint_count: 0,
         invalid_context_checkpoint_count: 0,
         invalid_provider_webhook_receipt_count: 0,
+        invalid_provider_background_submission_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
@@ -151,6 +161,16 @@ fn restore_never_replays_uncertain_external_effect() {
         AiRestoredRunDisposition::RecoveryRequired
     );
     assert!(approval_wait.reverify_provider_continuation);
+    let provider_wait = plan
+        .run_actions
+        .iter()
+        .find(|action| action.run_id == provider_wait_run_id)
+        .expect("provider wait action should exist");
+    assert_eq!(
+        provider_wait.disposition,
+        AiRestoredRunDisposition::RecoveryRequired
+    );
+    assert!(provider_wait.reverify_provider_continuation);
     assert_eq!(plan.approvals_to_revalidate, 2);
     assert_eq!(plan.consents_to_revalidate, 3);
     assert_eq!(plan.fatal_issue_count(), 0);
@@ -197,16 +217,17 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         invalid_coordinator_checkpoint_count: 1,
         invalid_context_checkpoint_count: 1,
         invalid_provider_webhook_receipt_count: 1,
+        invalid_provider_background_submission_count: 1,
         invalid_ui_intent_event_count: 1,
         invalid_session_retention_count: 1,
         duplicate_stream_sequence_count: 1,
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 14);
+    assert_eq!(plan.fatal_issue_count(), 15);
     assert_eq!(
         plan.readiness_report_after_apply(true).fatal_issue_count,
-        14
+        15
     );
 }
 
@@ -227,6 +248,7 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         invalid_coordinator_checkpoint_count: 0,
         invalid_context_checkpoint_count: 0,
         invalid_provider_webhook_receipt_count: 0,
+        invalid_provider_background_submission_count: 0,
         invalid_ui_intent_event_count: 0,
         invalid_session_retention_count: 0,
         duplicate_stream_sequence_count: 0,
@@ -241,8 +263,13 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         .as_object_mut()
         .expect("restore facts should be an object")
         .remove("invalid_provider_webhook_receipt_count");
+    value
+        .as_object_mut()
+        .expect("restore facts should be an object")
+        .remove("invalid_provider_background_submission_count");
     let decoded: AiRestoreSnapshotFacts =
         serde_json::from_value(value).expect("legacy restore facts should decode");
     assert_eq!(decoded.invalid_context_checkpoint_count, 0);
     assert_eq!(decoded.invalid_provider_webhook_receipt_count, 0);
+    assert_eq!(decoded.invalid_provider_background_submission_count, 0);
 }

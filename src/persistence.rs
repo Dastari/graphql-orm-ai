@@ -1669,6 +1669,80 @@ pub(crate) struct AiUsageEntryRecord {
     pub created_at: i64,
 }
 
+/// Content-free binding for one fenced provider background submission.
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(
+    table = "graphql_orm_ai_provider_background_submissions",
+    plural = "GraphqlOrmAiProviderBackgroundSubmissions",
+    default_sort = "created_at ASC"
+)]
+pub(crate) struct AiProviderBackgroundSubmissionRecord {
+    /// Opaque deterministic submission identity embedded in provider metadata.
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    /// Full SHA-256 collision check for `id`.
+    #[unique]
+    pub submission_key: String,
+    /// Exact owning session.
+    #[filterable(type = "uuid")]
+    pub session_id: graphql_orm::uuid::Uuid,
+    /// Exact owning run.
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    /// Original fenced attempt. One attempt may submit at most one response.
+    #[unique]
+    #[filterable(type = "uuid")]
+    pub attempt_id: graphql_orm::uuid::Uuid,
+    /// Original lease generation.
+    pub lease_generation: i64,
+    /// Exact provider family.
+    pub provider_kind: String,
+    /// Exact logical provider profile.
+    pub provider_profile_id: String,
+    /// Exact requested model/routing key.
+    pub provider_model: String,
+    /// Exact provider-enforced output-token ceiling.
+    pub maximum_output_tokens: i64,
+    /// Whether an acknowledgement reports durable response storage.
+    pub provider_store: Option<bool>,
+    /// SHA-256 of the canonical provider-neutral model request; never content.
+    pub request_hash: String,
+    /// Atomic budget reservation left uncertain until terminal reconciliation.
+    #[unique]
+    pub budget_reservation_id: graphql_orm::uuid::Uuid,
+    /// Durable allow decision for the exact model-inference manifest.
+    pub egress_decision_id: graphql_orm::uuid::Uuid,
+    /// Exact redacted model-inference manifest hash.
+    pub egress_manifest_hash: String,
+    /// Provider response reference returned by a successful create call.
+    #[unique]
+    pub provider_response_id: Option<String>,
+    /// Bounded provider status observed in the create acknowledgement.
+    pub provider_status: Option<String>,
+    /// Durable local lifecycle state.
+    #[filterable(type = "string")]
+    pub state: String,
+    /// Safe redacted failure/recovery code, when classified later.
+    pub safe_error_code: Option<String>,
+    /// Preparation time before external I/O.
+    #[sortable]
+    pub created_at: i64,
+    /// Provider response creation time from the acknowledgement.
+    pub provider_created_at: Option<i64>,
+    /// Local time when the acknowledgement was fenced into the wait state.
+    pub submitted_at: Option<i64>,
+    /// CAS version.
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
 /// Idempotent receipt for a provider background/webhook event.
 #[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
 #[cfg_attr(
@@ -1872,7 +1946,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.46.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.47.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -1948,6 +2022,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiSkillRecord::metadata(),
                 AiSkillVersionRecord::metadata(),
                 AiUsageEntryRecord::metadata(),
+                AiProviderBackgroundSubmissionRecord::metadata(),
                 AiProviderWebhookReceiptRecord::metadata(),
                 AiAuditEventRecord::metadata(),
                 AiSecretCleanupRecord::metadata(),

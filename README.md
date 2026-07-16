@@ -25,9 +25,10 @@ waits without polling, resuming, or executing them.
 
 ## What it provides
 
-- An ORM-owned `AiSchemaModule` with 39 private records for configuration,
+- An ORM-owned `AiSchemaModule` with 40 private records for configuration,
   protected chat history, runs, attempts, tool calls, proposals, approvals,
-  budgets, usage, egress, audit, skills, and restore readiness.
+  budgets, usage, provider background bindings, egress, audit, skills, and
+  restore readiness.
 - Multiple owner-isolated, archivable chat sessions per principal with
   protected message blocks, stable pagination, idempotent send, and resumable
   session-event subscriptions designed for virtualized frontends.
@@ -209,6 +210,14 @@ waits without polling, resuming, or executing them.
 - Bounded exact-raw-body OpenAI webhook verification plus atomic content-free
   receipt/audit intake for terminal response events. Intake is idempotent and
   profile-bound but deliberately does not retrieve output or mutate a run.
+- Exact one-call OpenAI background submission for an initial tool-free,
+  attachment-free turn. A content-free ORM record binds the active
+  run/attempt/fence/profile/model/request/output-ceiling/budget/egress proof to
+  opaque provider metadata; the worker heartbeats the exact fence while
+  awaiting one create acknowledgement that must echo the exact model, ceiling,
+  and storage choice. Acceptance parks the run without a lease, while ambiguity
+  closes it with an immutable attempt outcome for manual recovery and is never
+  retried.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -251,7 +260,7 @@ Exactly one persistence backend should be selected:
 | `sqlite` | yes | ORM persistence and in-memory automated tests |
 | `postgres` | no | ORM persistence plus test-owned disposable-Docker parity |
 | `mssql` | no | Schema/compile support pending ORM write parity |
-| `provider-openai` | no | Native OpenAI Responses/SSE, exact file deletion, and verified webhook intake |
+| `provider-openai` | no | Native OpenAI Responses/SSE and exact background submission, file deletion, and verified webhook intake |
 | `provider-anthropic` | no | Native Anthropic Messages/SSE: text/JSON, structured output, stateless application tools |
 | `provider-xai` | no | Native xAI Responses/SSE: text/JSON, structured output, strict parallel application tools |
 | `provider-ollama` | no | Native Ollama chat: text, exact images, structured output, stateless application tools |
@@ -356,7 +365,8 @@ Production blockers include partial/multi-call and stateless supervised
 tool-batch adoption, code-interpreter/image-generation
 pricing dimensions, privileged uncertain-call
 recovery, completion of deleting-session/provider-raw/audit retention workflows,
-per-item proposal review, provider-persistent file upload/search lifecycle,
+per-item proposal review, OpenAI background response reconciliation,
+provider-persistent file upload/search lifecycle,
 attachment quotas/derivative production, production mutable secret
 stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,
