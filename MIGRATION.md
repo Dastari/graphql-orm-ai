@@ -4,6 +4,63 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: authoritative provider built-in unit pricing (crate 0.46.0 to 0.47.0; schema 0.43.0 to 0.44.0)
+
+Apply AI schema module `0.44.0` while provider workers, pricing administration,
+budget reconciliation, backup/restore, and runtime start are closed. The
+generated migration keeps 39 private entities and adds two nonnegative,
+defaulted columns to each append-only private pricing version:
+`web_search_microunits_per_call` and `file_search_microunits_per_call`.
+Existing versions receive zero for both dimensions; no application-authored
+SQL, row copy, or content rewrite is required. Create a new immutable pricing
+version before enabling either built-in rather than changing an old row.
+
+`CreateAiPricingPolicyInput` and `AiPricingPolicyView` add both rate fields.
+They are deployment-supplied exact integer rates: the crate does not embed,
+discover, or refresh provider prices. Nonzero administration remains denied
+until the host explicitly configures
+`AiPricingCatalogManagementLimits::with_maximum_builtin_tool_microunits_per_call`.
+Restore collectors must validate both new rates, the exact scope/provider/model
+binding, unique version reference, and creation-audit linkage before reporting
+zero `invalid_pricing_policy_count`.
+
+Preflight callers must populate `AiPricingQuoteRequest::builtin_tools` with the
+distinct enabled `AiPricedBuiltinToolKind` values and copy the exact shared
+`ModelRequest::maximum_builtin_tool_calls` value into
+`maximum_builtin_tool_calls`. With no supported built-ins, pass an empty vector
+and zero. A supported quote reserves the shared maximum as `tool_units` and
+prices every possible call at the greatest enabled per-call rate, so a mixed
+web/file-search request remains conservative.
+
+Every `ModelRequest` literal must initialize `maximum_builtin_tool_calls`. Use `None`
+when no provider built-in is exposed. A built-in request requires `Some(1..=64)`;
+the native OpenAI adapter sends that value as `max_tool_calls` and the executor
+rejects a request ceiling above its deployment-owned stream limit.
+Configure that independent local limit with
+`AiProviderCallLimits::with_maximum_builtin_tool_calls`; the existing
+`with_maximum_tool_calls` continues to bound custom application-tool calls.
+`AiBudgetReservation::authorize_provider_call` adds
+`requested_maximum_tool_units`; pass zero for requests without built-ins.
+The resulting opaque proof and `ProviderRequestContext` recheck both output and
+tool ceilings immediately before transport.
+
+`AiProviderUsageObservation::builtin_tools` is replaced by
+`builtin_usage`, returning `AiProviderBuiltinUsage`. Accounting now sees only
+exact normalized completed counts, never the requested tool configuration.
+Unknown, duplicate, unmatched, over-limit, or incomplete start/completion pairs
+fail after the transport boundary and leave the reservation uncertain.
+Requested-but-unused built-ins contribute zero units. `OrmAiPricingService`
+settles exact web/file-search counts; completed code-interpreter or
+image-generation calls remain fail-closed because their authoritative billing
+dimensions are not yet modeled.
+
+This is an intentional pre-1.0 breaking Rust API, GraphQL input/output SDL,
+private schema, budget-proof, provider-transport, accounting, backup, and
+restore-validation change. It adds no entity, index, constraint, credential,
+provider-persistent file, background response, or webhook lifecycle. Existing
+pricing rows need no data rewrite beyond the generated defaulted-column
+migration.
+
 ## Unreleased: content-free operational telemetry (crate 0.45.0 to 0.46.0; schema remains 0.43.0)
 
 No database migration, private entity change, GraphQL SDL change, persistent

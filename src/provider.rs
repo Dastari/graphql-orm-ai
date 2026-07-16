@@ -280,6 +280,12 @@ pub struct ModelRequest {
     pub tools: Vec<ModelToolDefinition>,
     /// Enabled provider built-ins, each separately approved for egress.
     pub builtin_tools: Vec<ModelBuiltinTool>,
+    /// Provider-enforced shared ceiling for provider-hosted built-in calls.
+    ///
+    /// This must be present exactly when `builtin_tools` is nonempty so the
+    /// matching budget reservation can conservatively cover provider-hosted
+    /// units without authorizing an unrelated wire ceiling.
+    pub maximum_builtin_tool_calls: Option<u64>,
     /// Optional structured-output schema.
     pub output_schema: Option<serde_json::Value>,
     /// Maximum requested output tokens.
@@ -302,6 +308,9 @@ impl ModelRequest {
             || self.input.len() > 256
             || self.tools.len() > 128
             || self.builtin_tools.len() > 16
+            || self
+                .maximum_builtin_tool_calls
+                .is_some_and(|calls| calls == 0 || calls > 64)
             || self
                 .maximum_output_tokens
                 .is_some_and(|tokens| tokens == 0 || tokens > u64::from(u32::MAX))
@@ -424,10 +433,21 @@ impl ModelRequest {
                 return Err(ProviderError::InvalidRequest);
             }
         }
+        if self.builtin_tools.is_empty() != self.maximum_builtin_tool_calls.is_none() {
+            return Err(ProviderError::InvalidRequest);
+        }
         if self.serialized_metadata_bytes().is_none() {
             return Err(ProviderError::InvalidRequest);
         }
         Ok(())
+    }
+
+    pub(crate) fn maximum_builtin_tool_calls(&self) -> u64 {
+        if self.builtin_tools.is_empty() {
+            0
+        } else {
+            self.maximum_builtin_tool_calls.unwrap_or(0)
+        }
     }
 
     /// Returns the conservative byte ceiling an inference egress manifest must
@@ -896,6 +916,11 @@ impl ProviderRequestContext {
     }
 
     /// Validates that each request capability has a matching exact transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for an invalid request, expired or insufficient
+    /// budget proof, missing/mismatched egress proof, or unresolved attachment.
     pub fn validate_request(
         &self,
         provider_kind: &ProviderKind,
@@ -903,11 +928,13 @@ impl ProviderRequestContext {
     ) -> Result<(), ProviderError> {
         request.validate()?;
         let requested_maximum_output_tokens = request.maximum_output_tokens.unwrap_or(0);
+        let requested_maximum_tool_units = request.maximum_builtin_tool_calls();
         if !self.budget.matches(
             self.run_id,
             provider_kind,
             &request.model,
             requested_maximum_output_tokens,
+            requested_maximum_tool_units,
             OffsetDateTime::now_utc(),
         ) {
             return Err(ProviderError::BudgetDenied);

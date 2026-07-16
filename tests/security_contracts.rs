@@ -240,7 +240,7 @@ fn tool_catalog_rejects_ai_control_plane_and_introspection() {
 }
 
 #[test]
-fn budget_proof_is_bound_to_exact_provider_model_and_output_ceiling() {
+fn budget_proof_is_bound_to_exact_provider_model_and_unit_ceilings() {
     let run_id = AiRunId::new();
     let attempt_id = Uuid::new_v4();
     let now = OffsetDateTime::now_utc();
@@ -254,6 +254,7 @@ fn budget_proof_is_bound_to_exact_provider_model_and_output_ceiling() {
         "pricing-v1",
         AiBudgetAmounts {
             output_tokens: 256,
+            tool_units: 2,
             runs: 1,
             ..AiBudgetAmounts::default()
         },
@@ -270,6 +271,7 @@ fn budget_proof_is_bound_to_exact_provider_model_and_output_ceiling() {
                 &ProviderKind::OpenAi,
                 "model-a",
                 256,
+                2,
                 now,
             )
             .is_ok()
@@ -282,6 +284,7 @@ fn budget_proof_is_bound_to_exact_provider_model_and_output_ceiling() {
             &ProviderKind::OpenAi,
             "model-b",
             256,
+            2,
             now,
         ),
         Err(ProviderError::BudgetDenied)
@@ -294,6 +297,20 @@ fn budget_proof_is_bound_to_exact_provider_model_and_output_ceiling() {
             &ProviderKind::OpenAi,
             "model-a",
             257,
+            2,
+            now,
+        ),
+        Err(ProviderError::BudgetDenied)
+    ));
+    assert!(matches!(
+        reservation.authorize_provider_call(
+            run_id,
+            attempt_id,
+            7,
+            &ProviderKind::OpenAi,
+            "model-a",
+            256,
+            3,
             now,
         ),
         Err(ProviderError::BudgetDenied)

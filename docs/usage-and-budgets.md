@@ -69,11 +69,12 @@ Creation additionally requires recent MFA and deployment-owned
 commit in one state-machine transaction.
 
 Each row binds an exact scope, provider family, model, and globally unique
-version reference. Fixed-call and per-million input, cached-input, and output
-rates are non-negative integer microunits. Cached input cannot cost more than
-ordinary input. Rows are append-only: there is no update, delete, activation,
-or implicit latest-version lookup. Rate changes create a new reference, while
-existing reservations and uncertain work retain the old one.
+version reference. Fixed-call, per-million input/cached-input/output, and
+per-call web/file-search rates are non-negative integer microunits. Cached
+input cannot cost more than ordinary input. Rows are append-only: there is no
+update, delete, activation, or implicit latest-version lookup. Rate changes
+create a new reference, while existing reservations and uncertain work retain
+the old one.
 
 `OrmAiPricingService` implements three contracts:
 
@@ -81,14 +82,30 @@ existing reservations and uncertain work retain the old one.
 - `AiPricingQuoteService` for a conservative pre-transport estimate bound to
   exact scope/provider/model/version; and
 - `AiProviderUsageAccounting` for authoritative post-transport cached and
-  non-cached token settlement under that same immutable version.
+  non-cached token plus completed web/file-search settlement under that same
+  immutable version.
 
 The quote treats every estimated input token as non-cached. Settlement uses
 the provider-reported cached subset. Each integer-priced dimension rounds up
-independently and all multiplication/addition is checked. Provider built-ins
-are rejected by this concrete accountant because requested tools do not prove
-billable provider units; a deployment enabling them must supply a custom
-complete accountant until authoritative unit catalogs are available.
+independently and all multiplication/addition is checked. For web/file search,
+the quote binds distinct enabled `AiPricedBuiltinToolKind` values and the exact
+shared provider tool-call ceiling, then reserves that many `tool_units` at the
+greatest enabled rate. Settlement ignores advertised-but-unused tools and
+charges only exact normalized start/completion pairs. The crate never embeds
+or fetches current provider prices: administrators append exact deployment-
+reviewed rates, and nonzero built-in rates remain disabled until the host sets
+an independent `maximum_builtin_tool_microunits_per_call` management ceiling.
+
+Every built-in-enabled `ModelRequest` requires
+`maximum_builtin_tool_calls`; copy that same ceiling into the pricing quote and
+reserve its returned amounts. The
+opaque provider budget proof rechecks the reserved tool-unit ceiling before
+transport, while
+`AiProviderCallLimits::with_maximum_builtin_tool_calls` sets an independent
+deployment ceiling. The existing `with_maximum_tool_calls` continues to bound
+custom application-tool calls. Completed code-interpreter and image-generation
+calls remain unsupported by the concrete accountant because their complete
+authoritative billing dimensions are not modeled.
 
 ## Reporting authorization
 
@@ -149,10 +166,10 @@ failure closes the query.
 ## Migration, backup, and restore
 
 The usage ledger was introduced by schema module `0.17.0`; current deployments
-apply module `0.19.0`, which additionally indexes deterministic budget-policy
-scope keys and adds the append-only immutable pricing catalog. Keep workers,
-configuration writes, and readers closed during each
-managed migration. Unsupported legacy private usage rows must be proven from
+apply module `0.44.0`, whose append-only immutable pricing catalog includes
+defaulted web/file-search per-call rates. Keep workers, configuration writes,
+and readers closed during each managed migration. Unsupported legacy private
+usage rows must be proven from
 complete committed reservation evidence or removed; never fabricate a binding.
 Existing committed reservations are not automatically treated as historical
 usage.
@@ -167,5 +184,5 @@ reconciliation succeeds. Budget-policy validation similarly populates
 `invalid_budget_policy_count`; a nonzero value is fatal.
 Pricing-catalog validation similarly populates
 `invalid_pricing_policy_count`; reject duplicate references, scope-key or
-provider/model swaps, invalid rates, and missing creation-audit linkage before
-reporting zero.
+provider/model swaps, negative token or built-in rates, invalid cached-rate
+ordering, and missing creation-audit linkage before reporting zero.

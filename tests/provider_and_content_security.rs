@@ -16,6 +16,7 @@ fn request(model: &str) -> ModelRequest {
         continuation_mode: ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
+        maximum_builtin_tool_calls: None,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -77,6 +78,7 @@ fn budget(
         AiBudgetAmounts {
             input_tokens: 1_000,
             output_tokens: 64,
+            tool_units: 64,
             runs: 1,
             ..AiBudgetAmounts::default()
         },
@@ -89,6 +91,7 @@ fn budget(
         1,
         &provider_kind,
         model,
+        64,
         64,
         OffsetDateTime::now_utc(),
     )
@@ -148,6 +151,7 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
     web_request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
         allowed_domains: vec!["example.com".to_owned()],
     }];
+    web_request.maximum_builtin_tool_calls = Some(64);
     let provider = MockProvider::new(vec![ProviderEvent::ResponseCompleted {
         response_id: Some("mock".to_owned()),
     }]);
@@ -182,6 +186,22 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
 
 #[tokio::test]
 async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
+    let mut mismatched_ceiling = request("test-model");
+    mismatched_ceiling.maximum_builtin_tool_calls = Some(1);
+    assert!(matches!(
+        mismatched_ceiling.validate(),
+        Err(ProviderError::InvalidRequest)
+    ));
+
+    mismatched_ceiling.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+        allowed_domains: vec!["example.com".to_owned()],
+    }];
+    mismatched_ceiling.maximum_builtin_tool_calls = None;
+    assert!(matches!(
+        mismatched_ceiling.validate(),
+        Err(ProviderError::InvalidRequest)
+    ));
+
     let mut invalid = request("test-model");
     invalid.builtin_tools = vec![
         ModelBuiltinTool::WebSearch {
@@ -191,6 +211,7 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
             allowed_domains: vec!["other.example".to_owned()],
         },
     ];
+    invalid.maximum_builtin_tool_calls = Some(2);
     assert!(matches!(
         invalid.validate(),
         Err(ProviderError::InvalidRequest)
@@ -199,6 +220,7 @@ async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
     invalid.builtin_tools = vec![ModelBuiltinTool::WebSearch {
         allowed_domains: vec!["https://example.com/path".to_owned()],
     }];
+    invalid.maximum_builtin_tool_calls = Some(1);
     assert!(matches!(
         invalid.validate(),
         Err(ProviderError::InvalidRequest)
@@ -301,6 +323,7 @@ async fn stateless_replay_requires_one_unique_proof_for_every_tool_result() {
         continuation_mode: ModelContinuationMode::StatelessReplay,
         tools: vec![definition],
         builtin_tools: Vec::new(),
+        maximum_builtin_tool_calls: None,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };
@@ -391,6 +414,7 @@ async fn attachment_egress_is_bound_to_exact_id_checksum_and_bytes() {
         continuation_mode: ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
+        maximum_builtin_tool_calls: None,
         output_schema: None,
         maximum_output_tokens: Some(64),
     };

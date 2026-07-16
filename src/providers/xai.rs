@@ -202,6 +202,7 @@ mod tests {
                 strict: true,
             }],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
@@ -265,6 +266,7 @@ mod tests {
             request
                 .maximum_output_tokens
                 .expect("request should have an output bound"),
+            0,
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");

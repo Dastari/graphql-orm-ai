@@ -395,6 +395,10 @@ pub(crate) struct AiPricingPolicyRecord {
     pub input_microunits_per_million: i64,
     pub cached_input_microunits_per_million: i64,
     pub output_microunits_per_million: i64,
+    #[graphql_orm(default = "0")]
+    pub web_search_microunits_per_call: i64,
+    #[graphql_orm(default = "0")]
+    pub file_search_microunits_per_call: i64,
     pub created_by_principal_kind: String,
     pub created_by_subject: String,
     #[filterable(type = "number")]
@@ -1856,7 +1860,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.43.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.44.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

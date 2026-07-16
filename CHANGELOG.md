@@ -5,11 +5,28 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.46.0` while the
-AI schema module remains `0.43.0`. It keeps 39 private entities and adds a
-content-free, exporter-neutral operational telemetry contract.
+This development line advances the pre-1.0 crate version to `0.47.0` and AI
+schema module to `0.44.0`. It keeps 39 private entities and adds authoritative
+provider-hosted web/file-search unit accounting.
 
 ### Added
+
+- Immutable pricing versions now carry deployment-supplied web-search and
+  file-search microunits per completed call. `AiPricingQuoteRequest` binds a
+  distinct supported built-in set and one shared provider-enforced call
+  ceiling; conservative quotes reserve that many tool units at the greatest
+  enabled rate. The crate embeds no provider price and performs no network
+  price lookup.
+- `AiProviderBuiltinUsage` exposes only authoritative counts derived from exact
+  normalized start/completion pairs. Requested-but-unused built-ins cost zero;
+  unknown, duplicate, unmatched, over-limit, or incomplete pairs fail closed.
+  Concrete settlement charges exact completed web/file-search counts while
+  code-interpreter and image-generation units remain unsupported.
+- `ModelRequest::maximum_builtin_tool_calls` is required when provider
+  built-ins are enabled. The native OpenAI adapter sends it as
+  `max_tool_calls`, the executor enforces an independent deployment-owned
+  built-in bound, and the opaque budget proof now binds the reserved tool-unit
+  ceiling before transport.
 
 - `AiOperationalTelemetrySink`, `AiOperationalTelemetry`, and typed provider,
   durable run, application/internal tool, expired-run recovery, retention, and
@@ -83,6 +100,12 @@ content-free, exporter-neutral operational telemetry contract.
   artifacts before parent attachments and appends only redacted audit facts.
 
 ### Changed
+
+- Schema module `0.44.0` adds defaulted nonnegative web/file-search rate
+  columns to the append-only private pricing catalog. Built-in rate management
+  is independently disabled until the host calls
+  `AiPricingCatalogManagementLimits::with_maximum_builtin_tool_microunits_per_call`.
+  Restore validation must treat invalid rates or route/audit bindings as fatal.
 
 - Session queries now filter lifecycle state at the generated ORM boundary so
   `deleting` and finalized `deleted` shells do not consume visible pagination

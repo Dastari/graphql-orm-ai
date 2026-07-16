@@ -660,6 +660,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(64),
         }
@@ -707,6 +708,7 @@ mod tests {
             &ProviderKind::Ollama,
             model,
             64,
+            0,
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");
@@ -824,6 +826,7 @@ mod tests {
             continuation_mode: ModelContinuationMode::StatelessReplay,
             tools: vec![tool_definition()],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(64),
         }

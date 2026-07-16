@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.43.0`) and 39 private records
+- AI schema-module identity (currently version `0.44.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -96,8 +96,11 @@ production-ready behavior.
   MFA, separate host read/write decisions, deployment rate/cardinality bounds,
   and atomic redacted creation audit. The same ORM service provides
   conservative exact-version quotes and authoritative cached/non-cached token
-  settlement with checked integer arithmetic; built-in provider units remain
-  deliberately unsupported by the concrete accountant.
+  settlement with checked integer arithmetic. Deployment-supplied immutable
+  web/file-search per-call rates are independently administration-bounded;
+  quotes reserve a shared provider-enforced maximum at the greatest enabled
+  rate, while settlement counts only exact normalized completions. Code-
+  interpreter and image-generation billing dimensions remain unsupported.
 - Authoritative usage facts append exactly once in the budget reconciliation
   transaction with a unique reservation binding, exact scope/principal and
   provider/model dimensions, total/cached token separation, units, and settled
@@ -457,9 +460,9 @@ production-ready behavior.
 ## Next implementation slice
 
 1. Add provider-persistent file/search/deletion and background/webhook
-   lifecycles plus authoritative built-in-tool unit pricing only behind their
-   independent authority, egress, budget, fencing, retention, and restore
-   proofs.
+   lifecycles behind their independent authority, egress, budget, fencing,
+   retention, and restore proofs. Extend authoritative unit pricing only when
+   each additional billing dimension is complete.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -486,10 +489,11 @@ intentional.
 - Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
-- The full local release matrix and `cargo-semver-checks` gate passed against
-  the prior reviewed `0.45.0` branch head for crate/schema versions
-  `0.46.0`/`0.43.0`. The committed release-policy gate and branch CI remain
-  required before review.
+- The prior `0.46.0`/`0.43.0` release matrix and branch CI are fully green.
+  The current `0.47.0`/`0.44.0` built-in accounting slice passes the full
+  local release matrix, owned disposable PostgreSQL parity, package/privacy
+  review, and SemVer comparison. The committed release-policy gate and branch
+  CI remain required before review.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

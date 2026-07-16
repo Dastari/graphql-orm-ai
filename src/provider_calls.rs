@@ -30,6 +30,7 @@ pub struct AiProviderCallLimits {
     maximum_event_bytes: usize,
     maximum_total_event_bytes: usize,
     maximum_tool_calls: usize,
+    maximum_builtin_tool_calls: usize,
 }
 
 impl AiProviderCallLimits {
@@ -61,6 +62,7 @@ impl AiProviderCallLimits {
             maximum_event_bytes,
             maximum_total_event_bytes,
             maximum_tool_calls: 8,
+            maximum_builtin_tool_calls: 8,
         })
     }
 
@@ -79,6 +81,37 @@ impl AiProviderCallLimits {
         }
         self.maximum_tool_calls = maximum_tool_calls;
         Ok(self)
+    }
+
+    /// Maximum custom application-tool calls accepted in one provider turn.
+    pub const fn maximum_tool_calls(self) -> usize {
+        self.maximum_tool_calls
+    }
+
+    /// Sets the deployment maximum for provider-hosted tool calls in one turn.
+    ///
+    /// A request must carry an equal or narrower provider-enforced ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the limit is within
+    /// `1..=64`.
+    pub fn with_maximum_builtin_tool_calls(
+        mut self,
+        maximum_builtin_tool_calls: usize,
+    ) -> Result<Self, AiError> {
+        if !(1..=64).contains(&maximum_builtin_tool_calls) {
+            return Err(AiError::InvalidConfiguration(
+                "invalid provider-call built-in tool limit".to_owned(),
+            ));
+        }
+        self.maximum_builtin_tool_calls = maximum_builtin_tool_calls;
+        Ok(self)
+    }
+
+    /// Deployment maximum for provider-hosted tool calls in one turn.
+    pub const fn maximum_builtin_tool_calls(self) -> usize {
+        self.maximum_builtin_tool_calls
     }
 }
 
@@ -699,6 +732,7 @@ impl AiProviderCallPlan {
                     strict: true,
                 }],
                 builtin_tools: Vec::new(),
+                maximum_builtin_tool_calls: None,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -826,6 +860,67 @@ pub struct AiProviderCallResult {
     replay_tool_transfers: Vec<AiEgressManifest>,
 }
 
+/// Authoritative completed provider-hosted tool counts for one turn.
+///
+/// Counts come only from exact normalized start/completion pairs. They do not
+/// count advertised, requested, started-only, or model-proposed tools.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AiProviderBuiltinUsage {
+    web_search_calls: u64,
+    file_search_calls: u64,
+    code_interpreter_calls: u64,
+    image_generation_calls: u64,
+}
+
+impl AiProviderBuiltinUsage {
+    #[cfg(test)]
+    pub(crate) const fn test_usage(
+        web_search_calls: u64,
+        file_search_calls: u64,
+        code_interpreter_calls: u64,
+        image_generation_calls: u64,
+    ) -> Self {
+        Self {
+            web_search_calls,
+            file_search_calls,
+            code_interpreter_calls,
+            image_generation_calls,
+        }
+    }
+
+    /// Completed provider-hosted web-search calls.
+    pub const fn web_search_calls(self) -> u64 {
+        self.web_search_calls
+    }
+
+    /// Completed provider-hosted file-search calls.
+    pub const fn file_search_calls(self) -> u64 {
+        self.file_search_calls
+    }
+
+    /// Completed provider-hosted code-interpreter calls.
+    pub const fn code_interpreter_calls(self) -> u64 {
+        self.code_interpreter_calls
+    }
+
+    /// Completed provider-hosted image-generation calls.
+    pub const fn image_generation_calls(self) -> u64 {
+        self.image_generation_calls
+    }
+
+    fn record(&mut self, kind: &str) -> Result<(), AiError> {
+        let counter = match kind {
+            "web_search" => &mut self.web_search_calls,
+            "file_search" => &mut self.file_search_calls,
+            "code_interpreter" => &mut self.code_interpreter_calls,
+            "image_generation" => &mut self.image_generation_calls,
+            _ => return Err(AiError::ProviderFailed),
+        };
+        *counter = counter.checked_add(1).ok_or(AiError::ProviderFailed)?;
+        Ok(())
+    }
+}
+
 /// Authoritative provider usage observation requiring deployment pricing/unit
 /// settlement before budget commit.
 #[derive(Clone, Debug)]
@@ -837,7 +932,7 @@ pub struct AiProviderUsageObservation {
     input_tokens: u64,
     output_tokens: u64,
     cached_input_tokens: u64,
-    builtin_tools: Vec<ModelBuiltinTool>,
+    builtin_usage: AiProviderBuiltinUsage,
 }
 
 impl AiProviderUsageObservation {
@@ -851,7 +946,7 @@ impl AiProviderUsageObservation {
         input_tokens: u64,
         output_tokens: u64,
         cached_input_tokens: u64,
-        builtin_tools: Vec<ModelBuiltinTool>,
+        builtin_usage: AiProviderBuiltinUsage,
     ) -> Self {
         Self {
             scope,
@@ -861,7 +956,7 @@ impl AiProviderUsageObservation {
             input_tokens,
             output_tokens,
             cached_input_tokens,
-            builtin_tools,
+            builtin_usage,
         }
     }
 
@@ -900,9 +995,9 @@ impl AiProviderUsageObservation {
         self.cached_input_tokens
     }
 
-    /// Provider built-ins requested in the exact completed turn.
-    pub fn builtin_tools(&self) -> &[ModelBuiltinTool] {
-        &self.builtin_tools
+    /// Authoritative completed provider-hosted tool counts.
+    pub const fn builtin_usage(&self) -> AiProviderBuiltinUsage {
+        self.builtin_usage
     }
 }
 
@@ -1224,6 +1319,7 @@ impl AiProviderCallResult {
                 continuation_mode: ModelContinuationMode::ProviderRetained,
                 tools: Vec::new(),
                 builtin_tools: Vec::new(),
+                maximum_builtin_tool_calls: None,
                 output_schema: None,
                 maximum_output_tokens: Some(64),
             },
@@ -1285,6 +1381,7 @@ impl AiProviderCallResult {
                 continuation_mode: ModelContinuationMode::StatelessReplay,
                 tools: Vec::new(),
                 builtin_tools: Vec::new(),
+                maximum_builtin_tool_calls: None,
                 output_schema: None,
                 maximum_output_tokens: Some(256),
             },
@@ -1472,6 +1569,10 @@ impl AiProviderCallExecutor {
             || plan.budget.run_id != lease.run_id()
             || plan.budget.attempt_id != lease.attempt_id()
             || plan.budget.lease_generation != lease.lease_generation()
+            || plan
+                .request
+                .maximum_builtin_tool_calls
+                .is_some_and(|calls| calls > self.limits.maximum_builtin_tool_calls as u64)
         {
             return Err(AiError::Conflict);
         }
@@ -1514,6 +1615,7 @@ impl AiProviderCallExecutor {
                 &plan.provider_kind,
                 &plan.request.model,
                 plan.request.maximum_output_tokens.unwrap_or(0),
+                plan.request.maximum_builtin_tool_calls(),
                 self.clock.now(),
             )
             .map_err(|_| AiError::BudgetDenied)?;
@@ -1651,7 +1753,22 @@ impl AiProviderCallExecutor {
         let live_scope = plan.budget.scope.clone();
         let live_correlation_id = plan.correlation_id.clone();
         let live_provider_kind = plan.provider_kind.clone();
-        let builtin_tools = plan.request.builtin_tools.clone();
+        let offered_builtin_kinds = plan
+            .request
+            .builtin_tools
+            .iter()
+            .map(|builtin| match builtin {
+                ModelBuiltinTool::WebSearch { .. } => "web_search",
+                ModelBuiltinTool::FileSearch { .. } => "file_search",
+                ModelBuiltinTool::CodeInterpreter => "code_interpreter",
+                ModelBuiltinTool::ImageGeneration => "image_generation",
+            })
+            .collect::<BTreeSet<_>>();
+        let maximum_normalized_builtin_tool_calls = plan
+            .request
+            .maximum_builtin_tool_calls
+            .and_then(|calls| usize::try_from(calls).ok())
+            .unwrap_or(self.limits.maximum_builtin_tool_calls);
         let request_snapshot = plan.request.clone();
         let model_inference_manifest = plan
             .transfers
@@ -1709,6 +1826,8 @@ impl AiProviderCallExecutor {
         let mut completed_tool_calls = BTreeMap::new();
         let mut tool_call_order = Vec::new();
         let mut tool_argument_bytes = BTreeMap::<String, usize>::new();
+        let mut started_builtin_calls = BTreeMap::<String, String>::new();
+        let mut completed_builtin_calls = BTreeSet::new();
         let mut live_coalescer = self
             .live_delta_sink
             .as_ref()
@@ -1780,6 +1899,7 @@ impl AiProviderCallExecutor {
                     if !valid_provider_call_id(call_id)
                         || !offered_tools.contains_key(tool_id)
                         || started_tool_calls.contains_key(call_id)
+                        || started_builtin_calls.contains_key(call_id)
                         || tool_call_order.len() >= self.limits.maximum_tool_calls
                     {
                         return Err(AiError::ProviderFailed);
@@ -1828,6 +1948,23 @@ impl AiProviderCallExecutor {
                         },
                     );
                 }
+                ProviderEvent::BuiltinToolStarted { call_id, kind } => {
+                    if !valid_provider_call_id(call_id)
+                        || !offered_builtin_kinds.contains(kind.as_str())
+                        || started_tool_calls.contains_key(call_id)
+                        || started_builtin_calls.contains_key(call_id)
+                        || started_builtin_calls.len() >= maximum_normalized_builtin_tool_calls
+                    {
+                        return Err(AiError::ProviderFailed);
+                    }
+                    started_builtin_calls.insert(call_id.clone(), kind.clone());
+                }
+                ProviderEvent::BuiltinToolCompleted { call_id, .. }
+                    if !started_builtin_calls.contains_key(call_id)
+                        || !completed_builtin_calls.insert(call_id.clone()) =>
+                {
+                    return Err(AiError::ProviderFailed);
+                }
                 _ => {}
             }
             if let Some(coalescer) = live_coalescer.as_mut() {
@@ -1869,6 +2006,16 @@ impl AiProviderCallExecutor {
         if started_tool_calls.len() != completed_tool_calls.len() {
             return Err(AiError::ProviderFailed);
         }
+        if started_builtin_calls.len() != completed_builtin_calls.len() {
+            return Err(AiError::ProviderFailed);
+        }
+        let mut builtin_usage = AiProviderBuiltinUsage::default();
+        for (call_id, kind) in &started_builtin_calls {
+            if !completed_builtin_calls.contains(call_id) {
+                return Err(AiError::ProviderFailed);
+            }
+            builtin_usage.record(kind)?;
+        }
         let mut tool_calls = Vec::with_capacity(tool_call_order.len());
         for call_id in tool_call_order {
             tool_calls.push(
@@ -1894,7 +2041,7 @@ impl AiProviderCallExecutor {
             input_tokens,
             output_tokens,
             cached_input_tokens,
-            builtin_tools,
+            builtin_usage,
         };
         let actual = self.usage_accounting.settle(&observation).await?;
         if actual.input_tokens != input_tokens
@@ -2355,7 +2502,13 @@ mod tests {
             Ok(AiBudgetAmounts {
                 input_tokens: observation.input_tokens(),
                 output_tokens: observation.output_tokens(),
-                tool_units: 0,
+                tool_units: observation
+                    .builtin_usage()
+                    .web_search_calls()
+                    .checked_add(observation.builtin_usage().file_search_calls())
+                    .ok_or_else(|| {
+                        AiError::InvalidConfiguration("test tool-unit overflow".to_owned())
+                    })?,
                 image_units: 0,
                 cost_microunits: 42,
                 runs: 1,
@@ -2731,6 +2884,7 @@ mod tests {
                     AiEgressCapability::ToolResult,
                     AiEgressCapability::ImageAnalysis,
                     AiEgressCapability::ProviderFile,
+                    AiEgressCapability::WebSearch,
                 ]
                 .into_iter()
                 .collect(),
@@ -2826,6 +2980,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -2883,6 +3038,27 @@ mod tests {
             "provider-call-test",
         )
         .expect("test provider plan should validate")
+    }
+
+    fn web_search_plan(fixture: &Fixture, maximum_builtin_tool_calls: u64) -> AiProviderCallPlan {
+        let mut base = plan(fixture);
+        base.request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+            allowed_domains: vec!["example.com".to_owned()],
+        }];
+        base.request.maximum_builtin_tool_calls = Some(maximum_builtin_tool_calls);
+        base.budget.estimate.tool_units = maximum_builtin_tool_calls;
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        let mut web_search_manifest = base.transfers[0].clone();
+        web_search_manifest.capability = AiEgressCapability::WebSearch;
+        base.transfers.push(web_search_manifest);
+        AiProviderCallPlan::new(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            base.correlation_id,
+        )
+        .expect("web-search provider plan should validate")
     }
 
     fn tool_plan(fixture: &Fixture) -> AiProviderCallPlan {
@@ -3300,6 +3476,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_builtins_are_counted_but_requested_unused_tools_are_not() {
+        let completed_fixture = fixture(vec![
+            ProviderEvent::BuiltinToolStarted {
+                call_id: "web-call-1".to_owned(),
+                kind: "web_search".to_owned(),
+            },
+            ProviderEvent::BuiltinToolCompleted {
+                call_id: "web-call-1".to_owned(),
+                result: serde_json::json!({"status": "completed"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("builtin-response".to_owned()),
+            },
+        ])
+        .await;
+        let completed_executor = AiProviderCallExecutor::new(
+            completed_fixture.runtime.clone(),
+            completed_fixture.budget_service.clone(),
+            completed_fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate")
+                .with_maximum_builtin_tool_calls(2)
+                .expect("test tool limit should validate"),
+        );
+        let completed = completed_executor
+            .execute(
+                &completed_fixture.lease,
+                web_search_plan(&completed_fixture, 2),
+            )
+            .await
+            .expect("exact completed built-in pair should settle");
+        assert_eq!(completed.usage().tool_units, 1);
+        assert_eq!(
+            reservation_state(&completed_fixture.database).await,
+            "committed"
+        );
+
+        let unused_fixture = fixture(vec![
+            ProviderEvent::Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("unused-builtin-response".to_owned()),
+            },
+        ])
+        .await;
+        let unused_executor = AiProviderCallExecutor::new(
+            unused_fixture.runtime.clone(),
+            unused_fixture.budget_service.clone(),
+            unused_fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate")
+                .with_maximum_builtin_tool_calls(2)
+                .expect("test tool limit should validate"),
+        );
+        let unused = unused_executor
+            .execute(&unused_fixture.lease, web_search_plan(&unused_fixture, 2))
+            .await
+            .expect("unused advertised built-in should not create usage");
+        assert_eq!(unused.usage().tool_units, 0);
+        assert_eq!(
+            reservation_state(&unused_fixture.database).await,
+            "committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_builtin_completion_keeps_the_reservation_uncertain() {
+        let fixture = fixture(vec![
+            ProviderEvent::BuiltinToolCompleted {
+                call_id: "never-started".to_owned(),
+                result: serde_json::json!({"status": "completed"}),
+            },
+            ProviderEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            },
+            ProviderEvent::ResponseCompleted {
+                response_id: Some("malformed-builtin-response".to_owned()),
+            },
+        ])
+        .await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024)
+                .expect("test provider limits should validate")
+                .with_maximum_builtin_tool_calls(2)
+                .expect("test tool limit should validate"),
+        );
+        assert!(matches!(
+            executor
+                .execute(&fixture.lease, web_search_plan(&fixture, 2))
+                .await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+    }
+
+    #[tokio::test]
     async fn live_delta_persistence_failure_keeps_provider_usage_uncertain() {
         let fixture = fixture(vec![
             ProviderEvent::ResponseStarted {
@@ -3689,6 +3980,7 @@ mod tests {
                 strict: true,
             }],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -3972,6 +4264,7 @@ mod tests {
                     strict: true,
                 }],
                 builtin_tools: Vec::new(),
+                maximum_builtin_tool_calls: None,
                 output_schema: None,
                 maximum_output_tokens: Some(100),
             },
@@ -4186,6 +4479,7 @@ mod tests {
                 strict: true,
             }],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };
@@ -5077,6 +5371,7 @@ mod tests {
                 strict: true,
             }],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(100),
         };

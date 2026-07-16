@@ -975,6 +975,7 @@ mod tests {
             continuation_mode: ModelContinuationMode::StatelessReplay,
             tools: vec![definition()],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
@@ -1038,6 +1039,7 @@ mod tests {
             request
                 .maximum_output_tokens
                 .expect("test request should have output bound"),
+            0,
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");
@@ -1150,6 +1152,7 @@ mod tests {
             continuation_mode: ModelContinuationMode::StatelessReplay,
             tools: vec![tool],
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(256),
         };
@@ -1181,6 +1184,7 @@ mod tests {
             continuation_mode: ModelContinuationMode::ProviderRetained,
             tools: Vec::new(),
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: Some(json!({
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},

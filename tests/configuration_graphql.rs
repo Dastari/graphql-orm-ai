@@ -35,6 +35,8 @@ impl AiPricingCatalogService for PricingService {
             input_microunits_per_million: 2,
             cached_input_microunits_per_million: 1,
             output_microunits_per_million: 3,
+            web_search_microunits_per_call: 4,
+            file_search_microunits_per_call: 5,
             created_at: 1,
         }])
     }
@@ -56,6 +58,8 @@ impl AiPricingCatalogService for PricingService {
             input_microunits_per_million: input.input_microunits_per_million,
             cached_input_microunits_per_million: input.cached_input_microunits_per_million,
             output_microunits_per_million: input.output_microunits_per_million,
+            web_search_microunits_per_call: input.web_search_microunits_per_call,
+            file_search_microunits_per_call: input.file_search_microunits_per_call,
             created_at: 1,
         })
     }
@@ -377,6 +381,8 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
                 inputMicrounitsPerMillion: 2
                 cachedInputMicrounitsPerMillion: 1
                 outputMicrounitsPerMillion: 3
+                webSearchMicrounitsPerCall: 4
+                fileSearchMicrounitsPerCall: 5
             }) { versionReference providerKind providerModel }
         }
     "#;
@@ -391,6 +397,8 @@ async fn pricing_catalog_roots_use_exact_route_inputs_and_configured_case() {
                 InputMicrounitsPerMillion: 2
                 CachedInputMicrounitsPerMillion: 1
                 OutputMicrounitsPerMillion: 3
+                WebSearchMicrounitsPerCall: 4
+                FileSearchMicrounitsPerCall: 5
             }) { VersionReference ProviderKind ProviderModel }
         }
     "#;

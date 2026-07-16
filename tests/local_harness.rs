@@ -190,6 +190,7 @@ fn stateless_tool_request(model: &str) -> ModelRequest {
             strict: true,
         }],
         builtin_tools: Vec::new(),
+        maximum_builtin_tool_calls: None,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -221,6 +222,7 @@ fn request(model: &str) -> ModelRequest {
         continuation_mode: graphql_orm_ai::ModelContinuationMode::ProviderRetained,
         tools: vec![],
         builtin_tools: vec![],
+        maximum_builtin_tool_calls: None,
         output_schema: None,
         maximum_output_tokens: Some(64),
     }
@@ -282,6 +284,7 @@ fn context(model_request: &ModelRequest) -> ProviderRequestContext {
         &ProviderKind::LocalHarness,
         &model_request.model,
         64,
+        0,
         time::OffsetDateTime::now_utc(),
     )
     .expect("budget should authorize");

@@ -331,7 +331,7 @@ validation, authenticated recent-MFA/CAS/audited budget-policy management, an
 atomic ORM-backed budget reservation/reconciliation service,
 an exactly-once append-only usage ledger with authenticated bounded reporting,
 an authenticated immutable pricing catalog with conservative quoting and
-authoritative token settlement,
+authoritative token plus completed web/file-search settlement,
 exact approval binding, proposal schemas, fenced state transitions, and restore
 planning. Protected proposal creation/review/outcome linkage and canonical-
 preview approval request/decision/revocation/one-shot consumption are also
@@ -346,8 +346,8 @@ logical UI-intent validation and fenced durable delivery are implemented as
 separately composable, project-neutral contracts.
 
 Production blockers include partial/multi-call and stateless supervised
-tool-batch adoption, authoritative built-in-tool
-pricing/unit catalogs, privileged uncertain-call
+tool-batch adoption, code-interpreter/image-generation
+pricing dimensions, privileged uncertain-call
 recovery, completion of deleting-session/provider-raw/audit retention workflows,
 per-item proposal review, provider-persistent file/search lifecycle,
 attachment quotas/derivative production, production mutable secret

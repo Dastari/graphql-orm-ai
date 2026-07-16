@@ -15,9 +15,9 @@ use uuid::Uuid;
 use crate::persistence::*;
 use crate::{
     AiBudgetAmounts, AiConfigurationAccessPolicy, AiConfigurationAction, AiError,
-    AiPricingCatalogService, AiPricingPolicyView, AiPricingQuoteRequest, AiPricingQuoteService,
-    AiProviderKindInput, AiProviderUsageAccounting, AiProviderUsageObservation, AiScope,
-    CreateAiPricingPolicyInput, ProviderKind,
+    AiPricedBuiltinToolKind, AiPricingCatalogService, AiPricingPolicyView, AiPricingQuoteRequest,
+    AiPricingQuoteService, AiProviderBuiltinUsage, AiProviderKindInput, AiProviderUsageAccounting,
+    AiProviderUsageObservation, AiScope, CreateAiPricingPolicyInput, ProviderKind,
 };
 
 const RATE_DENOMINATOR: u64 = 1_000_000;
@@ -31,6 +31,7 @@ const MAXIMUM_MODEL_LENGTH: usize = 200;
 pub struct AiPricingCatalogManagementLimits {
     maximum_fixed_call_microunits: u64,
     maximum_token_rate_microunits_per_million: u64,
+    maximum_builtin_tool_microunits_per_call: u64,
     maximum_versions_per_route: usize,
 }
 
@@ -55,8 +56,20 @@ impl AiPricingCatalogManagementLimits {
         Ok(Self {
             maximum_fixed_call_microunits,
             maximum_token_rate_microunits_per_million,
+            maximum_builtin_tool_microunits_per_call: 0,
             maximum_versions_per_route,
         })
+    }
+
+    /// Enables administrator-supplied provider built-in rates up to one
+    /// deployment hard ceiling per completed call.
+    #[must_use]
+    pub const fn with_maximum_builtin_tool_microunits_per_call(
+        mut self,
+        maximum_builtin_tool_microunits_per_call: u64,
+    ) -> Self {
+        self.maximum_builtin_tool_microunits_per_call = maximum_builtin_tool_microunits_per_call;
+        self
     }
 
     /// Greatest fixed-call microunit rate an administrator may append.
@@ -67,6 +80,11 @@ impl AiPricingCatalogManagementLimits {
     /// Greatest per-million-token microunit rate an administrator may append.
     pub const fn maximum_token_rate_microunits_per_million(self) -> u64 {
         self.maximum_token_rate_microunits_per_million
+    }
+
+    /// Greatest per-call built-in rate an administrator may append.
+    pub const fn maximum_builtin_tool_microunits_per_call(self) -> u64 {
+        self.maximum_builtin_tool_microunits_per_call
     }
 
     /// Maximum immutable versions retained for one exact route.
@@ -80,7 +98,7 @@ impl AiPricingCatalogManagementLimits {
 /// Every version is immediately effective but is never selected implicitly:
 /// callers bind its globally unique reference into a budget reservation. The
 /// same service provides conservative preflight quotes and authoritative
-/// token-only provider settlement for that exact version.
+/// token plus supported built-in settlement for that exact version.
 #[derive(Clone)]
 pub struct OrmAiPricingService {
     database: Database<DefaultWriteBackend>,
@@ -315,6 +333,8 @@ impl AiPricingCatalogService for OrmAiPricingService {
                             cached_input_microunits_per_million: input
                                 .cached_input_microunits_per_million,
                             output_microunits_per_million: input.output_microunits_per_million,
+                            web_search_microunits_per_call: input.web_search_microunits_per_call,
+                            file_search_microunits_per_call: input.file_search_microunits_per_call,
                             created_by_principal_kind: actor_kind.clone(),
                             created_by_subject: actor_subject.clone(),
                         })
@@ -349,6 +369,7 @@ impl AiPricingQuoteService for OrmAiPricingService {
     async fn quote(&self, mut request: AiPricingQuoteRequest) -> Result<AiBudgetAmounts, AiError> {
         validate_scope(&request.scope)?;
         request.provider_model = normalize_model(request.provider_model)?;
+        validate_quote_builtins(&request)?;
         let record = self.exact_version(&request.version_reference).await?;
         require_route(
             &record,
@@ -356,12 +377,20 @@ impl AiPricingQuoteService for OrmAiPricingService {
             &request.provider_kind,
             &request.provider_model,
         )?;
+        let token_cost = price_tokens(&record, request.input_tokens, 0, request.output_tokens)?;
+        let builtin_cost = price_builtin_quote(
+            &record,
+            &request.builtin_tools,
+            request.maximum_builtin_tool_calls,
+        )?;
         Ok(AiBudgetAmounts {
             input_tokens: request.input_tokens,
             output_tokens: request.output_tokens,
-            tool_units: 0,
+            tool_units: request.maximum_builtin_tool_calls,
             image_units: 0,
-            cost_microunits: price_tokens(&record, request.input_tokens, 0, request.output_tokens)?,
+            cost_microunits: token_cost.checked_add(builtin_cost).ok_or_else(|| {
+                AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned())
+            })?,
             runs: 1,
         })
     }
@@ -373,9 +402,12 @@ impl AiProviderUsageAccounting for OrmAiPricingService {
         &self,
         observation: &AiProviderUsageObservation,
     ) -> Result<AiBudgetAmounts, AiError> {
-        if !observation.builtin_tools().is_empty() {
+        let builtin_usage = observation.builtin_usage();
+        if builtin_usage.code_interpreter_calls() != 0
+            || builtin_usage.image_generation_calls() != 0
+        {
             return Err(AiError::InvalidConfiguration(
-                "token pricing cannot settle provider built-in billable units".to_owned(),
+                "pricing cannot settle unsupported provider built-in units".to_owned(),
             ));
         }
         if observation.cached_input_tokens() > observation.input_tokens() {
@@ -393,17 +425,27 @@ impl AiProviderUsageAccounting for OrmAiPricingService {
             observation.provider_kind(),
             &model,
         )?;
+        let tool_units = builtin_usage
+            .web_search_calls()
+            .checked_add(builtin_usage.file_search_calls())
+            .ok_or_else(|| {
+                AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned())
+            })?;
+        let token_cost = price_tokens(
+            &record,
+            observation.input_tokens(),
+            observation.cached_input_tokens(),
+            observation.output_tokens(),
+        )?;
+        let builtin_cost = price_builtin_actual(&record, builtin_usage)?;
         Ok(AiBudgetAmounts {
             input_tokens: observation.input_tokens(),
             output_tokens: observation.output_tokens(),
-            tool_units: 0,
+            tool_units,
             image_units: 0,
-            cost_microunits: price_tokens(
-                &record,
-                observation.input_tokens(),
-                observation.cached_input_tokens(),
-                observation.output_tokens(),
-            )?,
+            cost_microunits: token_cost.checked_add(builtin_cost).ok_or_else(|| {
+                AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned())
+            })?,
             runs: 1,
         })
     }
@@ -437,6 +479,8 @@ fn validate_record(record: &AiPricingPolicyRecord) -> Result<(), AiError> {
         || record.input_microunits_per_million < 0
         || record.cached_input_microunits_per_million < 0
         || record.output_microunits_per_million < 0
+        || record.web_search_microunits_per_call < 0
+        || record.file_search_microunits_per_call < 0
         || record.cached_input_microunits_per_million > record.input_microunits_per_million
         || record.created_by_principal_kind.trim().is_empty()
         || record.created_by_subject.trim().is_empty()
@@ -456,6 +500,8 @@ fn validate_rates(
     let input_rate = u64::try_from(input.input_microunits_per_million);
     let cached_rate = u64::try_from(input.cached_input_microunits_per_million);
     let output_rate = u64::try_from(input.output_microunits_per_million);
+    let web_search_rate = u64::try_from(input.web_search_microunits_per_call);
+    let file_search_rate = u64::try_from(input.file_search_microunits_per_call);
     if fixed.map_or(true, |value| value > limits.maximum_fixed_call_microunits())
         || input_rate.map_or(true, |value| {
             value > limits.maximum_token_rate_microunits_per_million()
@@ -465,6 +511,12 @@ fn validate_rates(
         })
         || output_rate.map_or(true, |value| {
             value > limits.maximum_token_rate_microunits_per_million()
+        })
+        || web_search_rate.map_or(true, |value| {
+            value > limits.maximum_builtin_tool_microunits_per_call()
+        })
+        || file_search_rate.map_or(true, |value| {
+            value > limits.maximum_builtin_tool_microunits_per_call()
         })
         || input.cached_input_microunits_per_million > input.input_microunits_per_million
     {
@@ -503,6 +555,69 @@ fn price_tokens(
         .checked_add(input)
         .and_then(|value| value.checked_add(cached))
         .and_then(|value| value.checked_add(output))
+        .ok_or_else(|| AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned()))
+}
+
+fn validate_quote_builtins(request: &AiPricingQuoteRequest) -> Result<(), AiError> {
+    let unique = request
+        .builtin_tools
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique.len() != request.builtin_tools.len()
+        || request.builtin_tools.len() > 2
+        || (request.builtin_tools.is_empty() && request.maximum_builtin_tool_calls != 0)
+        || (!request.builtin_tools.is_empty()
+            && !(1..=64).contains(&request.maximum_builtin_tool_calls))
+    {
+        return Err(AiError::InvalidInput(
+            "invalid built-in pricing quote".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn price_builtin_quote(
+    record: &AiPricingPolicyRecord,
+    kinds: &[AiPricedBuiltinToolKind],
+    maximum_calls: u64,
+) -> Result<u64, AiError> {
+    let maximum_rate = kinds.iter().try_fold(0_u64, |maximum, kind| {
+        Ok::<_, AiError>(maximum.max(priced_builtin_rate(record, *kind)?))
+    })?;
+    price_calls(maximum_calls, maximum_rate)
+}
+
+fn price_builtin_actual(
+    record: &AiPricingPolicyRecord,
+    usage: AiProviderBuiltinUsage,
+) -> Result<u64, AiError> {
+    let web_search = price_calls(
+        usage.web_search_calls(),
+        stored_rate(record.web_search_microunits_per_call)?,
+    )?;
+    let file_search = price_calls(
+        usage.file_search_calls(),
+        stored_rate(record.file_search_microunits_per_call)?,
+    )?;
+    web_search
+        .checked_add(file_search)
+        .ok_or_else(|| AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned()))
+}
+
+fn priced_builtin_rate(
+    record: &AiPricingPolicyRecord,
+    kind: AiPricedBuiltinToolKind,
+) -> Result<u64, AiError> {
+    stored_rate(match kind {
+        AiPricedBuiltinToolKind::WebSearch => record.web_search_microunits_per_call,
+        AiPricedBuiltinToolKind::FileSearch => record.file_search_microunits_per_call,
+    })
+}
+
+fn price_calls(calls: u64, rate: u64) -> Result<u64, AiError> {
+    calls
+        .checked_mul(rate)
         .ok_or_else(|| AiError::InvalidConfiguration("pricing arithmetic overflow".to_owned()))
 }
 
@@ -588,6 +703,8 @@ fn pricing_view(record: &AiPricingPolicyRecord) -> AiPricingPolicyView {
         input_microunits_per_million: record.input_microunits_per_million,
         cached_input_microunits_per_million: record.cached_input_microunits_per_million,
         output_microunits_per_million: record.output_microunits_per_million,
+        web_search_microunits_per_call: record.web_search_microunits_per_call,
+        file_search_microunits_per_call: record.file_search_microunits_per_call,
         created_at: record.created_at,
     }
 }
@@ -696,6 +813,8 @@ mod tests {
             input_microunits_per_million: 2_000_000,
             cached_input_microunits_per_million: 1_000_000,
             output_microunits_per_million: 3_000_000,
+            web_search_microunits_per_call: 7,
+            file_search_microunits_per_call: 11,
         }
     }
 
@@ -730,7 +849,8 @@ mod tests {
             },
             Arc::new(FixedClock::new(now())),
             AiPricingCatalogManagementLimits::new(10_000_000, 10_000_000, maximum_versions)
-                .expect("test pricing limits should validate"),
+                .expect("test pricing limits should validate")
+                .with_maximum_builtin_tool_microunits_per_call(1_000_000),
         )
     }
 
@@ -810,6 +930,8 @@ mod tests {
                 version_reference: created.version_reference.clone(),
                 input_tokens: 10,
                 output_tokens: 4,
+                builtin_tools: vec![],
+                maximum_builtin_tool_calls: 0,
             })
             .await
             .expect("exact pricing quote should succeed");
@@ -824,7 +946,7 @@ mod tests {
             10,
             4,
             4,
-            vec![],
+            AiProviderBuiltinUsage::default(),
         );
         let actual = service
             .settle(&observation)
@@ -841,6 +963,8 @@ mod tests {
             version_reference: created.version_reference.clone(),
             input_tokens: 1,
             output_tokens: 1,
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: 0,
         };
         assert!(matches!(
             service.quote(wrong_scope).await,
@@ -854,13 +978,67 @@ mod tests {
             1,
             1,
             0,
-            vec![],
+            AiProviderBuiltinUsage::default(),
         );
         assert!(matches!(
             service.settle(&wrong_scope_observation).await,
             Err(AiError::NotFound)
         ));
+        let builtin_quote = service
+            .quote(AiPricingQuoteRequest {
+                scope: scope(),
+                provider_kind: ProviderKind::OpenAi,
+                provider_model: "model-a".to_owned(),
+                version_reference: created.version_reference.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                builtin_tools: vec![
+                    AiPricedBuiltinToolKind::WebSearch,
+                    AiPricedBuiltinToolKind::FileSearch,
+                ],
+                maximum_builtin_tool_calls: 3,
+            })
+            .await
+            .expect("supported built-ins should quote conservatively");
+        assert_eq!(builtin_quote.tool_units, 3);
+        assert_eq!(builtin_quote.cost_microunits, 43);
+        assert!(matches!(
+            service
+                .quote(AiPricingQuoteRequest {
+                    scope: scope(),
+                    provider_kind: ProviderKind::OpenAi,
+                    provider_model: "model-a".to_owned(),
+                    version_reference: created.version_reference.clone(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    builtin_tools: vec![
+                        AiPricedBuiltinToolKind::WebSearch,
+                        AiPricedBuiltinToolKind::WebSearch,
+                    ],
+                    maximum_builtin_tool_calls: 2,
+                })
+                .await,
+            Err(AiError::InvalidInput(_))
+        ));
+
         let builtin = AiProviderUsageObservation::test_observation(
+            scope(),
+            ProviderKind::OpenAi,
+            "model-a",
+            created.version_reference.clone(),
+            1,
+            1,
+            0,
+            AiProviderBuiltinUsage::test_usage(2, 1, 0, 0),
+        );
+        let actual = service
+            .settle(&builtin)
+            .await
+            .expect("completed supported built-ins should settle exactly");
+        assert_eq!(actual.tool_units, 3);
+        assert_eq!(actual.cost_microunits, 35);
+
+        let unsupported = AiProviderUsageObservation::test_observation(
             scope(),
             ProviderKind::OpenAi,
             "model-a",
@@ -868,12 +1046,10 @@ mod tests {
             1,
             1,
             0,
-            vec![crate::ModelBuiltinTool::WebSearch {
-                allowed_domains: vec![],
-            }],
+            AiProviderBuiltinUsage::test_usage(0, 0, 1, 0),
         );
         assert!(matches!(
-            service.settle(&builtin).await,
+            service.settle(&unsupported).await,
             Err(AiError::InvalidConfiguration(_))
         ));
     }

@@ -125,7 +125,9 @@ camelCase to PascalCase.
    policy, recent-MFA policy, trusted clock, and
    `AiPricingCatalogManagementLimits`. Install the same instance as
    `Arc<dyn AiPricingCatalogService>`, `Arc<dyn AiPricingQuoteService>`, and
-   `Arc<dyn AiProviderUsageAccounting>` when using its token-only accounting.
+   `Arc<dyn AiProviderUsageAccounting>` when using its token and completed
+   web/file-search accounting. Built-in rate administration stays disabled
+   unless the deployment sets an independent per-call management ceiling.
 17. Apply/validate migrations and restore reconciliation, then open the runtime
    start gate.
 
@@ -226,9 +228,11 @@ lower-level concrete provider path is deliberately explicit:
    `AiProviderCallExecutor`, configured with the budget service and a durable
    `OrmAiEgressDecisionAudit`. Supply `AiProviderUsageAccounting` backed by an
    immutable deployment pricing catalog; `OrmAiPricingService` supplies the
-   concrete token-only implementation. It settles the exact pricing version
-   rather than substituting current rates or reserved estimates and rejects
-   provider built-ins until authoritative billed-unit support exists.
+   concrete immutable implementation. It settles the exact pricing version
+   rather than substituting current rates or reserved estimates. Web/file
+   search is charged only from exact normalized completed-call pairs;
+   advertised-but-unused tools cost zero, while code interpreter and image
+   generation remain closed in the concrete accountant.
    To emit provisional visible output, explicitly install
    `OrmAiLiveDeltaService` with `with_live_delta_sink`. Use the same runtime,
    run service, current-principal/access/protection boundaries, and validated
@@ -312,8 +316,8 @@ ambiguous replay remain closed. See the
 See the [worker and provider-turn guide](worker-provider-turn.md) and
 [implementation status](implementation-status.md). Provider-persistent file
 upload/search, attachment quotas/derivative production, authoritative
-provider-built-in unit pricing, completion of deleting-session and external-
-content retention,
+code-interpreter/image-generation unit pricing, and external-content
+retention,
 provider-turn and partial-batch restart adoption and stateless/parallel
 supervised continuation remain
 under implementation. Protected provisional live output is opt-in and documented in

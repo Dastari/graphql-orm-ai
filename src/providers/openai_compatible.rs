@@ -369,6 +369,7 @@ mod tests {
             continuation_mode: ModelContinuationMode::ProviderRetained,
             tools: Vec::new(),
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(32),
         }
@@ -430,6 +431,7 @@ mod tests {
             &ProviderKind::OpenAiCompatible,
             &request.model,
             32,
+            0,
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");

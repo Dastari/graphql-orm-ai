@@ -221,8 +221,8 @@ impl AiBudgetReservation {
     /// # Errors
     ///
     /// Returns [`ProviderError::BudgetDenied`] when the reservation is not
-    /// active, has expired, or does not match the run, provider, model, output
-    /// ceiling, attempt, or fencing generation.
+    /// active, has expired, or does not match the run, provider, model,
+    /// output/tool-unit ceilings, attempt, or fencing generation.
     #[allow(clippy::too_many_arguments)]
     pub fn authorize_provider_call(
         &self,
@@ -232,6 +232,7 @@ impl AiBudgetReservation {
         provider_kind: &ProviderKind,
         model: &str,
         requested_maximum_output_tokens: u64,
+        requested_maximum_tool_units: u64,
         now: OffsetDateTime,
     ) -> Result<AuthorizedBudgetReservation, ProviderError> {
         if self.state != AiBudgetReservationState::Reserved
@@ -242,6 +243,7 @@ impl AiBudgetReservation {
             || &self.provider_kind != provider_kind
             || self.model != model
             || requested_maximum_output_tokens > self.reserved.output_tokens
+            || requested_maximum_tool_units > self.reserved.tool_units
         {
             return Err(ProviderError::BudgetDenied);
         }
@@ -251,6 +253,7 @@ impl AiBudgetReservation {
             provider_kind: self.provider_kind.clone(),
             model: self.model.clone(),
             maximum_output_tokens: self.reserved.output_tokens,
+            maximum_tool_units: self.reserved.tool_units,
             expires_at: self.expires_at,
         })
     }
@@ -264,6 +267,7 @@ pub struct AuthorizedBudgetReservation {
     provider_kind: ProviderKind,
     model: String,
     maximum_output_tokens: u64,
+    maximum_tool_units: u64,
     expires_at: OffsetDateTime,
 }
 
@@ -279,12 +283,14 @@ impl AuthorizedBudgetReservation {
         provider_kind: &ProviderKind,
         model: &str,
         requested_maximum_output_tokens: u64,
+        requested_maximum_tool_units: u64,
         now: OffsetDateTime,
     ) -> bool {
         self.run_id == run_id
             && &self.provider_kind == provider_kind
             && self.model == model
             && requested_maximum_output_tokens <= self.maximum_output_tokens
+            && requested_maximum_tool_units <= self.maximum_tool_units
             && now < self.expires_at
     }
 }

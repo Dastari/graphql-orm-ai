@@ -460,6 +460,9 @@ impl OpenAiProvider {
         if let Some(maximum_output_tokens) = request.maximum_output_tokens {
             body["max_output_tokens"] = Value::from(maximum_output_tokens);
         }
+        if let Some(maximum_builtin_tool_calls) = request.maximum_builtin_tool_calls {
+            body["max_tool_calls"] = Value::from(maximum_builtin_tool_calls);
+        }
         if let Some(schema) = &request.output_schema {
             body["text"] = json!({
                 "format": {
@@ -1303,6 +1306,7 @@ mod tests {
             AiBudgetAmounts {
                 input_tokens: 1_000,
                 output_tokens: 1_000,
+                tool_units: 64,
                 runs: 1,
                 ..AiBudgetAmounts::default()
             },
@@ -1316,11 +1320,51 @@ mod tests {
             &ProviderKind::OpenAi,
             model,
             1_000,
+            64,
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");
         ProviderRequestContext::new(session_id, run_id, "test", budget, manifest, proof)
             .expect("context should validate")
+    }
+
+    fn with_capability(
+        context: ProviderRequestContext,
+        model: &str,
+        capability: AiEgressCapability,
+        estimated_bytes: u64,
+    ) -> ProviderRequestContext {
+        let manifest = AiEgressManifest {
+            provider_profile_id: "profile-1".to_owned(),
+            provider_kind: "openai".to_owned(),
+            model: model.to_owned(),
+            destination: "openai".to_owned(),
+            destination_trust: AiDestinationTrust::ManagedProvider,
+            capability,
+            scope: AiScope::new("project", "test"),
+            session_id: Some(context.session_id()),
+            run_id: Some(context.run_id()),
+            sources: vec![AiDataSourceRef {
+                kind: "message".to_owned(),
+                reference: "synthetic".to_owned(),
+                classification: DataClassification::Public,
+                trust: AiSourceTrust::UserProvided,
+            }],
+            estimated_bytes,
+            estimated_tokens: 100,
+            attachment_count: 0,
+            purpose: "test".to_owned(),
+            retention: "none".to_owned(),
+            residency: None,
+            policy_version: "test".to_owned(),
+            consent_reference: None,
+        };
+        let proof = AiEgressDecision::allow(&manifest, "test", "test-user")
+            .authorize(&manifest)
+            .expect("capability manifest should authorize");
+        context
+            .with_authorized_transfer(manifest, proof)
+            .expect("capability transfer should bind")
     }
 
     #[test]
@@ -1343,6 +1387,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: Vec::new(),
             builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
@@ -1369,6 +1414,45 @@ mod tests {
         assert_eq!(body["input"][0]["type"], "function_call_output");
         assert_eq!(body["input"][0]["call_id"], "call-1");
         assert_eq!(body["store"], true);
+    }
+
+    #[test]
+    fn builtin_call_ceiling_maps_to_the_openai_wire_contract() {
+        let reference = SecretRef::parse("openai/builtin-limit-test")
+            .expect("test secret reference should parse");
+        let provider = OpenAiProvider::new(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+        )
+        .expect("provider should build");
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec![],
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic search".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::ProviderRetained,
+            tools: vec![],
+            builtin_tools: vec![ModelBuiltinTool::WebSearch {
+                allowed_domains: vec!["example.com".to_owned()],
+            }],
+            maximum_builtin_tool_calls: Some(3),
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+        let estimated_bytes = request.conservative_egress_bytes();
+        let provider_context = with_capability(
+            context("test-model", estimated_bytes),
+            "test-model",
+            AiEgressCapability::WebSearch,
+            estimated_bytes,
+        );
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("authorized web search should map");
+        assert_eq!(body["max_tool_calls"], 3);
+        assert_eq!(body["tools"][0]["type"], "web_search");
     }
 
     #[test]
@@ -1402,6 +1486,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -1471,6 +1556,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -1512,6 +1598,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(32),
         };
@@ -1570,6 +1657,7 @@ mod tests {
             continuation_mode: crate::ModelContinuationMode::ProviderRetained,
             tools: vec![],
             builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
             output_schema: None,
             maximum_output_tokens: Some(64),
         };
