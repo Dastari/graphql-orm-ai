@@ -56,7 +56,11 @@ use the same service through `AiAttachmentUploadService` in the streaming
 handler. Run that service as `AiAttachmentCleanupService` from a trusted
 host-owned scheduler; it is intentionally not a GraphQL operation. If
 provider-persistent artifacts are enabled, install the reviewed exact-reference
-boundary with `with_provider_file_deletion_service`. Deployment
+boundary with `with_provider_file_deletion_service`. For OpenAI artifacts,
+`OpenAiFileDeletionService::new` binds one exact logical profile to the fixed
+official Files endpoint and its just-in-time secret/configuration. A host with
+multiple profiles or providers must supply a reviewed router that preserves
+that exact binding. Deployment
 hard defaults are 25 MiB, 255 UTF-8 filename bytes, a ten-minute ticket, and a
 one-hour uninterrupted processing lease. Cleanup defaults to 50 rows and a
 five-minute claim lease. Validated limits may be stricter or up to the
@@ -110,6 +114,16 @@ writes a tombstone. Session retention must physically delete that artifact row
 before it can request cleanup of the parent attachment or scrub the linked
 message.
 
+The native OpenAI boundary accepts only an exact `provider_file` artifact bound
+to its configured OpenAI profile and a validated `file-...` identifier. It
+sends the official [delete file](https://developers.openai.com/api/reference/resources/files/methods/delete)
+request, validates the exact `{id, object: "file", deleted: true}`
+acknowledgement, then uses [retrieve file](https://developers.openai.com/api/reference/resources/files/methods/retrieve)
+for the same ID and requires not found. An initial exact delete not-found is an
+idempotent absence proof. Redirects, another family/profile, unexpected success
+shapes, oversized responses, and non-not-found retrieval results fail closed.
+The adapter never lists, uploads, searches, or reads file content.
+
 Restore reconciliation must keep runtime startup closed until AI migrations
 are applied. Nullable legacy `uploading` rows fall back to their expired ticket
 deadline, and legacy `deleting` rows with no processing deadline are eligible
@@ -152,7 +166,7 @@ reject animated GIFs. Direct files must be under 50 MiB each, and all inline
 image/file content must be no more than 50 MiB combined. The executor's safer
 default is at most eight attachments, 25 MiB each, and 50 MiB total. Hosts
 should normally narrow those limits and MIME acceptance. Inline input creates
-no provider-side delete obligation. The artifact cleanup seam can safely retire
-provider references created by a future host-owned persistent-file lifecycle,
-but this crate still does not upload, search, or otherwise create provider file
-objects.
+no provider-side delete obligation. The native OpenAI cleanup adapter can
+safely retire exact profile-bound references created by a host-owned
+persistent-file lifecycle, but this crate still does not upload, search, or
+otherwise create provider file objects.

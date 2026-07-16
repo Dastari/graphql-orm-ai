@@ -11,6 +11,8 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
+#[cfg(feature = "provider-openai")]
+use crate::{AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService};
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
     ModelInputBlock, ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent,
@@ -19,6 +21,8 @@ use crate::{
 
 #[cfg(feature = "provider-openai")]
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+#[cfg(feature = "provider-openai")]
+const OPENAI_FILES_ENDPOINT: &str = "https://api.openai.com/v1/files";
 #[cfg(feature = "provider-xai")]
 const XAI_RESPONSES_ENDPOINT: &str = "https://api.x.ai/v1/responses";
 const MAXIMUM_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
@@ -26,6 +30,8 @@ const MAXIMUM_RESPONSES_STREAM_EVENTS: usize = 65_536;
 const MAXIMUM_RESPONSES_TOOL_CALLS: usize = 64;
 const MAXIMUM_RESPONSES_VISIBLE_BYTES: usize = 64 * 1024 * 1024;
 const MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(feature = "provider-openai")]
+const MAXIMUM_FILE_DELETE_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResponsesFlavor {
@@ -85,6 +91,193 @@ pub struct OpenAiProvider {
     capabilities: ProviderCapabilities,
     #[cfg(feature = "provider-openai-compatible")]
     compatible_binding: Option<CompatibleRouteBinding>,
+}
+
+/// Native OpenAI exact-reference file deletion boundary.
+///
+/// This adapter implements only the host maintenance capability selected by
+/// [`crate::AiAttachmentCleanupService`]. It cannot list, upload, search, or
+/// retrieve file content. Each call resolves credentials just in time, sends
+/// an exact fixed-endpoint delete, validates the exact deletion response, and
+/// then requires authoritative retrieval to report the same file as absent.
+#[cfg(feature = "provider-openai")]
+pub struct OpenAiFileDeletionService {
+    provider_profile_id: String,
+    config: OpenAiProviderConfig,
+    secrets: Arc<dyn AiSecretStore>,
+    client: reqwest::Client,
+    files_endpoint: String,
+}
+
+#[cfg(feature = "provider-openai")]
+impl std::fmt::Debug for OpenAiFileDeletionService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenAiFileDeletionService")
+            .field("provider_profile_id", &"[REDACTED]")
+            .field("credential", &"[REDACTED]")
+            .field(
+                "organization_configured",
+                &self.config.organization.is_some(),
+            )
+            .field("project_configured", &self.config.project.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "provider-openai")]
+impl OpenAiFileDeletionService {
+    /// Builds a deletion service fixed to OpenAI's official Files endpoint
+    /// with redirects disabled.
+    ///
+    /// The `store_responses` setting is irrelevant to file maintenance; the
+    /// remaining credential, organization/project, and timeout settings are
+    /// shared with [`OpenAiProvider`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for an invalid logical
+    /// profile, safe header metadata, timeout, or HTTP client construction.
+    pub fn new(
+        provider_profile_id: impl Into<String>,
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+    ) -> Result<Self, ProviderError> {
+        Self::build(
+            provider_profile_id.into(),
+            config,
+            secrets,
+            OPENAI_FILES_ENDPOINT.to_owned(),
+        )
+    }
+
+    fn build(
+        provider_profile_id: String,
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        files_endpoint: String,
+    ) -> Result<Self, ProviderError> {
+        validate_optional_header(config.organization.as_deref())?;
+        validate_optional_header(config.project.as_deref())?;
+        if provider_profile_id.trim().is_empty()
+            || provider_profile_id.len() > 200
+            || provider_profile_id.chars().any(char::is_control)
+            || config.timeout.is_zero()
+            || config.timeout > Duration::from_secs(600)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "OpenAI file-deletion profile or timeout is invalid".to_owned(),
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(config.timeout)
+            .build()
+            .map_err(|_| {
+                ProviderError::InvalidConfiguration(
+                    "OpenAI HTTP client could not be constructed".to_owned(),
+                )
+            })?;
+        Ok(Self {
+            provider_profile_id,
+            config,
+            secrets,
+            client,
+            files_endpoint,
+        })
+    }
+
+    #[cfg(all(test, feature = "provider-openai"))]
+    fn for_loopback_test(
+        provider_profile_id: impl Into<String>,
+        config: OpenAiProviderConfig,
+        secrets: Arc<dyn AiSecretStore>,
+        files_endpoint: String,
+    ) -> Result<Self, ProviderError> {
+        if !files_endpoint.starts_with("http://127.0.0.1:")
+            || !files_endpoint.ends_with("/v1/files")
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "test Files endpoint must use IPv4 loopback".to_owned(),
+            ));
+        }
+        Self::build(provider_profile_id.into(), config, secrets, files_endpoint)
+    }
+
+    fn request_headers(&self) -> Result<HeaderMap, AiError> {
+        let mut headers = HeaderMap::new();
+        insert_optional_header(
+            &mut headers,
+            HeaderName::from_static("openai-organization"),
+            self.config.organization.as_deref(),
+        )
+        .map_err(|_| AiError::ProviderFailed)?;
+        insert_optional_header(
+            &mut headers,
+            HeaderName::from_static("openai-project"),
+            self.config.project.as_deref(),
+        )
+        .map_err(|_| AiError::ProviderFailed)?;
+        Ok(headers)
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        endpoint: &str,
+    ) -> Result<reqwest::Response, AiError> {
+        let secret = self
+            .secrets
+            .resolve(&self.config.credential)
+            .await
+            .map_err(|_| AiError::ProviderFailed)?;
+        self.client
+            .request(method, endpoint)
+            .headers(self.request_headers()?)
+            .bearer_auth(secret.expose_secret())
+            .send()
+            .await
+            .map_err(|_| AiError::ProviderFailed)
+    }
+}
+
+#[cfg(feature = "provider-openai")]
+#[async_trait]
+impl AiProviderFileDeletionService for OpenAiFileDeletionService {
+    async fn delete_and_confirm_absent(
+        &self,
+        request: &AiProviderFileDeletionRequest,
+    ) -> Result<(), AiError> {
+        if request.provider_kind() != &ProviderKind::OpenAi
+            || request.provider_profile_id() != self.provider_profile_id
+            || request.artifact_kind() != "provider_file"
+            || !valid_openai_file_id(request.provider_reference())
+        {
+            return Err(AiError::ProviderFailed);
+        }
+        let endpoint = format!("{}/{}", self.files_endpoint, request.provider_reference());
+        let deletion = self.send(reqwest::Method::DELETE, &endpoint).await?;
+        if deletion.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if !deletion.status().is_success() {
+            return Err(AiError::ProviderFailed);
+        }
+        let acknowledgement = bounded_json(deletion).await?;
+        if acknowledgement.get("id").and_then(Value::as_str) != Some(request.provider_reference())
+            || acknowledgement.get("object").and_then(Value::as_str) != Some("file")
+            || acknowledgement.get("deleted").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(AiError::ProviderFailed);
+        }
+
+        let retrieval = self.send(reqwest::Method::GET, &endpoint).await?;
+        if retrieval.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(AiError::ProviderFailed)
+        }
+    }
 }
 
 impl std::fmt::Debug for OpenAiProvider {
@@ -597,6 +790,29 @@ fn openai_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
     } else {
         Some(ProviderError::Rejected)
     }
+}
+
+#[cfg(feature = "provider-openai")]
+fn valid_openai_file_id(value: &str) -> bool {
+    value.starts_with("file-")
+        && (6..=200).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+#[cfg(feature = "provider-openai")]
+async fn bounded_json(response: reqwest::Response) -> Result<Value, AiError> {
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|_| AiError::ProviderFailed)?;
+        if body.len().saturating_add(chunk.len()) > MAXIMUM_FILE_DELETE_RESPONSE_BYTES {
+            return Err(AiError::ProviderFailed);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| AiError::ProviderFailed)
 }
 
 fn validate_optional_header(value: Option<&str>) -> Result<(), ProviderError> {
@@ -1158,6 +1374,7 @@ fn model_builtin_kind(tool: &ModelBuiltinTool) -> &'static str {
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use futures::TryStreamExt;
@@ -1175,6 +1392,11 @@ mod tests {
 
     struct TestSecrets(SecretRef, String);
 
+    struct CountingSecrets {
+        reference: SecretRef,
+        resolves: AtomicUsize,
+    }
+
     struct LiveFileSecrets(SecretRef, PathBuf);
 
     #[async_trait]
@@ -1182,6 +1404,30 @@ mod tests {
         async fn resolve(&self, reference: &SecretRef) -> Result<SecretString, SecretError> {
             if reference == &self.0 {
                 Ok(SecretString::from(self.1.clone()))
+            } else {
+                Err(SecretError::Unavailable)
+            }
+        }
+
+        async fn put(
+            &self,
+            _reference: Option<&SecretRef>,
+            _value: SecretString,
+        ) -> Result<SecretRef, SecretError> {
+            Err(SecretError::ReadOnly)
+        }
+
+        async fn delete(&self, _reference: &SecretRef) -> Result<(), SecretError> {
+            Err(SecretError::ReadOnly)
+        }
+    }
+
+    #[async_trait]
+    impl AiSecretStore for CountingSecrets {
+        async fn resolve(&self, reference: &SecretRef) -> Result<SecretString, SecretError> {
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            if reference == &self.reference {
+                Ok(SecretString::from("not-a-real-key".to_owned()))
             } else {
                 Err(SecretError::Unavailable)
             }
@@ -1261,6 +1507,42 @@ mod tests {
                 .expect("body should write");
         });
         (format!("http://{address}/v1/responses"), task)
+    }
+
+    async fn file_mock_server(
+        responses: Vec<(String, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("request should connect");
+                let mut request = vec![0_u8; 32 * 1024];
+                let count = socket
+                    .read(&mut request)
+                    .await
+                    .expect("request should read");
+                let request = String::from_utf8_lossy(&request[..count]);
+                requests.push(request.lines().next().unwrap_or_default().to_owned());
+                let headers = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket
+                    .write_all(headers.as_bytes())
+                    .await
+                    .expect("headers should write");
+                socket
+                    .write_all(body.as_bytes())
+                    .await
+                    .expect("body should write");
+            }
+            requests
+        });
+        (format!("http://{address}/v1/files"), task)
     }
 
     fn context(model: &str, estimated_bytes: u64) -> ProviderRequestContext {
@@ -1453,6 +1735,194 @@ mod tests {
             .expect("authorized web search should map");
         assert_eq!(body["max_tool_calls"], 3);
         assert_eq!(body["tools"][0]["type"], "web_search");
+    }
+
+    #[tokio::test]
+    async fn exact_file_deletion_requires_authoritative_absence() {
+        let file_id = "file-maintenance_test";
+        let deleted = format!(r#"{{"id":"{file_id}","object":"file","deleted":true}}"#);
+        let (endpoint, server) = file_mock_server(vec![
+            ("200 OK".to_owned(), deleted),
+            (
+                "404 Not Found".to_owned(),
+                r#"{"error":{"code":"not_found"}}"#.to_owned(),
+            ),
+        ])
+        .await;
+        let reference = SecretRef::parse("openai/file-maintenance-test")
+            .expect("test secret reference should parse");
+        let service = OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("file deletion service should build");
+        let request = AiProviderFileDeletionRequest::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "provider_file".to_owned(),
+            ProviderKind::OpenAi,
+            "profile-openai".to_owned(),
+            file_id.to_owned(),
+        );
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains("profile-openai"));
+        assert!(!request_debug.contains(file_id));
+
+        service
+            .delete_and_confirm_absent(&request)
+            .await
+            .expect("exact deletion plus not-found retrieval should confirm absence");
+        let requests = server.await.expect("file server should finish");
+        assert_eq!(
+            requests,
+            vec![
+                format!("DELETE /v1/files/{file_id} HTTP/1.1"),
+                format!("GET /v1/files/{file_id} HTTP/1.1"),
+            ]
+        );
+        let debug = format!("{service:?}");
+        assert!(!debug.contains("profile-openai"));
+        assert!(!debug.contains("file-maintenance-test"));
+        assert!(!debug.contains("not-a-real-key"));
+    }
+
+    #[tokio::test]
+    async fn absent_file_is_idempotent() {
+        let (endpoint, server) = file_mock_server(vec![(
+            "404 Not Found".to_owned(),
+            r#"{"error":{"code":"not_found"}}"#.to_owned(),
+        )])
+        .await;
+        let reference =
+            SecretRef::parse("openai/file-absent-test").expect("test reference should parse");
+        let service = OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("file deletion service should build");
+        let request = AiProviderFileDeletionRequest::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "provider_file".to_owned(),
+            ProviderKind::OpenAi,
+            "profile-openai".to_owned(),
+            "file-already_absent".to_owned(),
+        );
+        service
+            .delete_and_confirm_absent(&request)
+            .await
+            .expect("not found should prove idempotent absence");
+        assert_eq!(
+            server.await.expect("file server should finish"),
+            vec!["DELETE /v1/files/file-already_absent HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_file_owner_fails_before_credential_resolution() {
+        let reference =
+            SecretRef::parse("openai/file-owner-test").expect("test reference should parse");
+        let secrets = Arc::new(CountingSecrets {
+            reference: reference.clone(),
+            resolves: AtomicUsize::new(0),
+        });
+        let service = OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            OpenAiProviderConfig::new(reference),
+            secrets.clone(),
+            "http://127.0.0.1:9/v1/files".to_owned(),
+        )
+        .expect("file deletion service should build");
+
+        let wrong_provider = AiProviderFileDeletionRequest::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "provider_file".to_owned(),
+            ProviderKind::Xai,
+            "profile-openai".to_owned(),
+            "file-wrong_provider".to_owned(),
+        );
+        assert!(matches!(
+            service.delete_and_confirm_absent(&wrong_provider).await,
+            Err(AiError::ProviderFailed)
+        ));
+
+        let wrong_profile = AiProviderFileDeletionRequest::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "provider_file".to_owned(),
+            ProviderKind::OpenAi,
+            "profile-other".to_owned(),
+            "file-wrong_profile".to_owned(),
+        );
+        assert!(matches!(
+            service.delete_and_confirm_absent(&wrong_profile).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(secrets.resolves.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_file_deletion_responses_fail_closed() {
+        let file_id = "file-ambiguous_test";
+        let reference =
+            SecretRef::parse("openai/file-ambiguous-test").expect("test reference should parse");
+        let (endpoint, server) = file_mock_server(vec![(
+            "200 OK".to_owned(),
+            r#"{"id":"file-other","object":"file","deleted":true}"#.to_owned(),
+        )])
+        .await;
+        let service = OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("file deletion service should build");
+        let request = AiProviderFileDeletionRequest::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "provider_file".to_owned(),
+            ProviderKind::OpenAi,
+            "profile-openai".to_owned(),
+            file_id.to_owned(),
+        );
+        assert!(matches!(
+            service.delete_and_confirm_absent(&request).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(
+            server.await.expect("file server should finish"),
+            vec![format!("DELETE /v1/files/{file_id} HTTP/1.1")]
+        );
+
+        let deleted = format!(r#"{{"id":"{file_id}","object":"file","deleted":true}}"#);
+        let (endpoint, server) = file_mock_server(vec![
+            ("200 OK".to_owned(), deleted),
+            (
+                "200 OK".to_owned(),
+                r#"{"id":"file-ambiguous_test"}"#.to_owned(),
+            ),
+        ])
+        .await;
+        let reference = SecretRef::parse("openai/file-still-present-test")
+            .expect("test reference should parse");
+        let service = OpenAiFileDeletionService::for_loopback_test(
+            "profile-openai",
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("file deletion service should build");
+        assert!(matches!(
+            service.delete_and_confirm_absent(&request).await,
+            Err(AiError::ProviderFailed)
+        ));
+        assert_eq!(server.await.expect("file server should finish").len(), 2);
     }
 
     #[test]

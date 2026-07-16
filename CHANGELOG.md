@@ -5,11 +5,24 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.47.0` and AI
-schema module to `0.44.0`. It keeps 39 private entities and adds authoritative
-provider-hosted web/file-search unit accounting.
+This development line advances the pre-1.0 crate version to `0.48.0` and AI
+schema module to `0.45.0`. It keeps 39 private entities and adds a native,
+profile-bound OpenAI exact-reference file-deletion boundary.
 
 ### Added
+
+- Feature-gated `OpenAiFileDeletionService` implements only exact OpenAI Files
+  deletion for artifacts selected by the existing fenced attachment cleanup
+  worker. It uses the fixed official endpoint with redirects disabled, resolves
+  credentials just in time, validates the exact deletion acknowledgement, and
+  then requires retrieval of the same file to report not found. An initial
+  exact delete not-found is idempotent success; all ambiguous responses retain
+  the durable reference for bounded retry.
+- `AiProviderFileDeletionRequest` now exposes the validated provider family and
+  exact logical provider profile owning the opaque file reference. Both the
+  profile and reference remain redacted from `Debug`; the native OpenAI service
+  rejects another family, profile, artifact kind, or malformed file ID before
+  transport.
 
 - Immutable pricing versions now carry deployment-supplied web-search and
   file-search microunits per completed call. `AiPricingQuoteRequest` binds a
@@ -100,6 +113,14 @@ provider-hosted web/file-search unit accounting.
   artifacts before parent attachments and appends only redacted audit facts.
 
 ### Changed
+
+- Schema module `0.45.0` adds nullable provider-family and logical-profile
+  bindings to private attachment artifacts. A provider reference is valid only
+  when both bindings are present, and successful cleanup atomically clears all
+  three before metadata can be deleted. Existing artifacts without provider
+  references need no row rewrite; legacy provider references without exact
+  ownership bindings remain fail-closed until trusted closed-runtime
+  reconciliation.
 
 - Schema module `0.44.0` adds defaulted nonnegative web/file-search rate
   columns to the append-only private pricing catalog. Built-in rate management

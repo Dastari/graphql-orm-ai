@@ -3939,6 +3939,17 @@ pub(crate) fn validate_attachment_artifact(
         || artifact.provider_reference.as_ref().is_some_and(|value| {
             value.trim().is_empty() || value.len() > 4_096 || value.chars().any(char::is_control)
         })
+        || artifact.provider_reference.is_some() != artifact.provider_kind.is_some()
+        || artifact.provider_reference.is_some() != artifact.provider_profile_id.is_some()
+        || artifact.provider_kind.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible" | "local_harness"
+            )
+        })
+        || artifact.provider_profile_id.as_ref().is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 200 || value.chars().any(char::is_control)
+        })
         || artifact
             .cleanup_generation
             .is_some_and(|generation| generation <= 0)
@@ -3972,6 +3983,8 @@ pub(crate) fn validate_attachment_artifact(
         || (artifact.cleanup_state.as_deref() == Some("complete")
             && (artifact.blob_reference.is_some()
                 || artifact.protected_content.is_some()
+                || artifact.provider_kind.is_some()
+                || artifact.provider_profile_id.is_some()
                 || artifact.provider_reference.is_some()
                 || artifact.provider_expires_at.is_some()
                 || artifact.deleted_at.is_none()
@@ -3991,6 +4004,8 @@ fn attachment_artifact_ready_for_metadata_delete(artifact: &AiAttachmentArtifact
             .is_some_and(|generation| generation > 0)
         && artifact.blob_reference.is_none()
         && artifact.protected_content.is_none()
+        && artifact.provider_kind.is_none()
+        && artifact.provider_profile_id.is_none()
         && artifact.provider_reference.is_none()
         && artifact.provider_expires_at.is_none()
         && artifact.cleanup_lease_expires_at.is_none()
@@ -4104,7 +4119,7 @@ mod tests {
         AiAttachmentAcceptancePolicy, AiAttachmentCandidate, AiAttachmentCleanupService,
         AiAttachmentScanReport, AiAttachmentScanRequest, AiAttachmentScanner,
         AiProviderFileDeletionRequest, AiProviderFileDeletionService, AiSessionService,
-        DatabaseManagedContentProtector, OrmAiAttachmentService,
+        DatabaseManagedContentProtector, OrmAiAttachmentService, ProviderKind,
     };
     use agql_auth::{AccessTokenMetadata, AuthPrincipal, AuthUser, FixedClock, SessionContext};
     use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
@@ -4302,6 +4317,8 @@ mod tests {
             assert!(!request.artifact_id().is_nil());
             assert!(!request.attachment_id().is_nil());
             assert_eq!(request.artifact_kind(), "provider_file");
+            assert_eq!(request.provider_kind(), &ProviderKind::OpenAi);
+            assert_eq!(request.provider_profile_id(), "profile-openai");
             if self.fail.load(Ordering::SeqCst) {
                 return Err(AiError::PersistenceFailed);
             }
@@ -6570,6 +6587,8 @@ mod tests {
                 detected_mime: Some("text/plain".to_owned()),
                 byte_count: 0,
                 sha256: None,
+                provider_kind: Some(ProviderKind::OpenAi.as_str().to_owned()),
+                provider_profile_id: Some("profile-openai".to_owned()),
                 provider_reference: Some("provider-file-safe-reference".to_owned()),
                 provider_expires_at: None,
                 cleanup_state: None,
@@ -6646,6 +6665,8 @@ mod tests {
                             current.row_version,
                             AiAttachmentArtifactRecordWhereInput::default(),
                             UpdateAiAttachmentArtifactRecordInput {
+                                provider_kind: Some(None),
+                                provider_profile_id: Some(None),
                                 provider_reference: Some(None),
                                 provider_expires_at: Some(None),
                                 cleanup_state: Some(Some("complete".to_owned())),
@@ -6737,6 +6758,8 @@ mod tests {
                 detected_mime: Some("text/plain".to_owned()),
                 byte_count: 9,
                 sha256: Some("0".repeat(64)),
+                provider_kind: Some(ProviderKind::OpenAi.as_str().to_owned()),
+                provider_profile_id: Some("profile-openai".to_owned()),
                 provider_reference: Some(provider_reference.to_owned()),
                 provider_expires_at: Some(now().unix_timestamp() - 1),
                 cleanup_state: None,
@@ -6907,6 +6930,8 @@ mod tests {
                     detected_mime: Some("text/plain".to_owned()),
                     byte_count: 1,
                     sha256: Some("0".repeat(64)),
+                    provider_kind: None,
+                    provider_profile_id: None,
                     provider_reference: None,
                     provider_expires_at: None,
                     cleanup_state: None,

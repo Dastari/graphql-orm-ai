@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{AiAccessDecision, AiError, AiScope, AiSessionId, ModelInputBlock};
+use crate::{AiAccessDecision, AiError, AiScope, AiSessionId, ModelInputBlock, ProviderKind};
 
 /// Bounded client-visible attachment metadata.
 ///
@@ -449,6 +449,8 @@ pub struct AiProviderFileDeletionRequest {
     artifact_id: Uuid,
     attachment_id: Uuid,
     artifact_kind: String,
+    provider_kind: ProviderKind,
+    provider_profile_id: String,
     provider_reference: String,
 }
 
@@ -458,12 +460,16 @@ impl AiProviderFileDeletionRequest {
         artifact_id: Uuid,
         attachment_id: Uuid,
         artifact_kind: String,
+        provider_kind: ProviderKind,
+        provider_profile_id: String,
         provider_reference: String,
     ) -> Self {
         Self {
             artifact_id,
             attachment_id,
             artifact_kind,
+            provider_kind,
+            provider_profile_id,
             provider_reference,
         }
     }
@@ -483,6 +489,16 @@ impl AiProviderFileDeletionRequest {
         &self.artifact_kind
     }
 
+    /// Exact provider family owning the persistent file reference.
+    pub const fn provider_kind(&self) -> &ProviderKind {
+        &self.provider_kind
+    }
+
+    /// Exact logical provider profile owning the persistent file.
+    pub fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+
     /// Exact opaque provider reference selected by the fenced cleanup claim.
     pub fn provider_reference(&self) -> &str {
         &self.provider_reference
@@ -496,6 +512,8 @@ impl fmt::Debug for AiProviderFileDeletionRequest {
             .field("artifact_id", &self.artifact_id)
             .field("attachment_id", &self.attachment_id)
             .field("artifact_kind", &self.artifact_kind)
+            .field("provider_kind", &self.provider_kind)
+            .field("provider_profile_id", &"[REDACTED]")
             .field("provider_reference", &"[REDACTED]")
             .finish()
     }

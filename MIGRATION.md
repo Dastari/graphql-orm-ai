@@ -4,6 +4,44 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: native OpenAI exact-reference deletion (crate 0.47.0 to 0.48.0; schema 0.44.0 to 0.45.0)
+
+Apply AI schema module `0.45.0` while attachment, retention, backup/restore,
+and runtime workers are closed. The generated migration keeps 39 private
+entities and adds nullable `provider_kind` and `provider_profile_id` columns to
+private attachment artifacts. It adds no table, index, or constraint. Rows
+without a provider reference need no data rewrite.
+
+Every artifact carrying `provider_reference` must now carry its exact supported
+provider family and logical provider profile. Legacy provider-reference rows
+without either binding deliberately fail validation and cleanup. Reconcile
+those rows only while the runtime is closed through a reviewed trusted
+migration or restore process that can prove the original owner; do not infer a
+provider/profile, issue application-authored SQL, or clear the reference to
+make validation pass. Successful fenced cleanup clears the reference and both
+ownership bindings atomically before retention may delete artifact metadata.
+
+`AiProviderFileDeletionRequest` adds `provider_kind()` and
+`provider_profile_id()` getters. Host implementations of
+`AiProviderFileDeletionService` should route and authorize from those exact
+values and continue to treat the opaque reference as sensitive.
+
+With `provider-openai`, hosts may construct `OpenAiFileDeletionService::new`
+with the exact logical profile ID, `OpenAiProviderConfig`, and `AiSecretStore`,
+then install it through
+`OrmAiAttachmentService::with_provider_file_deletion_service`. The adapter is
+fixed to OpenAI's official Files endpoint, cannot list/upload/search/read file
+content, validates the exact deletion acknowledgement, and confirms absence by
+retrieving the same file and requiring not found. It rejects another provider
+family, logical profile, artifact kind, or malformed OpenAI file ID before
+transport. A configured profile must continue to resolve the same OpenAI
+project/organization ownership domain used when the artifact was created.
+
+This is an additive public Rust API plus private schema and retention-contract
+change. It adds no provider upload/search lifecycle, GraphQL SDL, egress or
+budget authority, credential persistence, entity, or application data rewrite
+for ordinary rows.
+
 ## Unreleased: authoritative provider built-in unit pricing (crate 0.46.0 to 0.47.0; schema 0.43.0 to 0.44.0)
 
 Apply AI schema module `0.44.0` while provider workers, pricing administration,

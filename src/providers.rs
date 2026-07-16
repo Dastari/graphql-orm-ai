@@ -27,7 +27,7 @@ pub use mock::MockProvider;
 pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
 
 #[cfg(feature = "provider-openai")]
-pub use openai::{OpenAiProvider, OpenAiProviderConfig};
+pub use openai::{OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig};
 
 #[cfg(feature = "provider-openai-compatible")]
 pub use openai_compatible::{

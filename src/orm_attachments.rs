@@ -41,8 +41,8 @@ use crate::{
     AiContentProtectionPolicyResolver, AiContentProtector, AiError, AiProviderAttachmentRequest,
     AiProviderAttachmentResolver, AiProviderFileDeletionRequest, AiProviderFileDeletionService,
     AiResolvedProviderAttachment, AiScope, AiSessionAction, AiSessionId, AiSessionWakeup,
-    ContentProtectionContext, CreateAiAttachmentUploadInput, valid_mime, valid_safe_reference,
-    valid_sha256,
+    ContentProtectionContext, CreateAiAttachmentUploadInput, ProviderKind, valid_mime,
+    valid_safe_reference, valid_sha256,
 };
 
 /// Deployment hard limits for attachment intake.
@@ -735,6 +735,8 @@ impl OrmAiAttachmentService {
                             UpdateAiAttachmentArtifactRecordInput {
                                 blob_reference: Some(None),
                                 protected_content: Some(None),
+                                provider_kind: Some(None),
+                                provider_profile_id: Some(None),
                                 provider_reference: Some(None),
                                 provider_expires_at: Some(None),
                                 cleanup_state: Some(Some("complete".to_owned())),
@@ -810,10 +812,25 @@ impl OrmAiAttachmentService {
                 let Some(service) = &self.provider_file_deletion else {
                     return false;
                 };
+                let Some(provider_kind) = claimed
+                    .provider_kind
+                    .as_deref()
+                    .and_then(parse_provider_kind)
+                else {
+                    return false;
+                };
+                let Some(provider_profile_id) = claimed.provider_profile_id.clone() else {
+                    return false;
+                };
+                if !valid_safe_reference(&provider_profile_id, 200) {
+                    return false;
+                }
                 let request = AiProviderFileDeletionRequest::new(
                     claimed.id,
                     claimed.attachment_id,
                     claimed.artifact_kind.clone(),
+                    provider_kind,
+                    provider_profile_id,
                     reference.to_owned(),
                 );
                 service.delete_and_confirm_absent(&request).await.is_ok()
@@ -1130,6 +1147,18 @@ impl OrmAiAttachmentService {
             })
             .await
             .map_err(map_transaction)
+    }
+}
+
+fn parse_provider_kind(value: &str) -> Option<ProviderKind> {
+    match value {
+        "openai" => Some(ProviderKind::OpenAi),
+        "anthropic" => Some(ProviderKind::Anthropic),
+        "xai" => Some(ProviderKind::Xai),
+        "ollama" => Some(ProviderKind::Ollama),
+        "openai_compatible" => Some(ProviderKind::OpenAiCompatible),
+        "local_harness" => Some(ProviderKind::LocalHarness),
+        _ => None,
     }
 }
 

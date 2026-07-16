@@ -17,7 +17,7 @@ production-ready behavior.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.44.0`) and 39 private records
+- AI schema-module identity (currently version `0.45.0`) and 39 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, webhook receipts,
@@ -176,6 +176,10 @@ production-ready behavior.
   fresh CAS reload, monotonic generations, reclaimable leases, confirmed
   idempotent exact-reference deletion, redacted audit, capped retry backoff,
   legacy interrupted-state handling, and concurrent-worker tests.
+- Native OpenAI exact-reference artifact deletion bound to one logical provider
+  profile, fixed official Files endpoint, just-in-time credentials, exact
+  acknowledgement validation, and authoritative same-ID absence confirmation.
+  It cannot list, upload, search, or retrieve file content.
 - Provider-neutral exact attachment reopening with private-field request and
   resolved payloads, deployment raw-byte/cardinality limits, current owner/
   session/scope checks, released/clean/message-linked enforcement, object
@@ -396,7 +400,7 @@ production-ready behavior.
   The crate's disposable PostgreSQL parity harness is implemented, but it does
   not substitute for a consumer's schema composition/restore rehearsal.
 - Complete deleting-session, audit, attachment/blob, and provider-persistent-
-  file retention workflows.
+  file retention workflows beyond the implemented exact OpenAI deletion seam.
   Principal-inbox pruning
   plus bounded provisional-delta and post-deletion-cutoff session-event/
   context-summary/terminal-proposal/terminal-tool-and-approval/artifact/basic-attachment/
@@ -417,7 +421,8 @@ production-ready behavior.
   image/file input, expired/interrupted exact-reference cleanup, and verified
   deleting-session cleanup for artifacts and parent attachment
   objects/metadata are implemented. Provider artifact deletion is an exact
-  host seam; no provider file is created or searched by this crate.
+  host seam with a native profile-bound OpenAI implementation; no provider
+  file is created or searched by this crate.
 - Multi-call, mixed, parallel, or stateless supervised coordination. The
   sequential provider-retained top-level coordinator and bounded live
   human-wait reconciliation are implemented; the read-only coordinator still
@@ -459,10 +464,11 @@ production-ready behavior.
 
 ## Next implementation slice
 
-1. Add provider-persistent file/search/deletion and background/webhook
-   lifecycles behind their independent authority, egress, budget, fencing,
-   retention, and restore proofs. Extend authoritative unit pricing only when
-   each additional billing dimension is complete.
+1. Add provider-persistent file upload/search and background/webhook lifecycles
+   behind their independent authority, egress, budget, fencing, retention, and
+   restore proofs, building on exact profile-bound deletion. Extend
+   authoritative unit pricing only when each additional billing dimension is
+   complete.
 2. Design complete ordering/history proofs before considering multi-call or
    stateless supervised resumption; keep both paths closed until those proofs
    are reviewable.
@@ -489,8 +495,8 @@ intentional.
 - Test-owned PostgreSQL 17 migration/session/keyset/fencing parity passed; the
   ownership-labeled container and unique database were removed afterward.
 - `cargo check --no-default-features --features mssql`: passed, schema-only.
-- The prior `0.46.0`/`0.43.0` release matrix and branch CI are fully green.
-  The current `0.47.0`/`0.44.0` built-in accounting slice passes the full
+- The prior `0.47.0`/`0.44.0` release matrix and branch CI are fully green.
+  The current `0.48.0`/`0.45.0` exact OpenAI deletion slice passes the full
   local release matrix, owned disposable PostgreSQL parity, package/privacy
   review, and SemVer comparison. The committed release-policy gate and branch
   CI remain required before review.

@@ -203,6 +203,9 @@ waits without polling, resuming, or executing them.
 - A host-only, bounded attachment maintenance worker that fences cleanup
   generations, expires abandoned tickets/processing, confirms idempotent blob
   deletion, audits outcomes, and backs off safely on ambiguous storage errors.
+- A separately installed native OpenAI artifact-deletion boundary that binds an
+  exact logical profile, deletes only a selected `file-...` reference, validates
+  its acknowledgement, and authoritatively confirms same-ID absence.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 
@@ -317,8 +320,9 @@ ownership, byte/hash checks, quarantine, scanning, acceptance, promotion,
 release, protected events, and message linkage are implemented. Provider
 file/image reopening and OpenAI inline input are implemented; derivative
 artifact cleanup/retention is implemented for deleting sessions through a
-host-supplied exact provider-absence seam. Artifact production, quotas, and
-provider-persistent file upload/search remain gated.
+host-supplied exact provider-absence seam, including a profile-bound native
+OpenAI implementation. Artifact production, quotas, and provider-persistent
+file upload/search remain gated.
 
 ## Current maturity
 
@@ -349,7 +353,7 @@ Production blockers include partial/multi-call and stateless supervised
 tool-batch adoption, code-interpreter/image-generation
 pricing dimensions, privileged uncertain-call
 recovery, completion of deleting-session/provider-raw/audit retention workflows,
-per-item proposal review, provider-persistent file/search lifecycle,
+per-item proposal review, provider-persistent file upload/search lifecycle,
 attachment quotas/derivative production, production mutable secret
 stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,

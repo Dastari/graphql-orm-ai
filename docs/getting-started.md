@@ -19,7 +19,8 @@ Exactly one persistence backend is currently required:
 - `mssql` (schema/compile support until ORM write parity lands)
 
 Provider adapters are opt-in. `provider-openai` enables the native OpenAI
-Responses adapter. `provider-anthropic` enables the native Anthropic Messages
+Responses adapter and its separately installed exact-reference file-deletion
+service. `provider-anthropic` enables the native Anthropic Messages
 adapter with a fixed official endpoint and secret-store credential reference.
 `provider-xai` enables the native xAI Responses adapter with a fixed official
 endpoint and zero-data-retention verification enabled by default.
@@ -325,4 +326,6 @@ the [live-streaming guide](live-streaming.md). The proposal/approval GraphQL
 lifecycles and consequential executor are implemented; approval consumption is
 always followed by fresh ordinary resolver authorization in that path. See the
 [proposal and approval lifecycle guide](review-lifecycles.md) and
-[supervised tool guide](supervised-tool-loop.md).
+[supervised tool guide](supervised-tool-loop.md). Exact profile-bound native
+OpenAI file deletion is implemented through the host-only attachment cleanup
+worker; see the [attachment guide](attachments.md).
