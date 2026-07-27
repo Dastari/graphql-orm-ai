@@ -97,9 +97,13 @@ run, profile, response, and budget identities from `Debug`.
 
 ## Terminal reconciliation design
 
-Status: design contract only. The current crate still leaves accepted
-submissions in `WaitingProvider`; the types, persistent claim fields, retrieval
-adapter, and terminal transaction described below are not implemented yet.
+Status: implementation in progress. Schema module `0.48.0` reserves the
+content-free claim, retry, deadline, current retrieval-egress, reconciliation,
+and terminal-reference fields described below. Newly accepted submissions
+initialize the counters, next-attempt time, and a fixed deadline. The claim
+transactions, retrieval adapter, and terminal transaction are not implemented
+yet, so the current crate still leaves accepted submissions in
+`WaitingProvider`.
 
 OpenAI's background guide says to poll the exact Responses GET endpoint while
 the response is `queued` or `in_progress`; leaving those states is terminal.
@@ -111,15 +115,14 @@ progress when a webhook is delayed, duplicated, absent, or disabled.
 ### Durable lifecycle
 
 The submission row is the reconciliation unit. A receipt is never independently
-claimable. Implementation must extend the existing submission row with the
-minimum claim facts: reconciliation owner, monotonically increasing
-reconciliation generation, lease expiry, next-attempt time, retry count,
-fixed reconciliation deadline, reconciled time, current retrieval-egress
-decision, and terminal assistant message/checkpoint reference. The deadline is
-captured from the acknowledged storage choice and the deployment's reviewed
-provider-retention bound; a later configuration change cannot extend it. The
-existing CAS row version remains mandatory. The AI schema module version must
-advance when those persistent semantics land.
+claimable. The row now reserves the minimum claim facts: reconciliation owner,
+monotonically increasing reconciliation generation, lease expiry, next-attempt
+time, retry count, fixed reconciliation deadline, reconciled time, current
+retrieval-egress decision, and terminal assistant message/checkpoint reference.
+The deadline is captured from the earlier of the provider creation timestamp
+or local acceptance time plus the deployment's reviewed provider-retention
+bound; a later configuration change or a future-skewed provider timestamp
+cannot extend it. The existing CAS row version remains mandatory.
 
 | Submission state | Meaning | Allowed next state |
 | --- | --- | --- |

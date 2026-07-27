@@ -1738,6 +1738,31 @@ pub(crate) struct AiProviderBackgroundSubmissionRecord {
     pub provider_created_at: Option<i64>,
     /// Local time when the acknowledgement was fenced into the wait state.
     pub submitted_at: Option<i64>,
+    /// Current reconciliation owner. It grants no provider or run authority.
+    pub reconciliation_owner: Option<String>,
+    /// Monotonic reconciliation claim generation.
+    #[graphql_orm(default = "0")]
+    pub reconciliation_generation: i64,
+    /// Deadline after which another reconciler may reclaim the submission.
+    #[filterable(type = "number")]
+    pub reconciliation_lease_expires_at: Option<i64>,
+    /// Earliest time at which the exact response may be polled again.
+    #[filterable(type = "number")]
+    #[sortable]
+    pub reconciliation_next_attempt_at: Option<i64>,
+    /// Bounded read-only retrieval retry count.
+    #[graphql_orm(default = "0")]
+    pub reconciliation_retry_count: i64,
+    /// Fixed provider-retention deadline captured when acknowledgement is bound.
+    #[filterable(type = "number")]
+    #[sortable]
+    pub reconciliation_deadline: Option<i64>,
+    /// Local time when the complete terminal graph committed.
+    pub reconciled_at: Option<i64>,
+    /// Current allow decision authorizing exact response retrieval.
+    pub retrieval_egress_decision_id: Option<graphql_orm::uuid::Uuid>,
+    /// Successful terminal assistant message and output checkpoint.
+    pub terminal_message_id: Option<graphql_orm::uuid::Uuid>,
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
@@ -1946,7 +1971,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.47.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.48.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

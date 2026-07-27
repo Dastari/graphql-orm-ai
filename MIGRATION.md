@@ -4,6 +4,48 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: OpenAI background reconciliation claim schema (crate 0.51.0 to 0.52.0; schema 0.47.0 to 0.48.0)
+
+Apply AI schema module `0.48.0` while provider workers, webhook intake,
+backup/restore, and runtime start are closed. The generated migration keeps 40
+private entities and adds nullable reconciliation owner, lease-expiry,
+next-attempt, deadline, reconciliation-time, retrieval-egress-decision, and
+terminal-message columns to
+`graphql_orm_ai_provider_background_submissions`. It also adds generation and
+retry counters with zero defaults and indexes the lease,
+next-attempt, and deadline fields used by future bounded workers. The module
+fingerprint and backup descriptor change.
+
+The migration itself does not rewrite existing submission rows. A row created
+under schema `0.47.0` therefore has no reconciliation deadline or next-attempt
+time and remains ineligible for future automated reconciliation. Keep such a
+row parked and resolve it through the deployment's reviewed recovery process;
+do not infer a historical provider-retention promise or backfill it through
+application-authored SQL. No stored content or application data migration is
+required. An empty background-submission table needs no operational data
+handling.
+
+Newly accepted submissions initialize generation and retry count to zero,
+schedule the first attempt at local acceptance time, and capture an immutable
+response-availability deadline. The deadline uses the earlier of the provider
+creation timestamp or local acceptance time plus the window selected by the
+acknowledged `store` value, so timestamp skew and later configuration changes
+cannot extend it.
+
+Hosts may supply public
+`AiOpenAiBackgroundReconciliationWindows` through
+`OrmAiOpenAiBackgroundSubmissionService::with_reconciliation_windows`.
+Both values must be at least one second. Temporary `store: false` responses
+default to five minutes and cannot exceed ten minutes; stored responses
+default to 29 days and cannot exceed 30 days. Narrow these values when the
+reviewed logical provider profile promises a shorter availability period.
+
+This is an additive public Rust API and private persistence/behavioral contract
+change. It changes no public GraphQL SDL and starts no reconciler. Claim/
+reclaim/release transactions, exact-response retrieval, receipt matching,
+budget settlement, protected output persistence, terminal run mutation, and
+restore validation remain closed in this release increment.
+
 ## Unreleased: upstream dependency alignment to graphql-orm 0.15.0 and agql-auth 0.12.0
 
 Update the exact Git dependency universe to:

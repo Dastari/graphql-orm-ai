@@ -14,8 +14,8 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.51.0` (unpublished pre-release).
-- AI schema-module version: `0.47.0`.
+- Crate version: `0.52.0` (unpublished Slice 1 development).
+- AI schema-module version: `0.48.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
     `6beef53633befd90a4d4810887a3e4640dc4ad91`.
@@ -119,7 +119,9 @@ verified webhook intake already exist, but an accepted run remains parked in
 authority to retrieve output or mutate the run.
 
 Status: the complete design gate and negative/crash matrix are documented in
-the two focused guides. Runtime and schema implementation have not started.
+the two focused guides. The `0.48.0` schema now reserves and initializes the
+minimum reconciliation claim/deadline facts; claim, retrieval, and terminal
+execution remain closed.
 
 ### Design gate
 
@@ -413,8 +415,8 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Implement Slice 1's minimum submission claim/lease fields, legal state
-   validation, schema migration, and bounded concurrent claim tests.
+1. Implement bounded claim/reclaim/release transactions and concurrent claim
+   tests over the reserved Slice 1 fields.
 2. Add the fixed-destination OpenAI retrieval binding and terminal normalizer.
 3. Add the one-transaction terminal graph, restore validation, PostgreSQL
    parity, and full release-matrix proof.

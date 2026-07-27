@@ -217,7 +217,10 @@ waits without polling, resuming, or executing them.
   awaiting one create acknowledgement that must echo the exact model, ceiling,
   and storage choice. Acceptance parks the run without a lease, while ambiguity
   closes it with an immutable attempt outcome for manual recovery and is never
-  retried.
+  retried. Schema `0.48.0` now reserves bounded reconciliation claim/scheduling
+  facts and captures a deployment-bounded fixed response deadline for new
+  accepted rows; claim, retrieval, and terminal mutation remain deliberately
+  unavailable.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 

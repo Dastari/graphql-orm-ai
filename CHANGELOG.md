@@ -5,13 +5,25 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.51.0` while the
-AI schema module remains `0.47.0`. It aligns the reviewed dependency universe
-after adding a fortieth private entity for exact, content-free OpenAI
-background-submission bindings.
+This development line advances the pre-1.0 crate version to `0.52.0` and AI
+schema module to `0.48.0`. It aligns the reviewed dependency universe and
+starts the durable OpenAI background terminal-reconciliation implementation.
 
 ### Added
 
+- Schema module `0.48.0` adds content-free reconciliation owner/generation/
+  lease, next-attempt/retry, fixed deadline, current retrieval-egress,
+  reconciled-time, and terminal-message fields to OpenAI background
+  submissions. Newly accepted rows initialize the bounded scheduling facts and
+  capture a deadline that cannot exceed either the provider-creation or local-
+  acceptance time plus the deployment-reviewed response window.
+- Public `AiOpenAiBackgroundReconciliationWindows` and
+  `OrmAiOpenAiBackgroundSubmissionService::with_reconciliation_windows`
+  configure those acceptance-time bounds. Defaults are five minutes for
+  temporary `store: false` responses and 29 days for stored responses;
+  compiled ceilings are ten minutes and 30 days. This increment does not expose
+  a claim, retrieval, or terminal-mutation worker, so accepted runs remain
+  parked in `WaitingProvider`.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundSubmissionService` now prepares one exact
   run/attempt/fence/profile/model/request/budget/egress binding, rehydrates

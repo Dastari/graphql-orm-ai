@@ -12,6 +12,7 @@ use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
 use graphql_orm::graphql::filters::UuidFilter;
 use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionError, TransactionMode};
 use sha2::{Digest, Sha256};
+use time::Duration;
 use uuid::Uuid;
 
 use crate::orm_runs::{
@@ -26,6 +27,105 @@ use crate::{
     ModelContinuationMode, ModelInputBlock, OrmAiRunService, ProviderBackgroundBinding,
     ProviderBackgroundSubmission, ProviderKind, ProviderRequestContext,
 };
+
+const MAXIMUM_TEMPORARY_RESPONSE_WINDOW: Duration = Duration::minutes(10);
+const MAXIMUM_STORED_RESPONSE_WINDOW: Duration = Duration::days(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundSubmissionState {
+    Prepared,
+    WaitingProvider,
+    Reconciling,
+    Completed,
+    Failed,
+    Cancelled,
+    RecoveryRequired,
+}
+
+impl BackgroundSubmissionState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::WaitingProvider => "waiting_provider",
+            Self::Reconciling => "reconciling",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
+
+    fn from_persisted(value: &str) -> Option<Self> {
+        match value {
+            "prepared" => Some(Self::Prepared),
+            "waiting_provider" => Some(Self::WaitingProvider),
+            "reconciling" => Some(Self::Reconciling),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "recovery_required" => Some(Self::RecoveryRequired),
+            _ => None,
+        }
+    }
+}
+
+/// Deployment-reviewed OpenAI response-availability windows used to capture a
+/// fixed terminal-reconciliation deadline.
+///
+/// These windows are deliberately shorter than or equal to OpenAI's documented
+/// provider-side application-state periods. They are availability limits, not
+/// authorization to retain or disclose provider output. The exact
+/// `provider_response` egress and retention proof remains mandatory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiOpenAiBackgroundReconciliationWindows {
+    temporary_response: Duration,
+    stored_response: Duration,
+}
+
+impl AiOpenAiBackgroundReconciliationWindows {
+    /// Creates fixed response-availability windows for new submissions.
+    ///
+    /// The temporary window applies when the acknowledgement reports
+    /// `store: false`; the stored window applies to `store: true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless both windows are at
+    /// least one second and do not exceed the compiled ten-minute temporary
+    /// and thirty-day stored-response ceilings.
+    pub fn new(temporary_response: Duration, stored_response: Duration) -> Result<Self, AiError> {
+        if temporary_response < Duration::SECOND
+            || temporary_response > MAXIMUM_TEMPORARY_RESPONSE_WINDOW
+            || stored_response < Duration::SECOND
+            || stored_response > MAXIMUM_STORED_RESPONSE_WINDOW
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid OpenAI background reconciliation windows".to_owned(),
+            ));
+        }
+        Ok(Self {
+            temporary_response,
+            stored_response,
+        })
+    }
+
+    fn for_storage(self, stored: bool) -> Duration {
+        if stored {
+            self.stored_response
+        } else {
+            self.temporary_response
+        }
+    }
+}
+
+impl Default for AiOpenAiBackgroundReconciliationWindows {
+    fn default() -> Self {
+        Self {
+            temporary_response: Duration::minutes(5),
+            stored_response: Duration::days(29),
+        }
+    }
+}
 
 /// Durable content-free result of one accepted OpenAI background submission.
 ///
@@ -136,6 +236,7 @@ pub struct OrmAiOpenAiBackgroundSubmissionService {
     budget_service: Arc<dyn AiBudgetService>,
     egress_audit: Arc<dyn AiEgressDecisionAudit>,
     clock: Arc<dyn Clock>,
+    reconciliation_windows: AiOpenAiBackgroundReconciliationWindows,
 }
 
 impl OrmAiOpenAiBackgroundSubmissionService {
@@ -158,7 +259,23 @@ impl OrmAiOpenAiBackgroundSubmissionService {
             budget_service,
             egress_audit,
             clock,
+            reconciliation_windows: AiOpenAiBackgroundReconciliationWindows::default(),
         }
+    }
+
+    /// Overrides the fixed provider-response availability windows captured for
+    /// subsequently accepted submissions.
+    ///
+    /// Narrower deployment values are appropriate when a logical provider
+    /// profile has a shorter reviewed retention contract. This does not alter
+    /// already persisted deadlines.
+    #[must_use]
+    pub fn with_reconciliation_windows(
+        mut self,
+        windows: AiOpenAiBackgroundReconciliationWindows,
+    ) -> Self {
+        self.reconciliation_windows = windows;
+        self
     }
 
     /// Submits one exactly authorized OpenAI request for background execution.
@@ -495,10 +612,19 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                             egress_manifest_hash: prepared.egress_manifest_hash,
                             provider_response_id: None,
                             provider_status: None,
-                            state: "prepared".to_owned(),
+                            state: BackgroundSubmissionState::Prepared.as_str().to_owned(),
                             safe_error_code: None,
                             provider_created_at: None,
                             submitted_at: None,
+                            reconciliation_owner: None,
+                            reconciliation_generation: 0,
+                            reconciliation_lease_expires_at: None,
+                            reconciliation_next_attempt_at: None,
+                            reconciliation_retry_count: 0,
+                            reconciliation_deadline: None,
+                            reconciled_at: None,
+                            retrieval_egress_decision_id: None,
+                            terminal_message_id: None,
                         },
                     )
                     .await
@@ -558,6 +684,22 @@ impl OrmAiOpenAiBackgroundSubmissionService {
             return Err(AiError::ProviderFailed);
         }
         let now = canonical_second(self.clock.now());
+        let response_window = self
+            .reconciliation_windows
+            .for_storage(acknowledgement.provider_store())
+            .whole_seconds();
+        let provider_deadline = acknowledgement
+            .created_at()
+            .checked_add(response_window)
+            .ok_or(AiError::ProviderFailed)?;
+        let local_deadline = now
+            .unix_timestamp()
+            .checked_add(response_window)
+            .ok_or(AiError::ProviderFailed)?;
+        let reconciliation_deadline = provider_deadline.min(local_deadline);
+        if reconciliation_deadline <= now.unix_timestamp() {
+            return Err(AiError::ProviderFailed);
+        }
         let result_run_id = lease.run_id();
         let result_attempt_id = lease.attempt_id();
         let result_lease_generation = lease.lease_generation();
@@ -580,12 +722,22 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
                     if !submission_matches(&submission, &lease, &prepared_for_tx)
-                        || submission.state != "prepared"
+                        || BackgroundSubmissionState::from_persisted(&submission.state)
+                            != Some(BackgroundSubmissionState::Prepared)
                         || submission.provider_response_id.is_some()
                         || submission.provider_status.is_some()
                         || submission.provider_store.is_some()
                         || submission.provider_created_at.is_some()
                         || submission.submitted_at.is_some()
+                        || submission.reconciliation_owner.is_some()
+                        || submission.reconciliation_generation != 0
+                        || submission.reconciliation_lease_expires_at.is_some()
+                        || submission.reconciliation_next_attempt_at.is_some()
+                        || submission.reconciliation_retry_count != 0
+                        || submission.reconciliation_deadline.is_some()
+                        || submission.reconciled_at.is_some()
+                        || submission.retrieval_egress_decision_id.is_some()
+                        || submission.terminal_message_id.is_some()
                         || submission.row_version != 0
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -603,18 +755,30 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                                     acknowledgement_for_tx.status().to_owned(),
                                 )),
                                 provider_store: Some(Some(acknowledgement_for_tx.provider_store())),
-                                state: Some("waiting_provider".to_owned()),
+                                state: Some(
+                                    BackgroundSubmissionState::WaitingProvider
+                                        .as_str()
+                                        .to_owned(),
+                                ),
                                 provider_created_at: Some(Some(
                                     acknowledgement_for_tx.created_at(),
                                 )),
                                 submitted_at: Some(Some(now.unix_timestamp())),
+                                reconciliation_next_attempt_at: Some(Some(now.unix_timestamp())),
+                                reconciliation_deadline: Some(Some(reconciliation_deadline)),
                                 ..Default::default()
                             },
                         )
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !matches!(submission_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    let updated_submission = match submission_update {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    if !valid_waiting_submission(&updated_submission) {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     }
                     let run_update = tx
                         .compare_and_swap::<AiRunRecord>(
@@ -694,13 +858,23 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
                     if !submission_matches(&submission, &lease, &prepared)
-                        || submission.state != "prepared"
+                        || BackgroundSubmissionState::from_persisted(&submission.state)
+                            != Some(BackgroundSubmissionState::Prepared)
                         || submission.provider_response_id.is_some()
                         || submission.provider_status.is_some()
                         || submission.provider_store.is_some()
                         || submission.provider_created_at.is_some()
                         || submission.submitted_at.is_some()
                         || submission.safe_error_code.is_some()
+                        || submission.reconciliation_owner.is_some()
+                        || submission.reconciliation_generation != 0
+                        || submission.reconciliation_lease_expires_at.is_some()
+                        || submission.reconciliation_next_attempt_at.is_some()
+                        || submission.reconciliation_retry_count != 0
+                        || submission.reconciliation_deadline.is_some()
+                        || submission.reconciled_at.is_some()
+                        || submission.retrieval_egress_decision_id.is_some()
+                        || submission.terminal_message_id.is_some()
                         || submission.row_version != 0
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -711,15 +885,29 @@ impl OrmAiOpenAiBackgroundSubmissionService {
                             submission.row_version,
                             AiProviderBackgroundSubmissionRecordWhereInput::default(),
                             UpdateAiProviderBackgroundSubmissionRecordInput {
-                                state: Some("recovery_required".to_owned()),
+                                state: Some(
+                                    BackgroundSubmissionState::RecoveryRequired
+                                        .as_str()
+                                        .to_owned(),
+                                ),
                                 safe_error_code: Some(Some(safe_error_code.to_owned())),
                                 ..Default::default()
                             },
                         )
                         .await
                         .map_err(OrmPublicError::from)?;
-                    if !matches!(submission_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    let updated_submission = match submission_update {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    if BackgroundSubmissionState::from_persisted(&updated_submission.state)
+                        != Some(BackgroundSubmissionState::RecoveryRequired)
+                        || updated_submission.safe_error_code.as_deref() != Some(safe_error_code)
+                        || !reconciliation_fields_are_empty(&updated_submission)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                     }
                     let run_update = tx
                         .compare_and_swap::<AiRunRecord>(
@@ -919,6 +1107,46 @@ fn submission_matches(
         && submission.budget_reservation_id == prepared.budget_reservation_id.0
         && submission.egress_decision_id == prepared.egress_decision_id
         && submission.egress_manifest_hash == prepared.egress_manifest_hash
+}
+
+fn reconciliation_fields_are_empty(submission: &AiProviderBackgroundSubmissionRecord) -> bool {
+    submission.reconciliation_owner.is_none()
+        && submission.reconciliation_generation == 0
+        && submission.reconciliation_lease_expires_at.is_none()
+        && submission.reconciliation_next_attempt_at.is_none()
+        && submission.reconciliation_retry_count == 0
+        && submission.reconciliation_deadline.is_none()
+        && submission.reconciled_at.is_none()
+        && submission.retrieval_egress_decision_id.is_none()
+        && submission.terminal_message_id.is_none()
+}
+
+fn valid_waiting_submission(submission: &AiProviderBackgroundSubmissionRecord) -> bool {
+    let Some(submitted_at) = submission.submitted_at else {
+        return false;
+    };
+    let Some(next_attempt_at) = submission.reconciliation_next_attempt_at else {
+        return false;
+    };
+    let Some(deadline) = submission.reconciliation_deadline else {
+        return false;
+    };
+    BackgroundSubmissionState::from_persisted(&submission.state)
+        == Some(BackgroundSubmissionState::WaitingProvider)
+        && submission.provider_store.is_some()
+        && submission.provider_response_id.is_some()
+        && submission.provider_status.is_some()
+        && submission.provider_created_at.is_some()
+        && submission.safe_error_code.is_none()
+        && submission.reconciliation_owner.is_none()
+        && submission.reconciliation_generation == 0
+        && submission.reconciliation_lease_expires_at.is_none()
+        && submission.reconciliation_retry_count == 0
+        && submitted_at <= next_attempt_at
+        && next_attempt_at < deadline
+        && submission.reconciled_at.is_none()
+        && submission.retrieval_egress_decision_id.is_none()
+        && submission.terminal_message_id.is_none()
 }
 
 fn valid_response_id(value: &str) -> bool {

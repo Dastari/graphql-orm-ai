@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.47.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.48.0");
     assert_eq!(catalog.entities().len(), 40);
     assert!(
         catalog
@@ -216,6 +216,41 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
                 .columns
                 .iter()
                 .any(|column| { column.name == required_column && !column.nullable })
+        );
+    }
+    let background_submission = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_provider_background_submissions")
+        .expect("provider background submission table should exist");
+    for required_column in [
+        "reconciliation_owner",
+        "reconciliation_generation",
+        "reconciliation_lease_expires_at",
+        "reconciliation_next_attempt_at",
+        "reconciliation_retry_count",
+        "reconciliation_deadline",
+        "reconciled_at",
+        "retrieval_egress_decision_id",
+        "terminal_message_id",
+    ] {
+        assert!(
+            background_submission
+                .columns
+                .iter()
+                .any(|column| column.name == required_column)
+        );
+    }
+    for indexed_column in [
+        "reconciliation_lease_expires_at",
+        "reconciliation_next_attempt_at",
+        "reconciliation_deadline",
+    ] {
+        assert!(
+            background_submission
+                .indexes
+                .iter()
+                .any(|index| index.columns == [indexed_column] && !index.is_unique)
         );
     }
     for indexed_column in [

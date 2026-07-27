@@ -279,8 +279,9 @@ pub mod prelude {
         feature = "provider-openai"
     ))]
     pub use crate::{
-        AiOpenAiBackgroundSubmission, AiProviderWebhookReceiptOutcome,
-        OrmAiOpenAiBackgroundSubmissionService, OrmAiProviderWebhookReceiptService,
+        AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundSubmission,
+        AiProviderWebhookReceiptOutcome, OrmAiOpenAiBackgroundSubmissionService,
+        OrmAiProviderWebhookReceiptService,
     };
     #[cfg(feature = "provider-openai")]
     pub use crate::{

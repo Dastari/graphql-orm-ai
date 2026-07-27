@@ -21,7 +21,7 @@ and deliberately incomplete inventory.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.47.0`) and 40 private records
+- AI schema-module identity (currently version `0.48.0`) and 40 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, background submissions,
@@ -465,8 +465,11 @@ and deliberately incomplete inventory.
   terminal-graph, crash, receipt-redelivery, and restore contract is now
   documented in the
   [background guide](openai-background.md#terminal-reconciliation-design) and
-  [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation); schema
-  and runtime implementation remain. Exact inline image/file input remains
+  [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation). Schema
+  `0.48.0` reserves and initializes the bounded claim generation/owner/lease,
+  retry/deadline, current retrieval-egress, reconciliation time, and terminal
+  message facts, but claim/retrieval/terminal runtime implementation remains.
+  Exact inline image/file input remains
   independently gated by host MIME policy, budget, egress, current authority,
   and reopening limits.
 - Privileged uncertain-call recovery and complete retention/purge application.
@@ -522,35 +525,27 @@ intentional.
 
 ## Current verification
 
-- The complete `0.51.0` SQLite/provider matrix passed: 148 unit tests, all
+- The complete `0.52.0` SQLite/provider matrix passes: 150 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored.
 - Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
   with all native/profiled provider adapters and the installed harness.
   PascalCase SDL and missing-docs Rustdoc also passed with no lowercase aliases.
-- PostgreSQL and MSSQL feature combinations pass compile-only checks. Backend
-  dependency isolation remains exact: SQLite excludes `sqlx-postgres`,
-  PostgreSQL excludes `sqlx-sqlite`, MSSQL excludes both, and the combined
-  SQLite/PostgreSQL build resolves both.
-- SemVer comparison against pushed `0.49.0` passed. Package-file and tracked-
-  diff privacy review excludes ignored handoffs/plans, credentials, local
-  paths, and project-specific references.
+- PostgreSQL plus native OpenAI and MSSQL feature combinations pass
+  compile-only checks. The exact `0.47.0`-to-`0.48.0` schema alteration passes
+  on in-memory SQLite and in an ownership-labeled disposable PostgreSQL 17
+  container, which was removed after the test.
 - The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
   `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
   `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
   source and public type universe.
-- The owned-disposable-PostgreSQL prior-to-current migration rehearsal now
-  passes with the reviewed upstream constraint-index introspection fix. The
-  generated plan no longer attempts to drop UNIQUE constraint-backing indexes;
-  no downstream SQL or live/shared database workaround was introduced, and
-  the test removed its ownership-labeled container.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
-  The current `0.51.0`/schema `0.47.0` dependency-alignment implementation
-  checkpoint is committed and pushed at
-  `72757bdc63d28ee63d48d0e3e0cd503cb1f27566`; draft PR #2 CI run
-  `30252247582` passed unit/compile, owned PostgreSQL parity, release-policy,
-  and SemVer jobs. The draft PR remains unmerged, and no release/tag/publish
-  action has occurred.
+  The `0.51.0`/schema `0.47.0` dependency checkpoint is committed and pushed
+  at `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
+  `30253200905` passed unit/compile, owned PostgreSQL parity, release-policy,
+  and SemVer jobs. The Slice 1 terminal-reconciliation design checkpoint is
+  pushed at `a10b3d6f35798367229ce605872b666dbf925993`. No release, tag, publish,
+  or upstream-repository mutation has occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

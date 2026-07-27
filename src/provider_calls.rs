@@ -2278,9 +2278,9 @@ mod tests {
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::orm::{
-        ApplyOptions, ConditionalUpdateOutcome, OrmSchemaModule, TransactionMode,
+        ApplyOptions, ConditionalUpdateOutcome, Entity, OrmSchemaModule, TransactionMode,
     };
-    use graphql_orm::prelude::{Database, SqliteBackend};
+    use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, SqliteBackend};
     use serde_json::json;
     use sha2::Digest;
     use time::{Duration, OffsetDateTime};
@@ -2292,6 +2292,60 @@ mod tests {
     };
     use crate::persistence::*;
     use crate::*;
+
+    #[cfg(feature = "provider-openai")]
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+        PartialEq,
+    )]
+    #[graphql_entity(
+        table = "graphql_orm_ai_provider_background_submissions",
+        plural = "LegacyGraphqlOrmAiProviderBackgroundSubmissions",
+        default_sort = "created_at ASC"
+    )]
+    struct LegacyProviderBackgroundSubmissionRecord {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[filterable(type = "uuid")]
+        id: graphql_orm::uuid::Uuid,
+        #[unique]
+        submission_key: String,
+        #[filterable(type = "uuid")]
+        session_id: graphql_orm::uuid::Uuid,
+        #[filterable(type = "uuid")]
+        run_id: graphql_orm::uuid::Uuid,
+        #[unique]
+        #[filterable(type = "uuid")]
+        attempt_id: graphql_orm::uuid::Uuid,
+        lease_generation: i64,
+        provider_kind: String,
+        provider_profile_id: String,
+        provider_model: String,
+        maximum_output_tokens: i64,
+        provider_store: Option<bool>,
+        request_hash: String,
+        #[unique]
+        budget_reservation_id: graphql_orm::uuid::Uuid,
+        egress_decision_id: graphql_orm::uuid::Uuid,
+        egress_manifest_hash: String,
+        #[unique]
+        provider_response_id: Option<String>,
+        provider_status: Option<String>,
+        #[filterable(type = "string")]
+        state: String,
+        safe_error_code: Option<String>,
+        #[sortable]
+        created_at: i64,
+        provider_created_at: Option<i64>,
+        submitted_at: Option<i64>,
+        #[graphql_orm(version, default = "0")]
+        row_version: i64,
+    }
 
     struct Resolver(AuthPrincipal);
 
@@ -3210,6 +3264,22 @@ mod tests {
         assert_eq!(submission.provider_status.as_deref(), Some("queued"));
         assert_eq!(submission.provider_created_at, Some(now));
         assert!(submission.submitted_at.is_some());
+        assert!(submission.reconciliation_owner.is_none());
+        assert_eq!(submission.reconciliation_generation, 0);
+        assert!(submission.reconciliation_lease_expires_at.is_none());
+        assert_eq!(
+            submission.reconciliation_next_attempt_at,
+            submission.submitted_at
+        );
+        assert_eq!(submission.reconciliation_retry_count, 0);
+        assert!(
+            submission
+                .reconciliation_deadline
+                .is_some_and(|deadline| deadline > submission.submitted_at.unwrap_or(i64::MAX))
+        );
+        assert!(submission.reconciled_at.is_none());
+        assert!(submission.retrieval_egress_decision_id.is_none());
+        assert!(submission.terminal_message_id.is_none());
         assert_eq!(submission.row_version, 1);
 
         let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
@@ -3464,18 +3534,100 @@ mod tests {
     }
 
     #[cfg(feature = "provider-openai")]
+    #[test]
+    fn background_reconciliation_windows_are_strictly_bounded() {
+        assert_eq!(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationWindows::new(Duration::minutes(5), Duration::days(29),)
+                .expect("default windows should validate")
+        );
+        assert!(
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::minutes(10),
+                Duration::days(30),
+            )
+            .is_ok()
+        );
+        for invalid in [
+            AiOpenAiBackgroundReconciliationWindows::new(Duration::ZERO, Duration::days(1)),
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::milliseconds(999),
+                Duration::days(1),
+            ),
+            AiOpenAiBackgroundReconciliationWindows::new(Duration::minutes(1), Duration::ZERO),
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::minutes(10) + Duration::SECOND,
+                Duration::days(1),
+            ),
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::minutes(1),
+                Duration::days(30) + Duration::SECOND,
+            ),
+        ] {
+            assert!(matches!(invalid, Err(AiError::InvalidConfiguration(_))));
+        }
+    }
+
+    #[cfg(feature = "provider-openai")]
     #[tokio::test]
-    async fn prior_ai_schema_migrates_to_background_submission_binding() {
+    async fn future_provider_timestamp_cannot_extend_reconciliation_window() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission("resp_background_future_1", "queued", now + 3_600);
+        let fixture = fixture_with_provider(mock).await;
+        let service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        )
+        .with_reconciliation_windows(
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::seconds(30),
+                Duration::seconds(30),
+            )
+            .expect("test reconciliation windows should validate"),
+        );
+
+        let accepted = service
+            .submit(&fixture.lease, background_plan(&fixture))
+            .await
+            .expect("future-skewed timestamp should not extend the local window");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &fixture.database,
+            &accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        let submitted_at = submission
+            .submitted_at
+            .expect("accepted submission should record local time");
+        assert_eq!(submission.reconciliation_deadline, Some(submitted_at + 30));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn prior_background_schema_migrates_to_reconciliation_claim_fields() {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
         let module = AiSchemaModule;
-        let prior_entities = module
+        let mut prior_entities = module
             .entities()
             .iter()
             .copied()
             .filter(|entity| entity.table_name != "graphql_orm_ai_provider_background_submissions")
             .collect::<Vec<_>>();
+        prior_entities.push(LegacyProviderBackgroundSubmissionRecord::metadata());
         let prior_plan = database
             .schema()
             .plan_migration_to_entities(

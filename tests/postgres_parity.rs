@@ -10,9 +10,9 @@ use agql_auth::{
     RecentMfaPolicy, SessionAssurance, SessionContext, SystemClock,
 };
 use async_trait::async_trait;
-use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+use graphql_orm::graphql::orm::{ApplyOptions, Entity, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
-use graphql_orm::prelude::{Database, PostgresBackend};
+use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, PostgresBackend};
 use graphql_orm_ai::*;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -30,6 +30,53 @@ use sha2::Sha256;
 
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
 const POSTGRES_IMAGE: &str = "postgres:17-alpine";
+
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_provider_background_submissions",
+    plural = "LegacyGraphqlOrmAiProviderBackgroundSubmissions",
+    default_sort = "created_at ASC"
+)]
+struct LegacyProviderBackgroundSubmissionRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    id: graphql_orm::uuid::Uuid,
+    #[unique]
+    submission_key: String,
+    #[filterable(type = "uuid")]
+    session_id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "uuid")]
+    run_id: graphql_orm::uuid::Uuid,
+    #[unique]
+    #[filterable(type = "uuid")]
+    attempt_id: graphql_orm::uuid::Uuid,
+    lease_generation: i64,
+    provider_kind: String,
+    provider_profile_id: String,
+    provider_model: String,
+    maximum_output_tokens: i64,
+    provider_store: Option<bool>,
+    request_hash: String,
+    #[unique]
+    budget_reservation_id: graphql_orm::uuid::Uuid,
+    egress_decision_id: graphql_orm::uuid::Uuid,
+    egress_manifest_hash: String,
+    #[unique]
+    provider_response_id: Option<String>,
+    provider_status: Option<String>,
+    #[filterable(type = "string")]
+    state: String,
+    safe_error_code: Option<String>,
+    #[sortable]
+    created_at: i64,
+    provider_created_at: Option<i64>,
+    submitted_at: Option<i64>,
+    #[graphql_orm(version, default = "0")]
+    row_version: i64,
+}
 
 struct OwnedPostgres {
     container_id: String,
@@ -435,16 +482,17 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .await
         .expect("ORM should connect only to the owned container");
     let module = AiSchemaModule;
-    let prior_entities = module
+    let mut prior_entities = module
         .entities()
         .iter()
         .copied()
         .filter(|entity| entity.table_name != "graphql_orm_ai_provider_background_submissions")
         .collect::<Vec<_>>();
+    prior_entities.push(LegacyProviderBackgroundSubmissionRecord::metadata());
     let prior_migration = database
         .schema()
         .plan_migration_to_entities(
-            "ai-postgres-parity-v026",
+            "ai-postgres-parity-v047",
             "graphql-orm-ai prior disposable PostgreSQL parity",
             &prior_entities,
         )
@@ -458,7 +506,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     let migration = database
         .schema()
         .plan_migration_to_entities(
-            "ai-postgres-parity-v027",
+            "ai-postgres-parity-v048",
             "graphql-orm-ai current disposable PostgreSQL parity",
             module.entities(),
         )
@@ -468,7 +516,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .schema()
         .apply_migration(&migration, ApplyOptions::default())
         .await
-        .expect("background binding schema should migrate in owned PostgreSQL");
+        .expect("background reconciliation schema should migrate in owned PostgreSQL");
 
     let sessions = OrmAiSessionService::new(
         database.clone(),
