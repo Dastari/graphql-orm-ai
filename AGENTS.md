@@ -24,6 +24,12 @@ These rules apply to every human or automated change in this repository.
   otherwise mutate their worktrees or GitHub branches.
 - Read-only inspection of sibling source, tags, PRs, and dependency metadata is
   allowed when needed to define an integration requirement.
+- Never implement an upstream change from this repository, regardless of its
+  size or urgency. Every required change to `graphql-orm`, `agql-auth`, or any
+  other upstream crate must be expressed as a copy-ready prompt in `.handoffs/`
+  and assigned to a separate owning agent. Until that owner returns a reviewed
+  final merge or release SHA, this repository remains read-only and blocked on
+  that upstream requirement.
 - When a reusable upstream change is required, stage a copy-ready prompt in
   `.handoffs/` for the owning repository agent. That directory is deliberately
   ignored so temporary coordination state is not published with the crate.

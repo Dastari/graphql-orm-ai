@@ -156,6 +156,25 @@ content-free OpenAI background-submission bindings.
 
 ### Changed
 
+- The exact Git dependency universe now pins `graphql-orm` 0.15.0 at
+  `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at the
+  peeled `v0.12.0` target
+  `3f3b0c5365adfbe436514a681d977b600991b797`. The ORM update incorporates the
+  reviewed PostgreSQL constraint-index introspection fix, aligns its optional
+  auth bridge to the same auth revision, and fixes exact bounded-mutation and
+  retention-purge sentinels above the public 100-row read cap. No AI entity,
+  GraphQL SDL, or stored-data migration changes.
+- Ordinary CI jobs now resolve the exact upstream revisions from the public
+  manifest instead of checking out unused sibling worktrees. The SemVer job
+  now resolves the reviewed exact Git dependencies recorded independently by
+  the current and baseline manifests; it no longer rewrites a historical
+  baseline to hard-coded local path dependencies.
+- Repository ownership is now explicit and unconditional: every upstream
+  implementation request must be staged as a copy-ready `.handoffs/` prompt
+  for a separate owning agent. Agents working in this repository may inspect
+  upstream state and consume reviewed final SHAs but never mutate an upstream
+  worktree or branch.
+
 - Schema module `0.46.0` adds deterministic receipt/profile/event-kind/time
   bindings to the existing private webhook receipt placeholder and combines
   its deterministic UUID with the existing provider family as private key

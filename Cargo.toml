@@ -31,13 +31,13 @@ graphql-case-pascal = [
 ]
 
 [dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "c92dcb441237bbe308499b26525945f60ffa394a", version = "0.10.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3f3b0c5365adfbe436514a681d977b600991b797", version = "0.12.0" }
 async-graphql = { version = "7", features = ["uuid"] }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
 futures = "0.3"
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "f996cdbe2ef1867dea029ec3ff16e051dbe7566e", version = "0.9.0", default-features = false }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "6beef53633befd90a4d4810887a3e4640dc4ad91", version = "0.15.0", default-features = false }
 graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
 hex = "0.4"
 hmac = { version = "0.12", optional = true }

@@ -282,7 +282,7 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<re
 ```
 
 > **Pre-release dependency note:** this source snapshot pins the reviewed final
-> `graphql-orm` 0.9.0, `agql-auth` 0.10.0, and `graphql-orm-storage` 0.5.0
+> `graphql-orm` 0.15.0, `agql-auth` 0.12.0, and `graphql-orm-storage` 0.5.0
 > commits exactly. Keep the full revisions from this manifest; do not replace
 > the shared contracts with moving branches or application-specific
 > substitutes.
@@ -452,8 +452,8 @@ Mocked HTTP/SSE tests are the default and require no provider credential.
 ## Documentation and releases
 
 The [documentation index](docs/README.md) links architecture, security,
-development, release, and implementation-status guides. Public APIs are
-documented in generated Rustdoc.
+development, release, implementation-status, and checkpoint-based completion
+guides. Public APIs are documented in generated Rustdoc.
 
 The root README stays aligned with every public/runtime change. Every
 user-visible change updates [CHANGELOG.md](CHANGELOG.md), and every public

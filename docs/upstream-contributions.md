@@ -18,6 +18,13 @@ express required changes as copy-ready prompts in the ignored `.handoffs/`
 directory and wait for the upstream owner to return a reviewed final commit
 SHA.
 
+This delegation is unconditional. An agent owning `graphql-orm-ai` never
+implements, formats, commits, rebases, merges, or otherwise mutates an upstream
+change, even when the change is small or apparently mechanical. Every upstream
+implementation request must be staged as a copy-ready `.handoffs/` prompt for a
+separately assigned owning agent. Read-only inspection and consuming an already
+reviewed final upstream SHA are the only permitted upstream interactions.
+
 ## Dependency sequence
 
 For the current stack, merge and repin from the bottom upward:

@@ -3,6 +3,10 @@
 This file is intentionally explicit about what is a compiled contract versus
 production-ready behavior.
 
+The [checkpoint-based completion plan](completion-plan.md) defines the active
+work order and exit gates. This file remains authoritative for the implemented
+and deliberately incomplete inventory.
+
 ## Implemented foundation
 
 - Crate scaffold and SQLite/PostgreSQL/MSSQL compile-time backend selection.
@@ -488,6 +492,9 @@ production-ready behavior.
 
 ## Next implementation slice
 
+The detailed sequence and acceptance gates are maintained in the
+[completion plan](completion-plan.md). The leading runtime priorities are:
+
 1. Complete the OpenAI background lifecycle after exact submission and receipt
    intake: add a bounded reconciler that matches the exact prepared submission,
    verified receipt, and provider response, then independently re-proves
@@ -522,16 +529,19 @@ intentional.
 - SemVer comparison against pushed `0.49.0` passed. Package-file and tracked-
   diff privacy review excludes ignored handoffs/plans, credentials, local
   paths, and project-specific references.
-- The current owned-disposable-PostgreSQL prior-to-current migration rehearsal
-  is blocked by a confirmed pinned-`graphql-orm` introspection defect:
-  constraint-backing unique indexes are planned as ordinary `DROP INDEX`
-  operations. The test-owned container was removed. The rehearsal remains
-  unchanged pending a reviewed upstream fix; no downstream SQL or live/shared
-  database workaround is permitted.
+- The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
+  `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
+  `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
+  source and public type universe.
+- The owned-disposable-PostgreSQL prior-to-current migration rehearsal now
+  passes with the reviewed upstream constraint-index introspection fix. The
+  generated plan no longer attempts to drop UNIQUE constraint-backing indexes;
+  no downstream SQL or live/shared database workaround was introduced, and
+  the test removed its ownership-labeled container.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
-  The `0.50.0`/schema `0.47.0` work may be carried on the draft branch as a
-  durable checkpoint, but it is not release-ready until the reviewed upstream
-  pin is integrated and the owned PostgreSQL upgrade plus branch CI pass.
+  The current `0.50.0`/schema `0.47.0` dependency-alignment worktree passes the
+  complete local release matrix, but it is not release-ready until the reviewed
+  downstream diff is committed/pushed and branch CI passes.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

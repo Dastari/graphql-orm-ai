@@ -15,16 +15,6 @@ jobs:
         with:
           path: graphql-orm-ai
           fetch-depth: 0
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/graphql-orm
-          ref: 1e145a124e9e3f1b0ffd70165289170b627ecb73
-          path: graphql-orm
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/agql-auth
-          ref: c92dcb441237bbe308499b26525945f60ffa394a
-          path: agql-auth
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -49,16 +39,6 @@ jobs:
         with:
           path: graphql-orm-ai
           fetch-depth: 0
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/graphql-orm
-          ref: 1e145a124e9e3f1b0ffd70165289170b627ecb73
-          path: graphql-orm
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/agql-auth
-          ref: c92dcb441237bbe308499b26525945f60ffa394a
-          path: agql-auth
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
@@ -85,24 +65,8 @@ jobs:
         with:
           path: graphql-orm-ai
           fetch-depth: 0
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/graphql-orm
-          ref: 1e145a124e9e3f1b0ffd70165289170b627ecb73
-          path: graphql-orm
-      - uses: actions/checkout@v5
-        with:
-          repository: Dastari/agql-auth
-          ref: c92dcb441237bbe308499b26525945f60ffa394a
-          path: agql-auth
       - name: Create baseline worktree
         run: git -C graphql-orm-ai worktree add ../graphql-orm-ai-baseline "${{ github.event.pull_request.base.sha }}"
-      - name: Reconstruct unpublished baseline dependency universe
-        run: |
-          sed -i 's/version = "0.8.0"/version = "0.10.0"/' graphql-orm-ai-baseline/Cargo.toml
-          sed -i 's/version = "0.6.1"/version = "0.7.0"/' graphql-orm-ai-baseline/Cargo.toml
-          grep -F 'agql-auth = { path = "../agql-auth", version = "0.10.0" }' graphql-orm-ai-baseline/Cargo.toml
-          grep -F 'graphql-orm = { path = "../graphql-orm/crates/graphql-orm", version = "0.7.0", default-features = false }' graphql-orm-ai-baseline/Cargo.toml
       - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           manifest-path: graphql-orm-ai/Cargo.toml

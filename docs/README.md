@@ -31,6 +31,7 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Release, SemVer, changelog, and migration process](release-process.md)
 - [Upstream contribution and multi-repository workflow](upstream-contributions.md)
 - [Implementation status](implementation-status.md)
+- [Checkpoint-based completion plan](completion-plan.md)
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
 

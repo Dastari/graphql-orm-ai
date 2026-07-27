@@ -4,6 +4,51 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: upstream dependency alignment to graphql-orm 0.15.0 and agql-auth 0.12.0
+
+Update the exact Git dependency universe to:
+
+- `graphql-orm` 0.15.0 at
+  `6beef53633befd90a4d4810887a3e4640dc4ad91`; and
+- `agql-auth` 0.12.0 at the peeled `v0.12.0` target
+  `3f3b0c5365adfbe436514a681d977b600991b797`.
+
+Remove host patches, path overrides, or direct dependencies that resolve an
+older source identity. Hosts enabling the ORM's optional `auth-agql` bridge
+must use the same exact auth version and revision so one public type universe
+resolves.
+
+The ORM update includes the reviewed PostgreSQL constraint-index
+introspection fix from 0.13.0. Constraint-owned PRIMARY KEY and UNIQUE backing
+indexes are no longer planned as ordinary `DROP INDEX` operations, and
+composite UNIQUE constraints are rendered and introspected in key order.
+Operators must replan the complete generated target and run an owned
+prior-to-current migration rehearsal before rollout. Do not mark an older
+module version as newly applied to conceal a real historical schema mismatch.
+
+The 0.15.0 ORM also corrects bounded generated updates, deletes, and retention
+purges whose `MutationLimit + 1` sentinel exceeds the public 100-row read cap.
+Public GraphQL and repository read limits are unchanged. Residual or in-memory
+bounded-mutation predicates now fail before selection or writes; callers must
+use fully database-renderable predicates.
+
+Direct `agql-auth` consumers must also follow its 0.10.0-to-0.12.0 migration.
+Version 0.11.0 replaces split durable rate-limit load/save behavior with
+revision-bound compare-and-swap; custom durable stores need an atomic revision
+column or equivalent and must backfill existing rows. Version 0.12.0 adds the
+typed list-valued OIDC `EssentialAcrs` request and `matched_acrs` outcome,
+advances stored OIDC policies containing that requirement to representation
+version 2, and requires updates to exhaustive matches and public struct
+literals. This crate does not implement an auth rate-limit store or infer local
+MFA from provider ACR/ACRS evidence.
+
+This dependency alignment remains within the unreleased crate 0.50.0 line and
+does not change the AI schema module from 0.47.0. It changes no AI entity,
+GraphQL SDL, persisted AI data, backup descriptor, or application
+authorization policy, so no AI data migration is required. Regenerate
+`Cargo.lock`, verify one source/type universe, and rerun the full SQLite,
+PostgreSQL, MSSQL, Rustdoc, Clippy, naming, SemVer, and release-policy matrix.
+
 ## Unreleased: exact OpenAI background submission binding (crate 0.49.0 to 0.50.0; schema 0.46.0 to 0.47.0)
 
 Apply AI schema module `0.47.0` while provider workers, webhook intake,

@@ -72,7 +72,9 @@ scripts/check-release-policy.sh <base-revision>
 cargo semver-checks --baseline-rev <base-revision> --default-features
 ```
 
-CI additionally runs `cargo-semver-checks` against a sibling baseline worktree
-so local path dependencies resolve consistently. The explicit default-feature
-selection is required: the backend features are mutually exclusive, while the
-tool's ordinary heuristic attempts to enable every feature at once.
+CI additionally runs `cargo-semver-checks` against a baseline worktree. The
+current and baseline manifests each resolve their own reviewed exact Git
+dependency revisions; CI does not rewrite either universe to local sibling
+paths. The explicit default-feature selection is required: the backend
+features are mutually exclusive, while the tool's ordinary heuristic attempts
+to enable every feature at once.
