@@ -25,8 +25,9 @@ what remains deliberately closed.
   Rustdoc, PascalCase GraphQL, PostgreSQL/MSSQL compile-only, owned disposable
   PostgreSQL migration, release-policy, package, and SemVer checks pass
   locally.
-- The current dependency-alignment worktree is not yet a durable checkpoint:
-  it must be reviewed, committed, pushed, and pass branch CI.
+- The dependency-alignment implementation checkpoint is committed and pushed at
+  `72757bdc63d28ee63d48d0e3e0cd503cb1f27566`; draft PR #2 CI run
+  `30252247582` passed all four jobs.
 - No upstream handoff is currently open.
 
 ## Rules for every slice
@@ -88,6 +89,9 @@ an earlier slice is under review, but its runtime boundary must remain closed
 until every prerequisite exit gate passes.
 
 ## Slice 0: make the current checkpoint durable
+
+Status: complete on the draft PR branch. Merge, tagging, and publishing remain
+separate owner decisions.
 
 ### Work
 
@@ -406,9 +410,7 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Complete Slice 0 and make the reviewed `0.51.0` alignment a pushed,
-   CI-green checkpoint.
-2. Write the Slice 1 OpenAI background reconciliation state-machine design and
+1. Write the Slice 1 OpenAI background reconciliation state-machine design and
    negative-test table.
-3. Implement Slice 1 only after that design makes every external-I/O and crash
+2. Implement Slice 1 only after that design makes every external-I/O and crash
    boundary explicit.

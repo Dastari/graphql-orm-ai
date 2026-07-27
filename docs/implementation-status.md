@@ -539,9 +539,12 @@ intentional.
   no downstream SQL or live/shared database workaround was introduced, and
   the test removed its ownership-labeled container.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
-  The current `0.51.0`/schema `0.47.0` dependency-alignment branch passes the
-  complete local release matrix, but it is not release-ready until the reviewed
-  downstream diff passes branch CI.
+  The current `0.51.0`/schema `0.47.0` dependency-alignment implementation
+  checkpoint is committed and pushed at
+  `72757bdc63d28ee63d48d0e3e0cd503cb1f27566`; draft PR #2 CI run
+  `30252247582` passed unit/compile, owned PostgreSQL parity, release-policy,
+  and SemVer jobs. The draft PR remains unmerged, and no release/tag/publish
+  action has occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 
