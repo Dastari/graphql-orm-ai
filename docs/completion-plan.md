@@ -120,8 +120,12 @@ authority to retrieve output or mutate the run.
 
 Status: the complete design gate and negative/crash matrix are documented in
 the two focused guides. The `0.48.0` schema now reserves and initializes the
-minimum reconciliation claim/deadline facts; claim, retrieval, and terminal
-execution remain closed.
+minimum reconciliation claim/deadline facts. The generated-ORM claim runtime
+now validates the complete accepted support graph, installs/reclaims a
+generation-fenced lease, rotates heartbeats, and voluntarily releases only
+before provider I/O under bounded scheduling. Concurrent/stale/deadline/
+migration-safe SQLite tests pass. Retrieval, receipt matching, terminal
+normalization, exhaustion closure, and terminal execution remain closed.
 
 ### Design gate
 
@@ -415,8 +419,9 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Implement bounded claim/reclaim/release transactions and concurrent claim
-   tests over the reserved Slice 1 fields.
-2. Add the fixed-destination OpenAI retrieval binding and terminal normalizer.
+1. Add the fixed-destination OpenAI retrieval binding, current-authority/egress
+   proof, and bounded terminal/nonterminal response normalizer.
+2. Add receipt selection plus deadline/retry-exhaustion closure without making
+   webhook delivery an authority or liveness requirement.
 3. Add the one-transaction terminal graph, restore validation, PostgreSQL
    parity, and full release-matrix proof.

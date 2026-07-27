@@ -1686,6 +1686,7 @@ pub(crate) struct AiProviderBackgroundSubmissionRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
+    #[sortable]
     pub id: graphql_orm::uuid::Uuid,
     /// Full SHA-256 collision check for `id`.
     #[unique]
@@ -1746,7 +1747,7 @@ pub(crate) struct AiProviderBackgroundSubmissionRecord {
     /// Deadline after which another reconciler may reclaim the submission.
     #[filterable(type = "number")]
     pub reconciliation_lease_expires_at: Option<i64>,
-    /// Earliest time at which the exact response may be polled again.
+    /// Earliest time at which this row may be claimed or reclaimed.
     #[filterable(type = "number")]
     #[sortable]
     pub reconciliation_next_attempt_at: Option<i64>,

@@ -13,7 +13,7 @@ next-attempt, deadline, reconciliation-time, retrieval-egress-decision, and
 terminal-message columns to
 `graphql_orm_ai_provider_background_submissions`. It also adds generation and
 retry counters with zero defaults and indexes the lease,
-next-attempt, and deadline fields used by future bounded workers. The module
+next-attempt, and deadline fields used by bounded workers. The module
 fingerprint and backup descriptor change.
 
 The migration itself does not rewrite existing submission rows. A row created
@@ -40,11 +40,30 @@ default to five minutes and cannot exceed ten minutes; stored responses
 default to 29 days and cannot exceed 30 days. Narrow these values when the
 reviewed logical provider profile promises a shorter availability period.
 
+Hosts may now construct
+`OrmAiOpenAiBackgroundReconciliationService` with
+`AiOpenAiBackgroundReconciliationLimits`. The service can claim or reclaim
+only a complete accepted submission graph, heartbeat an exact owner/
+generation/row-version fence, and voluntarily release that fence only before
+provider retrieval. Lease lifetimes are limited to five minutes, retry delays
+to one hour, candidate scans to 256 rows, nonterminal releases to 100, and
+serialization retries to 16. Defaults are one minute, five minutes, 64 rows,
+16 releases, and eight transaction retries. The submission ID is now an
+available stable tiebreaker in the private generated ordering contract.
+
+The returned `AiOpenAiBackgroundReconciliationClaim` is opaque. It does not
+authorize credential resolution, provider retrieval, current egress, output
+normalization, budget settlement, receipt mutation, or run mutation. A
+deployment should not treat successful claiming as progress toward a terminal
+result. Exact-response retrieval, current-authority revalidation, receipt
+matching, terminal normalization, atomic terminal persistence, and deadline/
+retry exhaustion closure remain deliberately unavailable in this increment.
+
 This is an additive public Rust API and private persistence/behavioral contract
-change. It changes no public GraphQL SDL and starts no reconciler. Claim/
-reclaim/release transactions, exact-response retrieval, receipt matching,
+change. It changes no public GraphQL SDL and requires no additional data
+migration beyond schema `0.48.0`. Exact-response retrieval, receipt matching,
 budget settlement, protected output persistence, terminal run mutation, and
-restore validation remain closed in this release increment.
+terminal restore validation remain closed in this release increment.
 
 ## Unreleased: upstream dependency alignment to graphql-orm 0.15.0 and agql-auth 0.12.0
 

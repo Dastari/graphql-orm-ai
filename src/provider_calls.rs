@@ -2272,8 +2272,8 @@ mod tests {
 
     use super::*;
     use agql_auth::{
-        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
-        SessionContext, SystemClock,
+        AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, FixedClock,
+        ResolvedPrincipal, SessionContext, SystemClock,
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -3198,6 +3198,75 @@ mod tests {
     }
 
     #[cfg(feature = "provider-openai")]
+    struct BackgroundReconciliationFixture {
+        fixture: Fixture,
+        accepted: AiOpenAiBackgroundSubmission,
+        clock: FixedClock,
+        service: OrmAiOpenAiBackgroundReconciliationService,
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn background_reconciliation_fixture(
+        windows: AiOpenAiBackgroundReconciliationWindows,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+    ) -> BackgroundReconciliationFixture {
+        let provider_created_at = OffsetDateTime::now_utc().unix_timestamp();
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                streaming: true,
+                structured_output: true,
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission(
+                "resp_background_reconciliation_1",
+                "queued",
+                provider_created_at,
+            );
+        let fixture = fixture_with_provider(mock).await;
+        let submission_service = OrmAiOpenAiBackgroundSubmissionService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+        )
+        .with_reconciliation_windows(windows);
+        let accepted = submission_service
+            .submit(&fixture.lease, background_plan(&fixture))
+            .await
+            .expect("background submission should be accepted");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &fixture.database,
+            &accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("accepted submission should exist");
+        let now = OffsetDateTime::from_unix_timestamp(
+            submission
+                .submitted_at
+                .expect("accepted submission should record local time"),
+        )
+        .expect("accepted submission time should be valid");
+        let clock = FixedClock::new(now);
+        let service = OrmAiOpenAiBackgroundReconciliationService::new(
+            fixture.database.clone(),
+            Arc::new(clock.clone()),
+            limits,
+        );
+        BackgroundReconciliationFixture {
+            fixture,
+            accepted,
+            clock,
+            service,
+        }
+    }
+
+    #[cfg(feature = "provider-openai")]
     #[tokio::test]
     async fn background_submission_binds_one_call_and_parks_run_without_a_lease() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -3349,6 +3418,481 @@ mod tests {
                 .is_err()
         );
         assert_eq!(fixture.mock.request_count(), 1);
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[test]
+    fn background_reconciliation_worker_limits_are_strictly_bounded() {
+        assert_eq!(
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::minutes(5),
+                64,
+                16,
+                8,
+            )
+            .expect("default worker limits should validate")
+        );
+        assert!(
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(5),
+                Duration::hours(1),
+                256,
+                100,
+                16,
+            )
+            .is_ok()
+        );
+        for invalid in [
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::ZERO,
+                Duration::minutes(1),
+                1,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(5) + Duration::SECOND,
+                Duration::minutes(1),
+                1,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::ZERO,
+                1,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::hours(1) + Duration::SECOND,
+                1,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::minutes(1),
+                0,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::minutes(1),
+                257,
+                1,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::minutes(1),
+                1,
+                101,
+                1,
+            ),
+            AiOpenAiBackgroundReconciliationLimits::new(
+                Duration::minutes(1),
+                Duration::minutes(1),
+                1,
+                1,
+                17,
+            ),
+        ] {
+            assert!(matches!(invalid, Err(AiError::InvalidConfiguration(_))));
+        }
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn concurrent_reconcilers_receive_one_exact_fenced_claim() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let (first, second) = tokio::join!(
+            test.service.claim_next("reconciler-a"),
+            test.service.claim_next("reconciler-b"),
+        );
+        let first = first.expect("first claim attempt should not fail");
+        let second = second.expect("second claim attempt should not fail");
+        let claims = [first, second].into_iter().flatten().collect::<Vec<_>>();
+        assert_eq!(claims.len(), 1, "only one reconciliation fence may win");
+        let claim = &claims[0];
+        assert_eq!(claim.submission_id(), test.accepted.submission_id());
+        assert_eq!(claim.run_id(), test.fixture.lease.run_id());
+        assert_eq!(claim.attempt_id(), test.fixture.lease.attempt_id());
+        assert_eq!(
+            claim.original_lease_generation(),
+            test.fixture.lease.lease_generation()
+        );
+        assert_eq!(claim.reconciliation_generation(), 1);
+        assert_eq!(claim.retry_count(), 0);
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "reconciling");
+        assert_eq!(
+            submission.reconciliation_owner.as_deref(),
+            Some(claim.worker_id())
+        );
+        assert_eq!(submission.reconciliation_generation, 1);
+        assert_eq!(
+            submission.reconciliation_lease_expires_at,
+            Some(claim.reconciliation_lease_expires_at().unix_timestamp())
+        );
+        assert_eq!(
+            submission.reconciliation_next_attempt_at,
+            submission.reconciliation_lease_expires_at
+        );
+
+        let run = AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::WaitingProvider.as_str());
+        assert_eq!(run.attempt_id, Some(test.fixture.lease.attempt_id()));
+        assert!(run.lease_owner.is_none());
+
+        let debug = format!("{claim:?}");
+        assert!(!debug.contains("resp_background_reconciliation_1"));
+        assert!(!debug.contains("mock-profile"));
+        assert!(!debug.contains(&test.fixture.lease.run_id().0.to_string()));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn expired_reconciliation_claim_is_reclaimed_with_a_new_generation() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let stale = test
+            .service
+            .claim_next("reconciler-stale")
+            .await
+            .expect("first claim should not fail")
+            .expect("submission should be eligible");
+        test.clock.advance_seconds(61);
+        let replacement = test
+            .service
+            .claim_next("reconciler-replacement")
+            .await
+            .expect("expired reclaim should not fail")
+            .expect("expired claim should be reclaimable");
+        assert_eq!(
+            replacement.reconciliation_generation(),
+            stale.reconciliation_generation() + 1
+        );
+        assert_eq!(replacement.worker_id(), "reconciler-replacement");
+        assert_eq!(replacement.retry_count(), stale.retry_count());
+        assert!(matches!(
+            test.service.heartbeat(&stale).await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            test.service
+                .release_before_retrieval(&stale, Duration::seconds(5))
+                .await,
+            Err(AiError::Conflict)
+        ));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn heartbeat_rotates_claim_and_only_current_claim_can_release() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let original = test
+            .service
+            .claim_next("reconciler-heartbeat")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        test.clock.advance_seconds(10);
+        let renewed = test
+            .service
+            .heartbeat(&original)
+            .await
+            .expect("current claim should renew");
+        assert_eq!(
+            renewed.reconciliation_generation(),
+            original.reconciliation_generation()
+        );
+        assert!(
+            renewed.reconciliation_lease_expires_at() > original.reconciliation_lease_expires_at()
+        );
+        assert!(matches!(
+            test.service
+                .release_before_retrieval(&original, Duration::seconds(5))
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        test.service
+            .release_before_retrieval(&renewed, Duration::seconds(30))
+            .await
+            .expect("current pre-retrieval claim should release");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "waiting_provider");
+        assert!(submission.reconciliation_owner.is_none());
+        assert_eq!(
+            submission.reconciliation_generation,
+            renewed.reconciliation_generation()
+        );
+        assert!(submission.reconciliation_lease_expires_at.is_none());
+        assert_eq!(
+            submission.reconciliation_next_attempt_at,
+            Some(test.clock.now().unix_timestamp() + 30)
+        );
+        assert_eq!(submission.reconciliation_retry_count, 1);
+        let run = AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::WaitingProvider.as_str());
+        assert_eq!(run.attempt_id, Some(test.fixture.lease.attempt_id()));
+
+        test.clock.advance_seconds(30);
+        let replacement = test
+            .service
+            .claim_next("reconciler-after-release")
+            .await
+            .expect("scheduled claim should not fail")
+            .expect("released submission should become eligible");
+        assert_eq!(
+            replacement.reconciliation_generation(),
+            renewed.reconciliation_generation() + 1
+        );
+        assert_eq!(replacement.retry_count(), 1);
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn release_rejects_retry_exhaustion_and_the_response_deadline() {
+        let no_retry_limits = AiOpenAiBackgroundReconciliationLimits::new(
+            Duration::seconds(10),
+            Duration::minutes(1),
+            16,
+            0,
+            4,
+        )
+        .expect("zero-retry worker limits should validate");
+        let no_retry = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            no_retry_limits,
+        )
+        .await;
+        let claim = no_retry
+            .service
+            .claim_next("reconciler-no-retry")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        assert!(matches!(
+            no_retry
+                .service
+                .release_before_retrieval(&claim, Duration::seconds(1))
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        let deadline = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::seconds(30),
+                Duration::seconds(30),
+            )
+            .expect("short reconciliation windows should validate"),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let claim = deadline
+            .service
+            .claim_next("reconciler-deadline")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        assert_eq!(
+            claim.reconciliation_lease_expires_at(),
+            claim.reconciliation_deadline()
+        );
+        assert!(matches!(
+            deadline
+                .service
+                .release_before_retrieval(&claim, Duration::seconds(30))
+                .await,
+            Err(AiError::Conflict)
+        ));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn migrated_row_without_a_deadline_remains_unclaimable() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let submission_id = test.accepted.submission_id();
+        test.fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let submission = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &submission.id,
+                            submission.row_version,
+                            AiProviderBackgroundSubmissionRecordWhereInput::default(),
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                reconciliation_deadline: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should model a migrated legacy row");
+        assert!(
+            test.service
+                .claim_next("reconciler-migrated-row")
+                .await
+                .expect("legacy-row scan should not fail")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn extended_response_deadline_fails_closed_before_claiming() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        assert!(!test.accepted.provider_store());
+        let submission_id = test.accepted.submission_id();
+        test.fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let submission = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let submitted_at = submission
+                        .submitted_at
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &submission.id,
+                            submission.row_version,
+                            AiProviderBackgroundSubmissionRecordWhereInput::default(),
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                reconciliation_deadline: Some(Some(submitted_at + 601)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should mutate the adversarial deadline");
+        assert!(matches!(
+            test.service
+                .claim_next("reconciler-extended-deadline")
+                .await,
+            Err(AiError::PersistenceFailed)
+        ));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn malformed_supporting_graph_fails_closed_before_claiming() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let run_id = test.fixture.lease.run_id();
+        test.fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let run = tx
+                        .find_by_id::<AiRunRecord>(&run_id.0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let outcome = tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &run.id,
+                            run.row_version,
+                            AiRunRecordWhereInput::default(),
+                            UpdateAiRunRecordInput {
+                                latest_checkpoint_id: Some(Some(Uuid::new_v4())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("generated ORM should mutate the adversarial graph");
+        assert!(matches!(
+            test.service.claim_next("reconciler-malformed-graph").await,
+            Err(AiError::PersistenceFailed)
+        ));
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "waiting_provider");
+        assert_eq!(submission.reconciliation_generation, 0);
+        assert!(submission.reconciliation_owner.is_none());
     }
 
     #[cfg(feature = "provider-openai")]

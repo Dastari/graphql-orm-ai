@@ -205,6 +205,16 @@ and deliberately incomplete inventory.
   acknowledgement ambiguity closes it as `RecoveryRequired` with an immutable
   attempt outcome. Restore makes invalid submission bindings fatal and never
   replays restored waiting work.
+- Bounded generated-ORM OpenAI background reconciliation claims over accepted
+  submissions. Claim/reclaim revalidates the deterministic submission, active
+  session, lease-free waiting run, original attempt and absent outcome,
+  uncertain budget, and original allow before CAS-incrementing a distinct
+  reconciliation generation. Heartbeats rotate the exact row-version fence;
+  voluntary pre-retrieval release clears ownership, increments a bounded retry
+  count, and schedules a later attempt without mutating the run. Concurrent
+  workers, expired reclaim, stale proofs, deadline/retry bounds, missing legacy
+  deadlines, and malformed support graphs are covered by in-memory SQLite
+  tests. The opaque claim grants no provider or terminal authority.
 - Provider-neutral exact attachment reopening with private-field request and
   resolved payloads, deployment raw-byte/cardinality limits, current owner/
   session/scope checks, released/clean/message-linked enforcement, object
@@ -459,16 +469,18 @@ and deliberately incomplete inventory.
   and provider-persistent file upload/search, plus richer provider
   file-type preflight and full built-in result normalization. Exact raw-body
   webhook verification, durable content-free receipt intake, and exact initial
-  background submission are implemented, but accepted runs and receipts remain
-  inert until an independently fenced reconciler exists. The complete
-  submission-claim, fixed-destination retrieval, current-authority, atomic
+  background submission and independently fenced content-free claim runtime
+  are implemented, but accepted runs and receipts remain inert because the
+  claim cannot retrieve or commit provider output. The complete
+  fixed-destination retrieval, current-authority, atomic
   terminal-graph, crash, receipt-redelivery, and restore contract is now
   documented in the
   [background guide](openai-background.md#terminal-reconciliation-design) and
   [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation). Schema
   `0.48.0` reserves and initializes the bounded claim generation/owner/lease,
   retry/deadline, current retrieval-egress, reconciliation time, and terminal
-  message facts, but claim/retrieval/terminal runtime implementation remains.
+  message facts. Retrieval, receipt matching, terminal normalization,
+  deadline/exhaustion closure, and terminal persistence remain.
   Exact inline image/file input remains
   independently gated by host MIME policy, budget, egress, current authority,
   and reopening limits.
@@ -504,11 +516,11 @@ and deliberately incomplete inventory.
 The detailed sequence and acceptance gates are maintained in the
 [completion plan](completion-plan.md). The leading runtime priorities are:
 
-1. Complete the OpenAI background lifecycle after exact submission and receipt
-   intake: add a bounded reconciler that matches the exact prepared submission,
-   verified receipt, and provider response, then independently re-proves
-   current authority, budget, egress, retention, usage, and provider output
-   before any run mutation.
+1. Continue the OpenAI background lifecycle after exact submission, receipt
+   intake, and content-free fenced claiming: add fixed-destination retrieval
+   and a bounded response normalizer, then independently re-prove current
+   authority, budget, egress, retention, usage, and provider output before any
+   run mutation.
 2. Add provider-persistent file upload/search behind independent authority,
    egress, budget, fencing, retention, and restore proofs, building on exact
    profile-bound deletion. Extend authoritative unit pricing only when each
@@ -525,7 +537,7 @@ intentional.
 
 ## Current verification
 
-- The complete `0.52.0` SQLite/provider matrix passes: 150 unit tests, all
+- The complete `0.52.0` SQLite/provider matrix passes: 158 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored.
 - Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed

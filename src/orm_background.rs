@@ -7,17 +7,21 @@
 
 use std::sync::Arc;
 
-use agql_auth::Clock;
+use agql_auth::{Clock, PrincipalReference, PrincipalReferenceKind};
+use graphql_orm::db::Database;
 use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
-use graphql_orm::graphql::filters::UuidFilter;
-use graphql_orm::graphql::orm::{ConditionalUpdateOutcome, TransactionError, TransactionMode};
+use graphql_orm::graphql::filters::{IntFilter, StringFilter, UuidFilter};
+use graphql_orm::graphql::orm::{
+    ConditionalUpdateOutcome, DefaultWriteBackend, MutationContext, OrderDirection,
+    TransactionError, TransactionMode,
+};
 use sha2::{Digest, Sha256};
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::orm_runs::{
     append_attempt_outcome, canonical_second, exact_state, lease_from_record,
-    load_and_validate_active_lease,
+    load_and_validate_active_lease, validate_worker_id,
 };
 use crate::persistence::*;
 use crate::{
@@ -30,6 +34,8 @@ use crate::{
 
 const MAXIMUM_TEMPORARY_RESPONSE_WINDOW: Duration = Duration::minutes(10);
 const MAXIMUM_STORED_RESPONSE_WINDOW: Duration = Duration::days(30);
+const MAXIMUM_RECONCILIATION_LEASE_TTL: Duration = Duration::minutes(5);
+const MAXIMUM_RECONCILIATION_RETRY_DELAY: Duration = Duration::hours(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackgroundSubmissionState {
@@ -221,6 +227,216 @@ impl std::fmt::Debug for AiOpenAiBackgroundSubmission {
             .field("budget_reservation_id", &"[REDACTED]")
             .finish()
     }
+}
+
+/// Deployment-owned bounds for durable OpenAI background reconciliation
+/// claims.
+///
+/// These limits bound database scans, lease lifetimes, nonterminal retry
+/// scheduling, and serialization retries. They do not authorize provider
+/// retrieval or extend a submission's immutable response-availability
+/// deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiOpenAiBackgroundReconciliationLimits {
+    lease_ttl: Duration,
+    maximum_retry_delay: Duration,
+    maximum_candidate_scan: usize,
+    maximum_retries: u32,
+    maximum_transaction_retries: usize,
+}
+
+impl AiOpenAiBackgroundReconciliationLimits {
+    /// Creates validated background reconciliation worker limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless the lease and retry
+    /// delay are at least one second and no greater than five minutes and one
+    /// hour respectively, the candidate scan is within `1..=256`, the retry
+    /// ceiling is at most 100, and transaction retries are at most 16.
+    pub fn new(
+        lease_ttl: Duration,
+        maximum_retry_delay: Duration,
+        maximum_candidate_scan: usize,
+        maximum_retries: u32,
+        maximum_transaction_retries: usize,
+    ) -> Result<Self, AiError> {
+        if lease_ttl < Duration::SECOND
+            || lease_ttl > MAXIMUM_RECONCILIATION_LEASE_TTL
+            || maximum_retry_delay < Duration::SECOND
+            || maximum_retry_delay > MAXIMUM_RECONCILIATION_RETRY_DELAY
+            || !(1..=256).contains(&maximum_candidate_scan)
+            || maximum_retries > 100
+            || maximum_transaction_retries > 16
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid OpenAI background reconciliation limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            lease_ttl,
+            maximum_retry_delay,
+            maximum_candidate_scan,
+            maximum_retries,
+            maximum_transaction_retries,
+        })
+    }
+
+    /// Returns the lifetime of each newly issued or renewed claim.
+    pub const fn lease_ttl(&self) -> Duration {
+        self.lease_ttl
+    }
+
+    /// Returns the maximum rows considered by one claim pass.
+    pub const fn maximum_candidate_scan(&self) -> usize {
+        self.maximum_candidate_scan
+    }
+}
+
+impl Default for AiOpenAiBackgroundReconciliationLimits {
+    fn default() -> Self {
+        Self {
+            lease_ttl: Duration::minutes(1),
+            maximum_retry_delay: Duration::minutes(5),
+            maximum_candidate_scan: 64,
+            maximum_retries: 16,
+            maximum_transaction_retries: 8,
+        }
+    }
+}
+
+/// Exact owner/generation/row-version proof for one background reconciliation
+/// claim.
+///
+/// Fields are private so a caller cannot manufacture or alter a claim. The
+/// value grants no provider credential, retrieval, egress, budget, output, or
+/// run-mutation authority. Every operation reloads the durable row and checks
+/// the owner, generation, expiry, immutable response binding, and row version.
+/// A later retrieval service must independently rehydrate the stored current
+/// principal before provider egress.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiOpenAiBackgroundReconciliationClaim {
+    submission_id: Uuid,
+    session_id: crate::AiSessionId,
+    run_id: AiRunId,
+    attempt_id: Uuid,
+    original_lease_generation: i64,
+    principal_reference: PrincipalReference,
+    worker_id: String,
+    reconciliation_generation: i64,
+    reconciliation_lease_expires_at: OffsetDateTime,
+    row_version: i64,
+    retry_count: u32,
+    reconciliation_deadline: OffsetDateTime,
+    provider_profile_id: String,
+    provider_model: String,
+    maximum_output_tokens: u64,
+    provider_store: bool,
+    provider_response_id: String,
+    provider_created_at: i64,
+    request_hash: String,
+    budget_reservation_id: AiBudgetReservationId,
+    original_egress_decision_id: Uuid,
+    original_egress_manifest_hash: String,
+    scope_kind: String,
+    scope_id: String,
+    tenant_id: Option<String>,
+}
+
+impl AiOpenAiBackgroundReconciliationClaim {
+    /// Opaque durable background submission identifier.
+    pub const fn submission_id(&self) -> Uuid {
+        self.submission_id
+    }
+
+    /// Owning run.
+    pub const fn run_id(&self) -> AiRunId {
+        self.run_id
+    }
+
+    /// Original provider-crossing attempt.
+    pub const fn attempt_id(&self) -> Uuid {
+        self.attempt_id
+    }
+
+    /// Original run fencing generation bound to the provider request.
+    pub const fn original_lease_generation(&self) -> i64 {
+        self.original_lease_generation
+    }
+
+    /// Current reconciliation worker owner.
+    pub fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+
+    /// Monotonic reconciliation fencing generation.
+    pub const fn reconciliation_generation(&self) -> i64 {
+        self.reconciliation_generation
+    }
+
+    /// Current claim expiry.
+    pub const fn reconciliation_lease_expires_at(&self) -> OffsetDateTime {
+        self.reconciliation_lease_expires_at
+    }
+
+    /// Number of prior nonterminal releases.
+    pub const fn retry_count(&self) -> u32 {
+        self.retry_count
+    }
+
+    /// Immutable provider-response availability deadline.
+    pub const fn reconciliation_deadline(&self) -> OffsetDateTime {
+        self.reconciliation_deadline
+    }
+}
+
+impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiOpenAiBackgroundReconciliationClaim")
+            .field("submission_id", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("run_id", &"[REDACTED]")
+            .field("attempt_id", &"[REDACTED]")
+            .field("original_lease_generation", &self.original_lease_generation)
+            .field("principal_reference", &"[REDACTED]")
+            .field("worker_id", &self.worker_id)
+            .field("reconciliation_generation", &self.reconciliation_generation)
+            .field(
+                "reconciliation_lease_expires_at",
+                &self.reconciliation_lease_expires_at,
+            )
+            .field("retry_count", &self.retry_count)
+            .field("reconciliation_deadline", &self.reconciliation_deadline)
+            .field("provider_profile_id", &"[REDACTED]")
+            .field("provider_model", &self.provider_model)
+            .field("maximum_output_tokens", &self.maximum_output_tokens)
+            .field("provider_store", &self.provider_store)
+            .field("provider_response_id", &"[REDACTED]")
+            .field("provider_created_at", &self.provider_created_at)
+            .field("request_hash", &"[REDACTED]")
+            .field("budget_reservation_id", &"[REDACTED]")
+            .field("original_egress_decision_id", &"[REDACTED]")
+            .field("original_egress_manifest_hash", &"[REDACTED]")
+            .field("scope_kind", &self.scope_kind)
+            .field("scope_id", &"[REDACTED]")
+            .field("tenant_id", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Generated-ORM worker queue for content-free OpenAI background
+/// reconciliation claims.
+///
+/// This service can claim, reclaim, heartbeat, and voluntarily release only
+/// the durable reconciliation fence. It cannot retrieve provider output,
+/// resolve credentials, match webhook content, settle usage, persist output,
+/// or mutate the parked run.
+#[derive(Clone)]
+pub struct OrmAiOpenAiBackgroundReconciliationService {
+    database: Database<DefaultWriteBackend>,
+    clock: Arc<dyn Clock>,
+    limits: AiOpenAiBackgroundReconciliationLimits,
 }
 
 /// ORM-backed executor for one exact OpenAI background response submission.
@@ -982,6 +1198,871 @@ impl OrmAiOpenAiBackgroundSubmissionService {
     }
 }
 
+impl OrmAiOpenAiBackgroundReconciliationService {
+    /// Creates a bounded background reconciliation claim service.
+    pub fn new(
+        database: Database<DefaultWriteBackend>,
+        clock: Arc<dyn Clock>,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+    ) -> Self {
+        Self {
+            database,
+            clock,
+            limits,
+        }
+    }
+
+    /// Returns the ORM database handle for host composition.
+    pub const fn database(&self) -> &Database<DefaultWriteBackend> {
+        &self.database
+    }
+
+    /// Claims the oldest eligible accepted submission or reclaims an expired
+    /// reconciliation lease.
+    ///
+    /// The generated state-machine transaction revalidates the exact
+    /// submission, run, session, original attempt, uncertain budget, and
+    /// original egress allow before it CAS-increments the reconciliation
+    /// generation. A verified webhook is not required and grants no priority
+    /// or authority at this boundary.
+    ///
+    /// The returned claim still grants no provider retrieval authority. The
+    /// future retrieval service must rehydrate current authority and audit a
+    /// new exact egress allow before any provider request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid worker ID, malformed or conflicting
+    /// durable bindings, generation/time overflow, or persistence failure.
+    pub async fn claim_next(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<AiOpenAiBackgroundReconciliationClaim>, AiError> {
+        validate_worker_id(worker_id)?;
+        let now = canonical_second(self.clock.now());
+        let filter_time =
+            i32::try_from(now.unix_timestamp()).map_err(|_| AiError::PersistenceFailed)?;
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self
+                .claim_once(worker_id.to_owned(), now, filter_time)
+                .await
+            {
+                Ok(claim) => return Ok(claim),
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    /// Renews an unexpired reconciliation claim and returns its new
+    /// row-version proof.
+    ///
+    /// Renewal can never extend the immutable response deadline. The
+    /// next-eligible timestamp is rotated with the lease expiry so an expired
+    /// claim becomes reclaimable through the same bounded queue.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for an expired deadline or lease, a stale owner,
+    /// generation, or row version, malformed durable state, or persistence
+    /// failure.
+    pub async fn heartbeat(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+    ) -> Result<AiOpenAiBackgroundReconciliationClaim, AiError> {
+        let now = canonical_second(self.clock.now());
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self.heartbeat_once(claim.clone(), now).await {
+                Ok(updated) => return Ok(updated),
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    /// Relinquishes a current claim before provider retrieval and schedules a
+    /// bounded later attempt.
+    ///
+    /// This method is only for shutdown, local backpressure, or another
+    /// condition known to precede provider I/O. Once a response retrieval has
+    /// been attempted, only the future exact-response normalizer may classify
+    /// and release the observation. The retry count increments atomically;
+    /// the caller cannot schedule at or beyond the immutable deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the delay is shorter than one second, exceeds the
+    /// deployment maximum, reaches the deadline, exhausts the retry ceiling,
+    /// the claim is stale or expired, or persistence fails.
+    pub async fn release_before_retrieval(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+        delay: Duration,
+    ) -> Result<(), AiError> {
+        if delay < Duration::SECOND || delay > self.limits.maximum_retry_delay {
+            return Err(AiError::InvalidInput(
+                "invalid OpenAI background reconciliation delay".to_owned(),
+            ));
+        }
+        if claim.retry_count >= self.limits.maximum_retries {
+            return Err(AiError::Conflict);
+        }
+        let now = canonical_second(self.clock.now());
+        let eligible_at = now.checked_add(delay).ok_or_else(|| {
+            AiError::InvalidConfiguration(
+                "background reconciliation retry time overflow".to_owned(),
+            )
+        })?;
+        if eligible_at >= claim.reconciliation_deadline {
+            return Err(AiError::Conflict);
+        }
+        for retry in 0..=self.limits.maximum_transaction_retries {
+            match self
+                .release_before_retrieval_once(claim.clone(), now, eligible_at)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(TransactionError::Retryable(_))
+                    if retry < self.limits.maximum_transaction_retries =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(map_transaction(error)),
+            }
+        }
+        Err(AiError::PersistenceFailed)
+    }
+
+    async fn claim_once(
+        &self,
+        worker_id: String,
+        now: OffsetDateTime,
+        filter_time: i32,
+    ) -> Result<Option<AiOpenAiBackgroundReconciliationClaim>, TransactionError> {
+        let database = self.database.clone();
+        let limits = self.limits;
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let candidates = tx
+                        .query::<AiProviderBackgroundSubmissionRecord>()
+                        .filter(AiProviderBackgroundSubmissionRecordWhereInput {
+                            state: Some(StringFilter {
+                                in_list: Some(vec![
+                                    BackgroundSubmissionState::WaitingProvider
+                                        .as_str()
+                                        .to_owned(),
+                                    BackgroundSubmissionState::Reconciling.as_str().to_owned(),
+                                ]),
+                                ..Default::default()
+                            }),
+                            reconciliation_next_attempt_at: Some(IntFilter {
+                                lte: Some(filter_time),
+                                ..Default::default()
+                            }),
+                            reconciliation_deadline: Some(IntFilter {
+                                gt: Some(filter_time),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .order_by(AiProviderBackgroundSubmissionRecordOrderByInput {
+                            reconciliation_next_attempt_at: Some(OrderDirection::Asc),
+                            created_at: Some(OrderDirection::Asc),
+                            id: Some(OrderDirection::Asc),
+                            ..Default::default()
+                        })
+                        .limit(
+                            i64::try_from(limits.maximum_candidate_scan)
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?,
+                        )
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let Some(current) = candidates.into_iter().next() else {
+                        return Ok(None);
+                    };
+                    validate_claimable_submission(&current, now, limits.maximum_retries)?;
+                    let graph = load_background_claim_graph(tx, &current).await?;
+                    let generation = current
+                        .reconciliation_generation
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let configured_expiry = now
+                        .checked_add(limits.lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        .unix_timestamp();
+                    let deadline = current
+                        .reconciliation_deadline
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let expiry = configured_expiry.min(deadline);
+                    if expiry <= now.unix_timestamp() {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let previous_state = BackgroundSubmissionState::from_persisted(&current.state)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &current.id,
+                            current.row_version,
+                            AiProviderBackgroundSubmissionRecordWhereInput {
+                                state: Some(StringFilter {
+                                    eq: Some(current.state.clone()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            },
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                state: Some(
+                                    BackgroundSubmissionState::Reconciling.as_str().to_owned(),
+                                ),
+                                reconciliation_owner: Some(Some(worker_id.clone())),
+                                reconciliation_generation: Some(generation),
+                                reconciliation_lease_expires_at: Some(Some(expiry)),
+                                reconciliation_next_attempt_at: Some(Some(expiry)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated = match outcome {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    validate_active_reconciliation_record(&updated, &worker_id, generation, now)?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "system".to_owned(),
+                        actor_subject: worker_id,
+                        action: "claim_provider_background_reconciliation".to_owned(),
+                        resource_kind: "ai_provider_background_submission".to_owned(),
+                        resource_reference: updated.id.to_string(),
+                        outcome: "reconciling".to_owned(),
+                        reason_code: match previous_state {
+                            BackgroundSubmissionState::WaitingProvider => {
+                                "eligible_submission_claimed"
+                            }
+                            BackgroundSubmissionState::Reconciling => {
+                                "expired_reconciliation_reclaimed"
+                            }
+                            BackgroundSubmissionState::Prepared
+                            | BackgroundSubmissionState::Completed
+                            | BackgroundSubmissionState::Failed
+                            | BackgroundSubmissionState::Cancelled
+                            | BackgroundSubmissionState::RecoveryRequired => {
+                                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                            }
+                        }
+                        .to_owned(),
+                        correlation_id: updated.id.to_string(),
+                        causation_id: Some(updated.run_id.to_string()),
+                        policy_version: Some("provider-background-reconciliation-v1".to_owned()),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    claim_from_records(&updated, graph)
+                        .map(Some)
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))
+                })
+            })
+            .await
+    }
+
+    async fn heartbeat_once(
+        &self,
+        claim: AiOpenAiBackgroundReconciliationClaim,
+        now: OffsetDateTime,
+    ) -> Result<AiOpenAiBackgroundReconciliationClaim, TransactionError> {
+        let database = self.database.clone();
+        let lease_ttl = self.limits.lease_ttl;
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    validate_current_reconciliation_claim(&current, &claim, now)?;
+                    let configured_expiry = now
+                        .checked_add(lease_ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?
+                        .unix_timestamp();
+                    let expiry =
+                        configured_expiry.min(claim.reconciliation_deadline.unix_timestamp());
+                    if expiry <= now.unix_timestamp() {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_background_state(BackgroundSubmissionState::Reconciling.as_str()),
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                reconciliation_lease_expires_at: Some(Some(expiry)),
+                                reconciliation_next_attempt_at: Some(Some(expiry)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated = match outcome {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    validate_active_reconciliation_record(
+                        &updated,
+                        &claim.worker_id,
+                        claim.reconciliation_generation,
+                        now,
+                    )?;
+                    let mut renewed = claim;
+                    renewed.reconciliation_lease_expires_at =
+                        OffsetDateTime::from_unix_timestamp(expiry)
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    renewed.row_version = updated.row_version;
+                    Ok(renewed)
+                })
+            })
+            .await
+    }
+
+    async fn release_before_retrieval_once(
+        &self,
+        claim: AiOpenAiBackgroundReconciliationClaim,
+        now: OffsetDateTime,
+        eligible_at: OffsetDateTime,
+    ) -> Result<(), TransactionError> {
+        let database = self.database.clone();
+        let maximum_retries = self.limits.maximum_retries;
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    validate_current_reconciliation_claim(&current, &claim, now)?;
+                    let retry_count = current
+                        .reconciliation_retry_count
+                        .checked_add(1)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                    if u32::try_from(retry_count).map_or(true, |count| count > maximum_retries)
+                        || eligible_at.unix_timestamp()
+                            >= claim.reconciliation_deadline.unix_timestamp()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_background_state(BackgroundSubmissionState::Reconciling.as_str()),
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                state: Some(
+                                    BackgroundSubmissionState::WaitingProvider
+                                        .as_str()
+                                        .to_owned(),
+                                ),
+                                reconciliation_owner: Some(None),
+                                reconciliation_lease_expires_at: Some(None),
+                                reconciliation_next_attempt_at: Some(Some(
+                                    eligible_at.unix_timestamp(),
+                                )),
+                                reconciliation_retry_count: Some(retry_count),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated = match outcome {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    validate_released_reconciliation_record(
+                        &updated,
+                        claim.reconciliation_generation,
+                        retry_count,
+                        eligible_at,
+                    )?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "system".to_owned(),
+                        actor_subject: claim.worker_id,
+                        action: "release_provider_background_reconciliation".to_owned(),
+                        resource_kind: "ai_provider_background_submission".to_owned(),
+                        resource_reference: updated.id.to_string(),
+                        outcome: "waiting_provider".to_owned(),
+                        reason_code: "worker_relinquished_before_retrieval".to_owned(),
+                        correlation_id: updated.id.to_string(),
+                        causation_id: Some(updated.run_id.to_string()),
+                        policy_version: Some("provider-background-reconciliation-v1".to_owned()),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+    }
+}
+
+struct BackgroundClaimGraph {
+    principal_reference: PrincipalReference,
+    scope_kind: String,
+    scope_id: String,
+    tenant_id: Option<String>,
+}
+
+async fn load_background_claim_graph(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    submission: &AiProviderBackgroundSubmissionRecord,
+) -> Result<BackgroundClaimGraph, OrmPublicError> {
+    let run = tx
+        .find_by_id::<AiRunRecord>(&submission.run_id)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    let principal_reference: PrincipalReference =
+        serde_json::from_value(run.principal_reference.clone())
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let session = tx
+        .find_by_id::<AiSessionRecord>(&submission.session_id)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    let attempts = tx
+        .query::<AiRunAttemptRecord>()
+        .filter(AiRunAttemptRecordWhereInput {
+            id: Some(UuidFilter {
+                eq: Some(submission.attempt_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    let [attempt] = attempts.as_slice() else {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    };
+    let budget = tx
+        .find_by_id::<AiBudgetReservationRecord>(&submission.budget_reservation_id)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    let egress_events = tx
+        .query::<AiEgressEventRecord>()
+        .filter(AiEgressEventRecordWhereInput {
+            id: Some(UuidFilter {
+                eq: Some(submission.egress_decision_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    let [egress] = egress_events.as_slice() else {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    };
+    let outcomes = tx
+        .query::<AiRunAttemptOutcomeRecord>()
+        .filter(AiRunAttemptOutcomeRecordWhereInput {
+            attempt_id: Some(UuidFilter {
+                eq: Some(submission.attempt_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    let expected_principal_kind = match &principal_reference.kind {
+        PrincipalReferenceKind::UserSession => "user".to_owned(),
+        PrincipalReferenceKind::ApiToken { principal_kind } => {
+            format!("api_token:{principal_kind}")
+        }
+    };
+    if run.id != submission.run_id
+        || run.session_id != submission.session_id
+        || run.state != AiRunState::WaitingProvider.as_str()
+        || run.attempt_id != Some(submission.attempt_id)
+        || run.lease_generation != submission.lease_generation
+        || run.lease_owner.is_some()
+        || run.lease_expires_at.is_some()
+        || run.lease_heartbeat_at.is_some()
+        || run.next_attempt_at.is_some()
+        || run.error_code.is_some()
+        || run.latest_checkpoint_id.is_some()
+        || run.row_version < 0
+        || session.id != submission.session_id
+        || session.state != "active"
+        || session.deleted_at.is_some()
+        || session.owner_principal_kind != expected_principal_kind
+        || session.owner_subject != principal_reference.subject
+        || session.scope_kind != budget.scope_kind
+        || session.scope_id != budget.scope_id
+        || session.tenant_id != budget.tenant_id
+        || principal_reference
+            .tenant_id
+            .as_ref()
+            .is_some_and(|tenant_id| session.tenant_id.as_ref() != Some(tenant_id))
+        || attempt.id != submission.attempt_id
+        || attempt.run_id != submission.run_id
+        || attempt.lease_generation != submission.lease_generation
+        || validate_worker_id(&attempt.worker_id).is_err()
+        || attempt.claimed_at <= 0
+        || attempt.finished_at.is_some()
+        || attempt.provider_response_id.is_some()
+        || attempt.outcome_code.is_some()
+        || !outcomes.is_empty()
+        || budget.id != submission.budget_reservation_id
+        || budget.session_id != submission.session_id
+        || budget.run_id != submission.run_id
+        || budget.attempt_id != submission.attempt_id
+        || budget.lease_generation != submission.lease_generation
+        || budget.scope_kind != session.scope_kind
+        || budget.scope_id != session.scope_id
+        || budget.tenant_id != session.tenant_id
+        || budget.principal_kind != session.owner_principal_kind
+        || budget.principal_subject != session.owner_subject
+        || budget.provider_kind != "openai"
+        || budget.provider_model != submission.provider_model
+        || budget.reserved_input_tokens < 0
+        || budget.reserved_output_tokens < submission.maximum_output_tokens
+        || budget.reserved_tool_units != 0
+        || budget.reserved_image_units != 0
+        || budget.reserved_cost_microunits < 0
+        || budget.reserved_runs != 1
+        || budget.state != "uncertain"
+        || budget.reconciled_at.is_none()
+        || budget.actual_input_tokens.is_some()
+        || budget.actual_cached_input_tokens.is_some()
+        || budget.actual_output_tokens.is_some()
+        || budget.actual_tool_units.is_some()
+        || budget.actual_image_units.is_some()
+        || budget.actual_cost_microunits.is_some()
+        || budget.actual_runs.is_some()
+        || egress.id != submission.egress_decision_id
+        || egress.run_id != Some(submission.run_id)
+        || egress.principal_subject != principal_reference.subject
+        || egress.scope_kind != session.scope_kind
+        || egress.scope_id != session.scope_id
+        || egress.manifest_hash != submission.egress_manifest_hash
+        || egress.destination.trim().is_empty()
+        || egress.capability != "model_inference"
+        || egress.outcome != "allow"
+        || egress.policy_version.trim().is_empty()
+        || egress.estimated_bytes < 0
+        || egress.estimated_tokens < 0
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(BackgroundClaimGraph {
+        principal_reference,
+        scope_kind: session.scope_kind,
+        scope_id: session.scope_id,
+        tenant_id: session.tenant_id,
+    })
+}
+
+fn validate_claimable_submission(
+    submission: &AiProviderBackgroundSubmissionRecord,
+    now: OffsetDateTime,
+    maximum_retries: u32,
+) -> Result<(), OrmPublicError> {
+    let state = BackgroundSubmissionState::from_persisted(&submission.state)
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let next_attempt_at = submission
+        .reconciliation_next_attempt_at
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let deadline = submission
+        .reconciliation_deadline
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let submitted_at = submission
+        .submitted_at
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let provider_response_id = submission
+        .provider_response_id
+        .as_deref()
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let provider_status = submission
+        .provider_status
+        .as_deref()
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let provider_store = submission
+        .provider_store
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let provider_created_at = submission
+        .provider_created_at
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let maximum_window = if provider_store {
+        MAXIMUM_STORED_RESPONSE_WINDOW
+    } else {
+        MAXIMUM_TEMPORARY_RESPONSE_WINDOW
+    };
+    let maximum_deadline = provider_created_at
+        .min(submitted_at)
+        .checked_add(maximum_window.whole_seconds())
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let (submission_key, submission_id) = submission_identity_from_parts(
+        submission.run_id,
+        submission.attempt_id,
+        submission.lease_generation,
+        &submission.provider_profile_id,
+        &submission.provider_model,
+        &submission.request_hash,
+        submission.budget_reservation_id,
+        &submission.egress_manifest_hash,
+    );
+    if submission.id != submission_id
+        || submission.submission_key != submission_key
+        || submission.provider_kind != "openai"
+        || submission.provider_profile_id.trim().is_empty()
+        || submission.provider_profile_id.len() > 200
+        || submission.provider_model.trim().is_empty()
+        || submission.provider_model.len() > 1_024
+        || submission.maximum_output_tokens <= 0
+        || !valid_sha256_hex(&submission.request_hash)
+        || !valid_sha256_hex(&submission.egress_manifest_hash)
+        || !valid_response_id(provider_response_id)
+        || !valid_provider_status(provider_status)
+        || submission.created_at <= 0
+        || provider_created_at <= 0
+        || submitted_at <= 0
+        || submitted_at < submission.created_at
+        || next_attempt_at < submitted_at
+        || next_attempt_at > now.unix_timestamp()
+        || deadline <= now.unix_timestamp()
+        || deadline <= submitted_at
+        || deadline > maximum_deadline
+        || submission.safe_error_code.is_some()
+        || submission.reconciliation_generation < 0
+        || submission.reconciliation_retry_count < 0
+        || submission.reconciliation_retry_count > submission.reconciliation_generation
+        || u32::try_from(submission.reconciliation_retry_count)
+            .map_or(true, |count| count > maximum_retries)
+        || submission.reconciled_at.is_some()
+        || submission.retrieval_egress_decision_id.is_some()
+        || submission.terminal_message_id.is_some()
+        || submission.row_version < 1
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    match state {
+        BackgroundSubmissionState::WaitingProvider
+            if submission.reconciliation_owner.is_none()
+                && submission.reconciliation_lease_expires_at.is_none()
+                && ((submission.reconciliation_generation == 0
+                    && submission.reconciliation_retry_count == 0)
+                    || (submission.reconciliation_generation > 0
+                        && submission.reconciliation_retry_count > 0)) =>
+        {
+            Ok(())
+        }
+        BackgroundSubmissionState::Reconciling
+            if submission.reconciliation_generation > 0
+                && submission
+                    .reconciliation_owner
+                    .as_deref()
+                    .is_some_and(|owner| validate_worker_id(owner).is_ok())
+                && submission.reconciliation_lease_expires_at == Some(next_attempt_at)
+                && next_attempt_at <= now.unix_timestamp() =>
+        {
+            Ok(())
+        }
+        BackgroundSubmissionState::Prepared
+        | BackgroundSubmissionState::WaitingProvider
+        | BackgroundSubmissionState::Reconciling
+        | BackgroundSubmissionState::Completed
+        | BackgroundSubmissionState::Failed
+        | BackgroundSubmissionState::Cancelled
+        | BackgroundSubmissionState::RecoveryRequired => {
+            Err(OrmPublicError::new(OrmErrorCode::InternalError))
+        }
+    }
+}
+
+fn validate_active_reconciliation_record(
+    submission: &AiProviderBackgroundSubmissionRecord,
+    worker_id: &str,
+    generation: i64,
+    now: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    let expiry = submission
+        .reconciliation_lease_expires_at
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    if BackgroundSubmissionState::from_persisted(&submission.state)
+        != Some(BackgroundSubmissionState::Reconciling)
+        || submission.reconciliation_owner.as_deref() != Some(worker_id)
+        || submission.reconciliation_generation != generation
+        || submission.reconciliation_next_attempt_at != Some(expiry)
+        || expiry <= now.unix_timestamp()
+        || submission
+            .reconciliation_deadline
+            .is_none_or(|deadline| expiry > deadline)
+        || submission.safe_error_code.is_some()
+        || submission.reconciled_at.is_some()
+        || submission.retrieval_egress_decision_id.is_some()
+        || submission.terminal_message_id.is_some()
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn validate_current_reconciliation_claim(
+    submission: &AiProviderBackgroundSubmissionRecord,
+    claim: &AiOpenAiBackgroundReconciliationClaim,
+    now: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    if submission.id != claim.submission_id
+        || submission.session_id != claim.session_id.0
+        || submission.run_id != claim.run_id.0
+        || submission.attempt_id != claim.attempt_id
+        || submission.lease_generation != claim.original_lease_generation
+        || submission.provider_profile_id != claim.provider_profile_id
+        || submission.provider_model != claim.provider_model
+        || u64::try_from(submission.maximum_output_tokens).ok() != Some(claim.maximum_output_tokens)
+        || submission.provider_store != Some(claim.provider_store)
+        || submission.provider_response_id.as_deref() != Some(claim.provider_response_id.as_str())
+        || submission.provider_created_at != Some(claim.provider_created_at)
+        || submission.request_hash != claim.request_hash
+        || submission.budget_reservation_id != claim.budget_reservation_id.0
+        || submission.egress_decision_id != claim.original_egress_decision_id
+        || submission.egress_manifest_hash != claim.original_egress_manifest_hash
+        || submission.reconciliation_owner.as_deref() != Some(&claim.worker_id)
+        || submission.reconciliation_generation != claim.reconciliation_generation
+        || submission.reconciliation_lease_expires_at
+            != Some(claim.reconciliation_lease_expires_at.unix_timestamp())
+        || submission.reconciliation_next_attempt_at != submission.reconciliation_lease_expires_at
+        || submission.reconciliation_retry_count != i64::from(claim.retry_count)
+        || submission.reconciliation_deadline
+            != Some(claim.reconciliation_deadline.unix_timestamp())
+        || submission.row_version != claim.row_version
+        || claim.reconciliation_lease_expires_at <= now
+        || claim.reconciliation_deadline <= now
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    validate_active_reconciliation_record(
+        submission,
+        &claim.worker_id,
+        claim.reconciliation_generation,
+        now,
+    )
+}
+
+fn validate_released_reconciliation_record(
+    submission: &AiProviderBackgroundSubmissionRecord,
+    generation: i64,
+    retry_count: i64,
+    eligible_at: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    if BackgroundSubmissionState::from_persisted(&submission.state)
+        != Some(BackgroundSubmissionState::WaitingProvider)
+        || submission.reconciliation_owner.is_some()
+        || submission.reconciliation_generation != generation
+        || submission.reconciliation_lease_expires_at.is_some()
+        || submission.reconciliation_next_attempt_at != Some(eligible_at.unix_timestamp())
+        || submission.reconciliation_retry_count != retry_count
+        || submission
+            .reconciliation_deadline
+            .is_none_or(|deadline| eligible_at.unix_timestamp() >= deadline)
+        || submission.safe_error_code.is_some()
+        || submission.reconciled_at.is_some()
+        || submission.retrieval_egress_decision_id.is_some()
+        || submission.terminal_message_id.is_some()
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    }
+    Ok(())
+}
+
+fn claim_from_records(
+    submission: &AiProviderBackgroundSubmissionRecord,
+    graph: BackgroundClaimGraph,
+) -> Result<AiOpenAiBackgroundReconciliationClaim, AiError> {
+    Ok(AiOpenAiBackgroundReconciliationClaim {
+        submission_id: submission.id,
+        session_id: crate::AiSessionId(submission.session_id),
+        run_id: AiRunId(submission.run_id),
+        attempt_id: submission.attempt_id,
+        original_lease_generation: submission.lease_generation,
+        principal_reference: graph.principal_reference,
+        worker_id: submission
+            .reconciliation_owner
+            .clone()
+            .ok_or(AiError::PersistenceFailed)?,
+        reconciliation_generation: submission.reconciliation_generation,
+        reconciliation_lease_expires_at: submission
+            .reconciliation_lease_expires_at
+            .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
+            .ok_or(AiError::PersistenceFailed)?,
+        row_version: submission.row_version,
+        retry_count: u32::try_from(submission.reconciliation_retry_count)
+            .map_err(|_| AiError::PersistenceFailed)?,
+        reconciliation_deadline: submission
+            .reconciliation_deadline
+            .and_then(|value| OffsetDateTime::from_unix_timestamp(value).ok())
+            .ok_or(AiError::PersistenceFailed)?,
+        provider_profile_id: submission.provider_profile_id.clone(),
+        provider_model: submission.provider_model.clone(),
+        maximum_output_tokens: u64::try_from(submission.maximum_output_tokens)
+            .map_err(|_| AiError::PersistenceFailed)?,
+        provider_store: submission
+            .provider_store
+            .ok_or(AiError::PersistenceFailed)?,
+        provider_response_id: submission
+            .provider_response_id
+            .clone()
+            .ok_or(AiError::PersistenceFailed)?,
+        provider_created_at: submission
+            .provider_created_at
+            .ok_or(AiError::PersistenceFailed)?,
+        request_hash: submission.request_hash.clone(),
+        budget_reservation_id: AiBudgetReservationId(submission.budget_reservation_id),
+        original_egress_decision_id: submission.egress_decision_id,
+        original_egress_manifest_hash: submission.egress_manifest_hash.clone(),
+        scope_kind: graph.scope_kind,
+        scope_id: graph.scope_id,
+        tenant_id: graph.tenant_id,
+    })
+}
+
+fn exact_background_state(state: &str) -> AiProviderBackgroundSubmissionRecordWhereInput {
+    AiProviderBackgroundSubmissionRecordWhereInput {
+        state: Some(StringFilter {
+            eq: Some(state.to_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Clone)]
 struct PreparedBackgroundSubmission {
     submission_id: Uuid,
@@ -1069,17 +2150,40 @@ fn submission_identity(
     budget_reservation_id: AiBudgetReservationId,
     egress_manifest_hash: &str,
 ) -> (String, Uuid) {
+    submission_identity_from_parts(
+        lease.run_id().0,
+        lease.attempt_id(),
+        lease.lease_generation(),
+        provider_profile_id,
+        provider_model,
+        request_hash,
+        budget_reservation_id.0,
+        egress_manifest_hash,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submission_identity_from_parts(
+    run_id: Uuid,
+    attempt_id: Uuid,
+    lease_generation: i64,
+    provider_profile_id: &str,
+    provider_model: &str,
+    request_hash: &str,
+    budget_reservation_id: Uuid,
+    egress_manifest_hash: &str,
+) -> (String, Uuid) {
     let mut hasher = Sha256::new();
     hasher.update(b"graphql-orm-ai/provider-background-submission/v1\0");
-    hasher.update(lease.run_id().0.as_bytes());
-    hasher.update(lease.attempt_id().as_bytes());
-    hasher.update(lease.lease_generation().to_be_bytes());
+    hasher.update(run_id.as_bytes());
+    hasher.update(attempt_id.as_bytes());
+    hasher.update(lease_generation.to_be_bytes());
     hasher.update(provider_profile_id.as_bytes());
     hasher.update([0]);
     hasher.update(provider_model.as_bytes());
     hasher.update([0]);
     hasher.update(request_hash.as_bytes());
-    hasher.update(budget_reservation_id.0.as_bytes());
+    hasher.update(budget_reservation_id.as_bytes());
     hasher.update(egress_manifest_hash.as_bytes());
     let digest = hasher.finalize();
     let mut id = [0_u8; 16];

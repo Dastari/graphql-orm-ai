@@ -21,9 +21,23 @@ starts the durable OpenAI background terminal-reconciliation implementation.
   `OrmAiOpenAiBackgroundSubmissionService::with_reconciliation_windows`
   configure those acceptance-time bounds. Defaults are five minutes for
   temporary `store: false` responses and 29 days for stored responses;
-  compiled ceilings are ten minutes and 30 days. This increment does not expose
-  a claim, retrieval, or terminal-mutation worker, so accepted runs remain
-  parked in `WaitingProvider`.
+  compiled ceilings are ten minutes and 30 days.
+- Public `AiOpenAiBackgroundReconciliationLimits`,
+  `AiOpenAiBackgroundReconciliationClaim`, and
+  `OrmAiOpenAiBackgroundReconciliationService` add a bounded generated-ORM
+  claim queue over accepted submissions. Claim and expired-claim reclaim
+  validate the complete deterministic submission, lease-free waiting run,
+  active session, original attempt without an outcome, uncertain budget, and
+  original egress allow before CAS-incrementing a separate reconciliation
+  generation. Heartbeat rotates the exact row-version proof without extending
+  the immutable response deadline; voluntary release is allowed only before
+  provider retrieval and atomically clears ownership, increments the retry
+  count, and schedules a bounded later attempt. Racing workers receive at most
+  one claim, stale generations fail closed, and migrated rows without a
+  deadline remain ineligible. Claims grant no credential, current-authority,
+  provider-retrieval, egress, output, budget-settlement, or run-mutation
+  authority. Exact-response retrieval and terminal reconciliation remain
+  closed, so accepted runs are still parked in `WaitingProvider`.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundSubmissionService` now prepares one exact
   run/attempt/fence/profile/model/request/budget/egress binding, rehydrates

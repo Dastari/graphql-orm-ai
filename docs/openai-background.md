@@ -100,9 +100,11 @@ run, profile, response, and budget identities from `Debug`.
 Status: implementation in progress. Schema module `0.48.0` reserves the
 content-free claim, retry, deadline, current retrieval-egress, reconciliation,
 and terminal-reference fields described below. Newly accepted submissions
-initialize the counters, next-attempt time, and a fixed deadline. The claim
-transactions, retrieval adapter, and terminal transaction are not implemented
-yet, so the current crate still leaves accepted submissions in
+initialize the counters, next-attempt time, and a fixed deadline. A bounded
+generated-ORM worker now claims/reclaims, heartbeats, and voluntarily releases
+the exact reconciliation fence. The retrieval adapter, receipt selection,
+terminal normalizer, deadline/exhaustion closer, and terminal transaction are
+not implemented yet, so the current crate still leaves accepted submissions in
 `WaitingProvider`.
 
 OpenAI's background guide says to poll the exact Responses GET endpoint while
@@ -163,6 +165,20 @@ candidate and atomically:
    response ID match exactly; and
 6. CAS-increments the reconciliation generation and installs an owner and
    expiry.
+
+The current `OrmAiOpenAiBackgroundReconciliationService` implements the
+content-free validation and fence operations in steps 1 through 4 and 6.
+`AiOpenAiBackgroundReconciliationLimits` bounds the scan, lease, pre-retrieval
+release delay/count, and serialization retries. Its opaque
+`AiOpenAiBackgroundReconciliationClaim` exposes only safe scheduling and
+fencing facts; provider profile, response, principal, budget, egress, scope,
+and row-version bindings remain private. `heartbeat` rotates the unexpired
+row-version proof without extending the fixed deadline.
+`release_before_retrieval` exists only for shutdown or local backpressure known
+to precede provider I/O; it clears the owner, increments the retry count, and
+schedules a bounded next attempt atomically. Once retrieval has been attempted,
+that method is not a valid state transition. Receipt selection and every
+provider-facing or terminal operation remain closed.
 
 A receipt with no response ID, an unknown response ID, or no exact profile match
 cannot select a run. It remains content-free receipt work and is closed under
