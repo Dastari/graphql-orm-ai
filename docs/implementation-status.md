@@ -555,10 +555,11 @@ intentional.
   compile-only checks. The complete generated-ORM PostgreSQL parity test passes
   with native OpenAI enabled in an ownership-labeled disposable PostgreSQL 17
   container, which was removed after the test.
-- `cargo-semver-checks` completes successfully for `0.52.0` to `0.53.0`; the
-  pre-1.0 minor move is a breaking-version boundary, so no
-  compatibility lints are applicable. The package contains no ignored
-  handoff, credential, local path, or consumer-specific artifact.
+- Release-policy and package-file review pass against the `0.52.0` checkpoint.
+  `cargo-semver-checks` completes successfully for `0.52.0` to `0.53.0`; the
+  pre-1.0 minor move is a breaking-version boundary, so no compatibility lints
+  are applicable. The package contains no ignored handoff, credential, local
+  path, or consumer-specific artifact.
 - The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
   `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
   `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
@@ -574,10 +575,10 @@ intentional.
   checkpoint is `e06eeb5cd85beac983e9a44ffeeffdbe56090952`. The bounded claim-runtime
   implementation and local verification are committed at
   `30b09bb5f0bc6fc337164c4568957278c3e402e9`; its follow-up plan/status
-  checkpoint is `85ecc8f5c22371c04bf3b2cb8b9ee7b0ce364154`. The fixed-destination
-  retrieval implementation is locally verified and awaiting its branch
-  checkpoint. No release, tag, publish, or upstream-repository mutation has
-  occurred.
+  checkpoint is `85ecc8f5c22371c04bf3b2cb8b9ee7b0ce364154`. The locally verified
+  fixed-destination retrieval implementation is committed at
+  `924a4fad840aab4c687f38a3702688403fd1faef`. No release, tag, publish, or
+  upstream-repository mutation has occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 
