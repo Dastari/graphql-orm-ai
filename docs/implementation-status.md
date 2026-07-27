@@ -516,7 +516,7 @@ intentional.
 
 ## Current verification
 
-- The complete `0.50.0` SQLite/provider matrix passed: 148 unit tests, all
+- The complete `0.51.0` SQLite/provider matrix passed: 148 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored.
 - Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
@@ -539,9 +539,9 @@ intentional.
   no downstream SQL or live/shared database workaround was introduced, and
   the test removed its ownership-labeled container.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
-  The current `0.50.0`/schema `0.47.0` dependency-alignment worktree passes the
+  The current `0.51.0`/schema `0.47.0` dependency-alignment branch passes the
   complete local release matrix, but it is not release-ready until the reviewed
-  downstream diff is committed/pushed and branch CI passes.
+  downstream diff passes branch CI.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

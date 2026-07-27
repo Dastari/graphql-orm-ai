@@ -42,8 +42,8 @@ version 2, and requires updates to exhaustive matches and public struct
 literals. This crate does not implement an auth rate-limit store or infer local
 MFA from provider ACR/ACRS evidence.
 
-This dependency alignment remains within the unreleased crate 0.50.0 line and
-does not change the AI schema module from 0.47.0. It changes no AI entity,
+This dependency alignment advances the unreleased crate from 0.50.0 to 0.51.0
+and does not change the AI schema module from 0.47.0. It changes no AI entity,
 GraphQL SDL, persisted AI data, backup descriptor, or application
 authorization policy, so no AI data migration is required. Regenerate
 `Cargo.lock`, verify one source/type universe, and rerun the full SQLite,

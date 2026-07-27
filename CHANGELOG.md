@@ -5,9 +5,10 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.50.0` and AI
-schema module to `0.47.0`. It adds a fortieth private entity for exact,
-content-free OpenAI background-submission bindings.
+This development line advances the pre-1.0 crate version to `0.51.0` while the
+AI schema module remains `0.47.0`. It aligns the reviewed dependency universe
+after adding a fortieth private entity for exact, content-free OpenAI
+background-submission bindings.
 
 ### Added
 

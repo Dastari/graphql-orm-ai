@@ -1,10 +1,11 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.50.0` checkpoint. The historical architecture plan at
-`1573017:docs/plan.md` remains useful design context, but its original delivery
-phases no longer describe the worktree: most foundation, provider, persistence,
-authorization, approval, and coordination contracts are already implemented.
+current `0.51.0` dependency-alignment checkpoint. The historical architecture
+plan at `1573017:docs/plan.md` remains useful design context, but its original
+delivery phases no longer describe the worktree: most foundation, provider,
+persistence, authorization, approval, and coordination contracts are already
+implemented.
 
 [Implementation status](implementation-status.md) is authoritative for the
 current inventory. This document is authoritative for work order, dependencies,
@@ -13,7 +14,7 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.50.0` (unpublished pre-release).
+- Crate version: `0.51.0` (unpublished pre-release).
 - AI schema-module version: `0.47.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
@@ -58,7 +59,7 @@ what remains deliberately closed.
 ## Work order
 
 ```text
-0. Durable 0.50.0 checkpoint
+0. Durable 0.51.0 checkpoint
              |
              v
 1. OpenAI background terminal reconciliation
@@ -90,7 +91,7 @@ until every prerequisite exit gate passes.
 
 ### Work
 
-- Review the complete `0.50.0` dependency-alignment diff.
+- Review the complete `0.51.0` dependency-alignment diff.
 - Verify one Cargo source/type universe for `graphql-orm`,
   `graphql-orm-macros`, and `agql-auth`.
 - Commit and push the downstream-only change.
@@ -405,7 +406,7 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Complete Slice 0 and make the reviewed `0.50.0` alignment a pushed,
+1. Complete Slice 0 and make the reviewed `0.51.0` alignment a pushed,
    CI-green checkpoint.
 2. Write the Slice 1 OpenAI background reconciliation state-machine design and
    negative-test table.
