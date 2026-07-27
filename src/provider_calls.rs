@@ -2277,6 +2277,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use graphql_orm::graphql::filters::UuidFilter;
     use graphql_orm::graphql::orm::{
         ApplyOptions, ConditionalUpdateOutcome, Entity, OrmSchemaModule, TransactionMode,
     };
@@ -2379,6 +2380,37 @@ mod tests {
             _action: AiSessionAction,
         ) -> AiAccessDecision {
             AiAccessDecision::allow("provider_test", "access-v1")
+        }
+    }
+
+    struct RevocableAccess(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl AiAccessPolicy for RevocableAccess {
+        async fn can_access_scope(
+            &self,
+            _principal: &AuthPrincipal,
+            _scope: &AiScope,
+            _action: AiSessionAction,
+        ) -> AiAccessDecision {
+            if self.0.load(Ordering::SeqCst) {
+                AiAccessDecision::allow("provider_test", "access-v1")
+            } else {
+                AiAccessDecision::deny("provider_test_revoked", "access-v2")
+            }
+        }
+
+        async fn can_access_session(
+            &self,
+            _principal: &AuthPrincipal,
+            _session_id: AiSessionId,
+            _action: AiSessionAction,
+        ) -> AiAccessDecision {
+            if self.0.load(Ordering::SeqCst) {
+                AiAccessDecision::allow("provider_test", "access-v1")
+            } else {
+                AiAccessDecision::deny("provider_test_revoked", "access-v2")
+            }
         }
     }
 
@@ -2532,6 +2564,24 @@ mod tests {
             _decision: &AiEgressDecision,
         ) -> Result<(), AiError> {
             Err(AiError::PersistenceFailed)
+        }
+    }
+
+    struct RevokeAccessAfterAudit {
+        audit: Arc<OrmAiEgressDecisionAudit>,
+        access_allowed: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AiEgressDecisionAudit for RevokeAccessAfterAudit {
+        async fn record(
+            &self,
+            manifest: &AiEgressManifest,
+            decision: &AiEgressDecision,
+        ) -> Result<(), AiError> {
+            self.audit.record(manifest, decision).await?;
+            self.access_allowed.store(false, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -2703,6 +2753,13 @@ mod tests {
     }
 
     async fn fixture_with_provider(mock: MockProvider) -> Fixture {
+        fixture_with_provider_and_access(mock, Arc::new(AllowAccess)).await
+    }
+
+    async fn fixture_with_provider_and_access(
+        mock: MockProvider,
+        access_policy: Arc<dyn AiAccessPolicy>,
+    ) -> Fixture {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -2957,14 +3014,19 @@ mod tests {
         let fail_execution = Arc::new(AtomicBool::new(false));
         let runtime = AiRuntime::builder()
             .principal_resolver(Arc::new(Resolver(principal.clone())))
-            .access_policy(Arc::new(AllowAccess))
+            .access_policy(access_policy)
             .tool_authorization_policy(Arc::new(AllowTools(tool_policy_version.clone())))
             .request_context_factory(Arc::new(ContextFactory))
             .graphql_executor(Arc::new(Executor(fail_execution.clone())))
             .graphql_targets(targets)
             .egress_policy(Arc::new(AllowEgress))
             .deployment_egress(AiDeploymentEgressBoundary {
-                allowed_destination_trust: [AiDestinationTrust::Local].into_iter().collect(),
+                allowed_destination_trust: [
+                    AiDestinationTrust::Local,
+                    AiDestinationTrust::ManagedProvider,
+                ]
+                .into_iter()
+                .collect(),
                 allowed_capabilities: [
                     AiEgressCapability::ModelInference,
                     AiEgressCapability::ToolResult,
@@ -3096,7 +3158,7 @@ mod tests {
             provider_kind: ProviderKind::OpenAiCompatible.as_str().to_owned(),
             model: request.model.clone(),
             destination: "local-mock".to_owned(),
-            destination_trust: AiDestinationTrust::Local,
+            destination_trust: AiDestinationTrust::ManagedProvider,
             capability: AiEgressCapability::ModelInference,
             scope: fixture.scope.clone(),
             session_id: Some(fixture.lease.session_id()),
@@ -3210,6 +3272,15 @@ mod tests {
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
     ) -> BackgroundReconciliationFixture {
+        background_reconciliation_fixture_with_access(windows, limits, Arc::new(AllowAccess)).await
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn background_reconciliation_fixture_with_access(
+        windows: AiOpenAiBackgroundReconciliationWindows,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+        access_policy: Arc<dyn AiAccessPolicy>,
+    ) -> BackgroundReconciliationFixture {
         let provider_created_at = OffsetDateTime::now_utc().unix_timestamp();
         let mock = MockProvider::new(Vec::new())
             .with_kind(ProviderKind::OpenAi)
@@ -3225,8 +3296,16 @@ mod tests {
                 "resp_background_reconciliation_1",
                 "queued",
                 provider_created_at,
+            )
+            .with_background_observation(
+                ProviderBackgroundObservation::new(
+                    ProviderBackgroundStatus::Queued,
+                    Vec::new(),
+                    None,
+                )
+                .expect("queued observation should validate"),
             );
-        let fixture = fixture_with_provider(mock).await;
+        let fixture = fixture_with_provider_and_access(mock, access_policy).await;
         let submission_service = OrmAiOpenAiBackgroundSubmissionService::new(
             fixture.run_service.clone(),
             fixture.runtime.clone(),
@@ -3507,6 +3586,55 @@ mod tests {
     }
 
     #[cfg(feature = "provider-openai")]
+    #[test]
+    fn background_retrieval_route_and_limits_are_strictly_bounded() {
+        assert_eq!(
+            AiOpenAiBackgroundRetrievalLimits::default(),
+            AiOpenAiBackgroundRetrievalLimits::new(
+                64 * 1024 * 1024,
+                64 * 1024 * 1024,
+                4_096,
+                4_096,
+                Duration::seconds(30),
+                Duration::minutes(5),
+            )
+            .expect("default retrieval limits should validate")
+        );
+        for invalid in [
+            AiOpenAiBackgroundRetrievalLimits::new(0, 1, 1, 1, Duration::SECOND, Duration::SECOND),
+            AiOpenAiBackgroundRetrievalLimits::new(1, 2, 1, 1, Duration::SECOND, Duration::SECOND),
+            AiOpenAiBackgroundRetrievalLimits::new(1, 1, 0, 1, Duration::SECOND, Duration::SECOND),
+            AiOpenAiBackgroundRetrievalLimits::new(
+                1,
+                1,
+                1,
+                4_097,
+                Duration::SECOND,
+                Duration::SECOND,
+            ),
+            AiOpenAiBackgroundRetrievalLimits::new(1, 1, 1, 1, Duration::ZERO, Duration::SECOND),
+            AiOpenAiBackgroundRetrievalLimits::new(
+                1,
+                1,
+                1,
+                1,
+                Duration::SECOND,
+                Duration::hours(1) + Duration::SECOND,
+            ),
+        ] {
+            assert!(matches!(invalid, Err(AiError::InvalidConfiguration(_))));
+        }
+        assert!(
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .is_ok()
+        );
+        assert!(matches!(
+            AiOpenAiBackgroundRetrievalRoute::new("", "local-mock", "retrieval-v1"),
+            Err(AiError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[cfg(feature = "provider-openai")]
     #[tokio::test]
     async fn concurrent_reconcilers_receive_one_exact_fenced_claim() {
         let test = background_reconciliation_fixture(
@@ -3567,6 +3695,198 @@ mod tests {
         assert!(!debug.contains("resp_background_reconciliation_1"));
         assert!(!debug.contains("mock-profile"));
         assert!(!debug.contains(&test.fixture.lease.run_id().0.to_string()));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_retrieval_binds_current_egress_before_provider_io_and_reclaims_after_expiry()
+     {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-retrieval")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let route =
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            route,
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("current exact retrieval should succeed");
+        assert_eq!(observation.status(), ProviderBackgroundStatus::Queued);
+        assert!(observation.events().is_empty());
+        assert!(observation.usage().is_none());
+        assert_eq!(observation.reconciliation_generation(), 1);
+        assert_eq!(test.fixture.mock.request_count(), 2);
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        let retrieval_decision_id = submission
+            .retrieval_egress_decision_id
+            .expect("retrieval allow should be bound before provider I/O");
+        assert_eq!(submission.state, "reconciling");
+        assert_eq!(submission.reconciliation_generation, 1);
+        let egress = test
+            .fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiEgressEventRecord>()
+                        .filter(AiEgressEventRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(retrieval_decision_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("retrieval egress audit should query");
+        let [egress] = egress.as_slice() else {
+            panic!("exactly one retrieval egress event should exist");
+        };
+        assert_eq!(egress.outcome, "allow");
+        assert_eq!(egress.capability, "model_inference");
+        assert_eq!(egress.destination, "local-mock");
+        assert_eq!(egress.estimated_tokens, 0);
+        assert!(matches!(
+            test.service
+                .release_before_retrieval(&claim, Duration::seconds(5))
+                .await,
+            Err(AiError::Conflict)
+        ));
+
+        test.clock.advance_seconds(61);
+        let replacement = test
+            .service
+            .claim_next("reconciler-retrieval-replacement")
+            .await
+            .expect("expired retrieval claim should not fail")
+            .expect("expired retrieval claim should be reclaimable");
+        assert_eq!(replacement.reconciliation_generation(), 2);
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert!(submission.retrieval_egress_decision_id.is_none());
+        assert!(!format!("{observation:?}").contains("resp_background_reconciliation_1"));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_retrieval_rejects_route_swap_without_provider_io() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-route-swap")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let route =
+            AiOpenAiBackgroundRetrievalRoute::new("swapped-profile", "local-mock", "retrieval-v1")
+                .expect("synthetic route should validate");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            route,
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+
+        assert!(matches!(
+            retrieval.retrieve(&claim).await,
+            Err(AiError::EgressDenied)
+        ));
+        assert_eq!(test.fixture.mock.request_count(), 1);
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert!(submission.retrieval_egress_decision_id.is_none());
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn background_retrieval_rechecks_access_after_egress_audit_before_provider_io() {
+        let access_allowed = Arc::new(AtomicBool::new(true));
+        let test = background_reconciliation_fixture_with_access(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(RevocableAccess(access_allowed.clone())),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-revoked-access")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let route =
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(RevokeAccessAfterAudit {
+                audit: test.fixture.audit.clone(),
+                access_allowed,
+            }),
+            Arc::new(test.clock.clone()),
+            route,
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+
+        assert!(matches!(
+            retrieval.retrieve(&claim).await,
+            Err(AiError::Forbidden)
+        ));
+        assert_eq!(test.fixture.mock.request_count(), 1);
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert!(submission.retrieval_egress_decision_id.is_none());
     }
 
     #[cfg(feature = "provider-openai")]

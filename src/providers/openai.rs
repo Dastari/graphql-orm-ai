@@ -15,7 +15,9 @@ use serde_json::{Value, json};
 use crate::{AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService};
 use crate::{
     AiProvider, AiProviderAttachmentRequest, AiSecretStore, ModelBuiltinTool, ModelContinuation,
-    ModelInputBlock, ModelRequest, ProviderBackgroundBinding, ProviderBackgroundSubmission,
+    ModelInputBlock, ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
+    ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
+    ProviderBackgroundStatus, ProviderBackgroundSubmission, ProviderBackgroundUsage,
     ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
     ProviderRequestContext, SecretRef,
 };
@@ -800,6 +802,49 @@ impl AiProvider for OpenAiProvider {
         ))
     }
 
+    async fn retrieve_background(
+        &self,
+        binding: ProviderBackgroundRetrievalBinding,
+        context: ProviderBackgroundRetrievalContext,
+    ) -> Result<ProviderBackgroundObservation, ProviderError> {
+        if self.flavor != ResponsesFlavor::OpenAi
+            || !self.capabilities.background
+            || !context.permits(&self.provider_kind, &binding)
+            || !valid_provider_identifier(binding.response_id(), "resp_")
+        {
+            return Err(ProviderError::EgressDenied);
+        }
+        let secret = self
+            .secrets
+            .resolve(&self.config.credential)
+            .await
+            .map_err(|_| ProviderError::CredentialUnavailable)?;
+        let endpoint = format!("{}/{}", self.endpoint, binding.response_id());
+        let response = self
+            .client
+            .get(endpoint)
+            .timeout(binding.request_timeout())
+            .headers(self.request_headers()?)
+            .bearer_auth(secret.expose_secret())
+            .send()
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        if let Some(error) = openai_background_retrieval_http_error(response.status()) {
+            return Err(error);
+        }
+        if response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(|value| !value.to_ascii_lowercase().starts_with("application/json"))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let maximum_response_bytes = binding.maximum_response_bytes();
+        let response = bounded_provider_json(response, maximum_response_bytes).await?;
+        normalize_background_response(&response, &binding)
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,
@@ -913,6 +958,26 @@ fn openai_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
 }
 
 #[cfg(feature = "provider-openai")]
+fn openai_background_retrieval_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
+    if status.is_success() {
+        None
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
+        Some(ProviderError::CredentialUnavailable)
+    } else if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        Some(if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            ProviderError::RateLimited
+        } else {
+            ProviderError::Unavailable
+        })
+    } else {
+        Some(ProviderError::Rejected)
+    }
+}
+
+#[cfg(feature = "provider-openai")]
 async fn bounded_provider_json(
     response: reqwest::Response,
     maximum_bytes: usize,
@@ -927,6 +992,326 @@ async fn bounded_provider_json(
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|_| ProviderError::Rejected)
+}
+
+#[cfg(feature = "provider-openai")]
+fn normalize_background_response(
+    response: &Value,
+    binding: &ProviderBackgroundRetrievalBinding,
+) -> Result<ProviderBackgroundObservation, ProviderError> {
+    let status = match response.get("status").and_then(Value::as_str) {
+        Some("queued") => ProviderBackgroundStatus::Queued,
+        Some("in_progress") => ProviderBackgroundStatus::InProgress,
+        Some("completed") => ProviderBackgroundStatus::Completed,
+        Some("failed") => ProviderBackgroundStatus::Failed,
+        Some("incomplete") => ProviderBackgroundStatus::Incomplete,
+        Some("cancelled") => ProviderBackgroundStatus::Cancelled,
+        _ => return Err(ProviderError::Rejected),
+    };
+    let metadata = response
+        .get("metadata")
+        .and_then(Value::as_object)
+        .ok_or(ProviderError::Rejected)?;
+    if response.get("object").and_then(Value::as_str) != Some("response")
+        || response.get("id").and_then(Value::as_str) != Some(binding.response_id())
+        || response.get("created_at").and_then(Value::as_i64) != Some(binding.provider_created_at())
+        || response.get("background").and_then(Value::as_bool) != Some(true)
+        || response.get("model").and_then(Value::as_str) != Some(binding.provider_model())
+        || response.get("max_output_tokens").and_then(Value::as_u64)
+            != Some(binding.maximum_output_tokens())
+        || response.get("store").and_then(Value::as_bool) != Some(binding.provider_store())
+        || metadata
+            .get("graphql_orm_ai_submission")
+            .and_then(Value::as_str)
+            != Some(binding.submission_id().to_string().as_str())
+        || metadata
+            .get("graphql_orm_ai_binding")
+            .and_then(Value::as_str)
+            != Some(binding.submission_key())
+    {
+        return Err(ProviderError::Rejected);
+    }
+
+    let output = response
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::Rejected)?;
+    if output.len() > binding.maximum_output_items()
+        || (!status.is_terminal() && !output.is_empty())
+    {
+        return Err(ProviderError::Rejected);
+    }
+    let normalized_output = if status.is_terminal() {
+        normalize_background_output(output, status, binding)?
+    } else {
+        Vec::new()
+    };
+    let usage = if status.is_terminal() {
+        Some(normalize_background_usage(response, binding)?)
+    } else {
+        if response.get("usage").is_some_and(|usage| !usage.is_null()) {
+            return Err(ProviderError::Rejected);
+        }
+        None
+    };
+    let events = if status == ProviderBackgroundStatus::Completed {
+        let usage = usage.ok_or(ProviderError::Rejected)?;
+        let mut events = Vec::with_capacity(normalized_output.len().saturating_add(3));
+        events.push(ProviderEvent::ResponseStarted {
+            response_id: Some(binding.response_id().to_owned()),
+        });
+        events.extend(normalized_output);
+        events.push(ProviderEvent::Usage {
+            input_tokens: usage.input_tokens(),
+            output_tokens: usage.output_tokens(),
+            cached_input_tokens: usage.cached_input_tokens(),
+        });
+        events.push(ProviderEvent::ResponseCompleted {
+            response_id: Some(binding.response_id().to_owned()),
+        });
+        events
+    } else {
+        Vec::new()
+    };
+    ProviderBackgroundObservation::new(status, events, usage)
+}
+
+#[cfg(feature = "provider-openai")]
+fn normalize_background_usage(
+    response: &Value,
+    binding: &ProviderBackgroundRetrievalBinding,
+) -> Result<ProviderBackgroundUsage, ProviderError> {
+    let usage = response
+        .get("usage")
+        .and_then(Value::as_object)
+        .ok_or(ProviderError::Rejected)?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderError::Rejected)?;
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderError::Rejected)?;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .ok_or(ProviderError::Rejected)?;
+    let cached_input_tokens = optional_nested_u64(
+        response.get("usage").ok_or(ProviderError::Rejected)?,
+        &["input_tokens_details", "cached_tokens"],
+    )?;
+    let reasoning_tokens = optional_nested_u64(
+        response.get("usage").ok_or(ProviderError::Rejected)?,
+        &["output_tokens_details", "reasoning_tokens"],
+    )?;
+    if cached_input_tokens > input_tokens
+        || output_tokens > binding.maximum_output_tokens()
+        || reasoning_tokens > output_tokens
+        || input_tokens.checked_add(output_tokens) != Some(total_tokens)
+    {
+        return Err(ProviderError::Rejected);
+    }
+    Ok(ProviderBackgroundUsage::new(
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+    ))
+}
+
+#[cfg(feature = "provider-openai")]
+fn normalize_background_output(
+    output: &[Value],
+    status: ProviderBackgroundStatus,
+    binding: &ProviderBackgroundRetrievalBinding,
+) -> Result<Vec<ProviderEvent>, ProviderError> {
+    let mut events = Vec::new();
+    let mut visible_bytes = 0_usize;
+    let mut content_items = 0_usize;
+    for item in output {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                if item.get("role").and_then(Value::as_str) != Some("assistant")
+                    || item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| !valid_responses_reference(id))
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                let message_status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or(ProviderError::Rejected)?;
+                if (status == ProviderBackgroundStatus::Completed && message_status != "completed")
+                    || (status != ProviderBackgroundStatus::Completed
+                        && !matches!(message_status, "in_progress" | "completed" | "incomplete"))
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                let content = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .ok_or(ProviderError::Rejected)?;
+                content_items = content_items
+                    .checked_add(content.len())
+                    .filter(|count| *count <= binding.maximum_content_items())
+                    .ok_or(ProviderError::Rejected)?;
+                for content_item in content {
+                    normalize_background_content_item(
+                        content_item,
+                        binding,
+                        &mut visible_bytes,
+                        &mut content_items,
+                        &mut events,
+                    )?;
+                }
+            }
+            Some("reasoning") => {
+                if item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !valid_responses_reference(id))
+                {
+                    return Err(ProviderError::Rejected);
+                }
+                let summaries = item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .ok_or(ProviderError::Rejected)?;
+                content_items = content_items
+                    .checked_add(summaries.len())
+                    .filter(|count| *count <= binding.maximum_content_items())
+                    .ok_or(ProviderError::Rejected)?;
+                for summary in summaries {
+                    if summary.get("type").and_then(Value::as_str) != Some("summary_text") {
+                        return Err(ProviderError::Rejected);
+                    }
+                    let text = summary
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or(ProviderError::Rejected)?;
+                    record_background_visible_bytes(
+                        &mut visible_bytes,
+                        text.len(),
+                        binding.maximum_visible_bytes(),
+                    )?;
+                    events.push(ProviderEvent::ReasoningSummaryDelta {
+                        text: text.to_owned(),
+                    });
+                }
+            }
+            _ => return Err(ProviderError::Rejected),
+        }
+    }
+    Ok(events)
+}
+
+#[cfg(feature = "provider-openai")]
+fn normalize_background_content_item(
+    item: &Value,
+    binding: &ProviderBackgroundRetrievalBinding,
+    visible_bytes: &mut usize,
+    content_items: &mut usize,
+    events: &mut Vec<ProviderEvent>,
+) -> Result<(), ProviderError> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("output_text") => {
+            let text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(ProviderError::Rejected)?;
+            record_background_visible_bytes(
+                visible_bytes,
+                text.len(),
+                binding.maximum_visible_bytes(),
+            )?;
+            events.push(ProviderEvent::TextDelta {
+                text: text.to_owned(),
+            });
+            let annotations = item
+                .get("annotations")
+                .and_then(Value::as_array)
+                .ok_or(ProviderError::Rejected)?;
+            *content_items = content_items
+                .checked_add(annotations.len())
+                .filter(|count| *count <= binding.maximum_content_items())
+                .ok_or(ProviderError::Rejected)?;
+            for annotation in annotations {
+                if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+                    return Err(ProviderError::Rejected);
+                }
+                let source = annotation
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        value.len() <= 8_192
+                            && (value.starts_with("https://") || value.starts_with("http://"))
+                            && value.bytes().all(|byte| byte.is_ascii_graphic())
+                    })
+                    .ok_or(ProviderError::Rejected)?;
+                let title = match annotation.get("title") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(title)) if title.len() <= 4_096 => Some(title.clone()),
+                    _ => return Err(ProviderError::Rejected),
+                };
+                let start = annotation
+                    .get("start_index")
+                    .and_then(Value::as_u64)
+                    .ok_or(ProviderError::Rejected)?;
+                let end = annotation
+                    .get("end_index")
+                    .and_then(Value::as_u64)
+                    .ok_or(ProviderError::Rejected)?;
+                if start > end || end > text.chars().count() as u64 {
+                    return Err(ProviderError::Rejected);
+                }
+                let citation_bytes = source
+                    .len()
+                    .checked_add(title.as_ref().map_or(0, String::len))
+                    .ok_or(ProviderError::Rejected)?;
+                record_background_visible_bytes(
+                    visible_bytes,
+                    citation_bytes,
+                    binding.maximum_visible_bytes(),
+                )?;
+                events.push(ProviderEvent::Citation {
+                    source: source.to_owned(),
+                    title,
+                });
+            }
+            Ok(())
+        }
+        Some("refusal") => {
+            let refusal = item
+                .get("refusal")
+                .and_then(Value::as_str)
+                .ok_or(ProviderError::Rejected)?;
+            record_background_visible_bytes(
+                visible_bytes,
+                refusal.len(),
+                binding.maximum_visible_bytes(),
+            )?;
+            events.push(ProviderEvent::TextDelta {
+                text: refusal.to_owned(),
+            });
+            Ok(())
+        }
+        _ => Err(ProviderError::Rejected),
+    }
+}
+
+#[cfg(feature = "provider-openai")]
+fn record_background_visible_bytes(
+    total: &mut usize,
+    additional: usize,
+    maximum: usize,
+) -> Result<(), ProviderError> {
+    *total = total
+        .checked_add(additional)
+        .filter(|bytes| *bytes <= maximum)
+        .ok_or(ProviderError::Rejected)?;
+    Ok(())
 }
 
 #[cfg(feature = "provider-openai")]
@@ -1531,9 +1916,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        AiBudgetAmounts, AiBudgetReservation, AiBudgetReservationId, AiDataSourceRef,
-        AiDestinationTrust, AiEgressCapability, AiEgressDecision, AiEgressManifest, AiRunId,
-        AiScope, AiSessionId, AiSourceTrust, DataClassification, SecretError,
+        AI_EGRESS_RETENTION_PROVIDER_RESPONSE, AiBudgetAmounts, AiBudgetReservation,
+        AiBudgetReservationId, AiDataSourceRef, AiDestinationTrust, AiEgressCapability,
+        AiEgressDecision, AiEgressManifest, AiRunId, AiScope, AiSessionId, AiSourceTrust,
+        DataClassification, SecretError,
     };
 
     struct TestSecrets(SecretRef, String);
@@ -1744,6 +2130,99 @@ mod tests {
             body
         });
         (format!("http://{address}/v1/responses"), task)
+    }
+
+    async fn background_retrieval_mock_server(
+        response: Value,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("request should connect");
+            let mut request = vec![0_u8; 32 * 1024];
+            let count = socket
+                .read(&mut request)
+                .await
+                .expect("request should read");
+            let request = String::from_utf8_lossy(&request[..count]);
+            let request_line = request.lines().next().unwrap_or_default().to_owned();
+            let encoded = response.to_string();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                encoded.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("headers should write");
+            socket
+                .write_all(encoded.as_bytes())
+                .await
+                .expect("body should write");
+            request_line
+        });
+        (format!("http://{address}/v1/responses"), task)
+    }
+
+    fn background_retrieval_binding(
+        maximum_response_bytes: usize,
+        maximum_visible_bytes: usize,
+    ) -> ProviderBackgroundRetrievalBinding {
+        ProviderBackgroundRetrievalBinding::new(
+            uuid::Uuid::parse_str("d8bc45f8-b7fd-4468-9980-a467e8cb8dac")
+                .expect("synthetic submission ID should parse"),
+            "a".repeat(64),
+            "profile-1".to_owned(),
+            "resp_background_exact_1".to_owned(),
+            2_000_000_000,
+            "test-model".to_owned(),
+            32,
+            false,
+            maximum_response_bytes,
+            maximum_visible_bytes,
+            32,
+            64,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("retrieval binding should validate")
+    }
+
+    fn background_retrieval_context(
+        binding: &ProviderBackgroundRetrievalBinding,
+        provider_profile_id: &str,
+    ) -> ProviderBackgroundRetrievalContext {
+        let manifest = AiEgressManifest {
+            provider_profile_id: provider_profile_id.to_owned(),
+            provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+            model: binding.provider_model().to_owned(),
+            destination: "openai".to_owned(),
+            destination_trust: AiDestinationTrust::ManagedProvider,
+            capability: AiEgressCapability::ModelInference,
+            scope: AiScope::new("project", "test"),
+            session_id: Some(AiSessionId::new()),
+            run_id: Some(AiRunId::new()),
+            sources: vec![AiDataSourceRef {
+                kind: "provider_response".to_owned(),
+                reference: binding.egress_source_reference(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::ExternalUntrusted,
+            }],
+            estimated_bytes: binding.response_id().len() as u64,
+            estimated_tokens: 0,
+            attachment_count: 0,
+            purpose: "background_response_retrieval".to_owned(),
+            retention: AI_EGRESS_RETENTION_PROVIDER_RESPONSE.to_owned(),
+            residency: None,
+            policy_version: "retrieval-v1".to_owned(),
+            consent_reference: None,
+        };
+        let proof = AiEgressDecision::allow(&manifest, "test", "test-user")
+            .authorize(&manifest)
+            .expect("retrieval manifest should authorize");
+        ProviderBackgroundRetrievalContext::new(manifest, proof)
+            .expect("retrieval context should validate")
     }
 
     fn context(model: &str, estimated_bytes: u64) -> ProviderRequestContext {
@@ -1975,6 +2454,245 @@ mod tests {
             Err(ProviderError::Rejected)
         ));
         server.await.expect("background server should finish");
+    }
+
+    #[tokio::test]
+    async fn exact_background_retrieval_uses_bound_get_and_normalizes_visible_output() {
+        let binding = background_retrieval_binding(64 * 1024, 16 * 1024);
+        let response = json!({
+            "id": binding.response_id(),
+            "object": "response",
+            "created_at": binding.provider_created_at(),
+            "status": "completed",
+            "background": true,
+            "model": binding.provider_model(),
+            "max_output_tokens": binding.maximum_output_tokens(),
+            "store": binding.provider_store(),
+            "metadata": {
+                "graphql_orm_ai_submission": binding.submission_id().to_string(),
+                "graphql_orm_ai_binding": binding.submission_key(),
+            },
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_background_1",
+                    "summary": [{"type": "summary_text", "text": "Visible summary."}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_background_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Bound answer.",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "start_index": 0,
+                            "end_index": 5,
+                            "url": "https://example.invalid/source",
+                            "title": "Synthetic source"
+                        }]
+                    }]
+                }
+            ],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "total_tokens": 19,
+                "input_tokens_details": {"cached_tokens": 2},
+                "output_tokens_details": {"reasoning_tokens": 3}
+            }
+        });
+        let (endpoint, server) = background_retrieval_mock_server(response).await;
+        let reference = SecretRef::parse("openai/background-retrieval-test")
+            .expect("test secret reference should parse");
+        let provider = OpenAiProvider::for_loopback_test(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("background provider should build");
+        let observation = provider
+            .retrieve_background(
+                binding.clone(),
+                background_retrieval_context(&binding, "profile-1"),
+            )
+            .await
+            .expect("exact background response should normalize");
+
+        assert_eq!(observation.status(), ProviderBackgroundStatus::Completed);
+        assert_eq!(
+            observation.usage(),
+            Some(ProviderBackgroundUsage::new(12, 7, 2))
+        );
+        assert_eq!(
+            observation.events(),
+            &[
+                ProviderEvent::ResponseStarted {
+                    response_id: Some("resp_background_exact_1".to_owned()),
+                },
+                ProviderEvent::ReasoningSummaryDelta {
+                    text: "Visible summary.".to_owned(),
+                },
+                ProviderEvent::TextDelta {
+                    text: "Bound answer.".to_owned(),
+                },
+                ProviderEvent::Citation {
+                    source: "https://example.invalid/source".to_owned(),
+                    title: Some("Synthetic source".to_owned()),
+                },
+                ProviderEvent::Usage {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    cached_input_tokens: 2,
+                },
+                ProviderEvent::ResponseCompleted {
+                    response_id: Some("resp_background_exact_1".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(
+            server.await.expect("retrieval server should finish"),
+            "GET /v1/responses/resp_background_exact_1 HTTP/1.1"
+        );
+        let debug = format!("{observation:?}");
+        assert!(!debug.contains("Bound answer."));
+        assert!(!format!("{binding:?}").contains("resp_background_exact_1"));
+    }
+
+    #[tokio::test]
+    async fn background_retrieval_rejects_profile_swap_before_credential_resolution() {
+        let reference = SecretRef::parse("openai/background-retrieval-profile-swap")
+            .expect("test secret reference should parse");
+        let secrets = Arc::new(CountingSecrets {
+            reference: reference.clone(),
+            resolves: AtomicUsize::new(0),
+        });
+        let provider = OpenAiProvider::for_loopback_test(
+            OpenAiProviderConfig::new(reference),
+            secrets.clone(),
+            "http://127.0.0.1:1/v1/responses".to_owned(),
+        )
+        .expect("background provider should build");
+        let binding = background_retrieval_binding(64 * 1024, 16 * 1024);
+
+        assert!(matches!(
+            provider
+                .retrieve_background(
+                    binding.clone(),
+                    background_retrieval_context(&binding, "profile-swapped"),
+                )
+                .await,
+            Err(ProviderError::EgressDenied)
+        ));
+        assert_eq!(secrets.resolves.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn background_retrieval_rejects_full_body_overflow() {
+        let binding = background_retrieval_binding(128, 64);
+        let response = json!({
+            "id": binding.response_id(),
+            "object": "response",
+            "created_at": binding.provider_created_at(),
+            "status": "queued",
+            "background": true,
+            "model": binding.provider_model(),
+            "max_output_tokens": binding.maximum_output_tokens(),
+            "store": binding.provider_store(),
+            "metadata": {
+                "graphql_orm_ai_submission": binding.submission_id().to_string(),
+                "graphql_orm_ai_binding": binding.submission_key(),
+            },
+            "output": [],
+            "usage": null
+        });
+        let (endpoint, server) = background_retrieval_mock_server(response).await;
+        let reference = SecretRef::parse("openai/background-retrieval-body-bound")
+            .expect("test secret reference should parse");
+        let provider = OpenAiProvider::for_loopback_test(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("background provider should build");
+
+        assert!(matches!(
+            provider
+                .retrieve_background(
+                    binding.clone(),
+                    background_retrieval_context(&binding, "profile-1"),
+                )
+                .await,
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            server.await.expect("retrieval server should finish"),
+            "GET /v1/responses/resp_background_exact_1 HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn background_retrieval_rejects_unreviewed_output_and_usage_or_visible_overflow() {
+        let binding = background_retrieval_binding(64 * 1024, 8);
+        let base = json!({
+            "id": binding.response_id(),
+            "object": "response",
+            "created_at": binding.provider_created_at(),
+            "status": "completed",
+            "background": true,
+            "model": binding.provider_model(),
+            "max_output_tokens": binding.maximum_output_tokens(),
+            "store": binding.provider_store(),
+            "metadata": {
+                "graphql_orm_ai_submission": binding.submission_id().to_string(),
+                "graphql_orm_ai_binding": binding.submission_key(),
+            },
+            "output": [{
+                "type": "function_call",
+                "id": "fc_background_1",
+                "call_id": "call_background_1",
+                "name": "unreviewed",
+                "arguments": "{}"
+            }],
+            "usage": {
+                "input_tokens": 2,
+                "output_tokens": 1,
+                "total_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0}
+            }
+        });
+        assert!(matches!(
+            normalize_background_response(&base, &binding),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut oversized = base;
+        oversized["output"] = json!([{
+            "type": "message",
+            "id": "msg_background_oversized",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": "more-than-eight",
+                "annotations": []
+            }]
+        }]);
+        assert!(matches!(
+            normalize_background_response(&oversized, &binding),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut malformed_usage = oversized;
+        malformed_usage["output"] = json!([]);
+        malformed_usage["usage"]["input_tokens_details"]["cached_tokens"] = json!(3);
+        assert!(matches!(
+            normalize_background_response(&malformed_usage, &binding),
+            Err(ProviderError::Rejected)
+        ));
     }
 
     fn with_capability(

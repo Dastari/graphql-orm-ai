@@ -21,7 +21,7 @@ and deliberately incomplete inventory.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.48.0`) and 40 private records
+- AI schema-module identity (currently version `0.49.0`) and 40 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, background submissions,
@@ -470,17 +470,25 @@ and deliberately incomplete inventory.
   file-type preflight and full built-in result normalization. Exact raw-body
   webhook verification, durable content-free receipt intake, and exact initial
   background submission and independently fenced content-free claim runtime
-  are implemented, but accepted runs and receipts remain inert because the
-  claim cannot retrieve or commit provider output. The complete
-  fixed-destination retrieval, current-authority, atomic
+  are implemented. The separate current-authority retrieval service now
+  validates the complete claim graph, rehydrates current scope/session and
+  protection authority, audits and CAS-binds an exact egress allow, and calls
+  only the native fixed-destination GET with an opaque response binding and
+  lease-shorter timeout. The adapter bounds the entire response and visible
+  content, validates all immutable metadata and terminal usage, normalizes only
+  reviewed text/refusal/reasoning-summary/citation shapes, and rejects tools,
+  built-ins, unknown output, profile swaps, and overflows. The result remains
+  in memory, so accepted runs and receipts remain inert after observation. The
+  complete atomic
   terminal-graph, crash, receipt-redelivery, and restore contract is now
   documented in the
   [background guide](openai-background.md#terminal-reconciliation-design) and
   [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation). Schema
-  `0.48.0` reserves and initializes the bounded claim generation/owner/lease,
+  `0.49.0` reserves and initializes the bounded claim generation/owner/lease,
   retry/deadline, current retrieval-egress, reconciliation time, and terminal
-  message facts. Retrieval, receipt matching, terminal normalization,
-  deadline/exhaustion closure, and terminal persistence remain.
+  message facts. Receipt matching, classified nonterminal release/backoff,
+  deadline/exhaustion closure, budget settlement, protected output, and
+  terminal persistence remain.
   Exact inline image/file input remains
   independently gated by host MIME policy, budget, egress, current authority,
   and reopening limits.
@@ -517,10 +525,10 @@ The detailed sequence and acceptance gates are maintained in the
 [completion plan](completion-plan.md). The leading runtime priorities are:
 
 1. Continue the OpenAI background lifecycle after exact submission, receipt
-   intake, and content-free fenced claiming: add fixed-destination retrieval
-   and a bounded response normalizer, then independently re-prove current
-   authority, budget, egress, retention, usage, and provider output before any
-   run mutation.
+   intake, fenced claiming, and fixed-destination normalized retrieval: add
+   exact optional receipt selection plus policy-classified nonterminal
+   release/backoff, then re-prove current authority, budget, retention, usage,
+   and provider output before the atomic terminal mutation.
 2. Add provider-persistent file upload/search behind independent authority,
    egress, budget, fencing, retention, and restore proofs, building on exact
    profile-bound deletion. Extend authoritative unit pricing only when each
@@ -537,19 +545,18 @@ intentional.
 
 ## Current verification
 
-- The complete `0.52.0` SQLite/provider matrix passes: 158 unit tests, all
+- The complete `0.53.0` SQLite/provider matrix passes: 166 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored.
 - Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
   with all native/profiled provider adapters and the installed harness.
   PascalCase SDL and missing-docs Rustdoc also passed with no lowercase aliases.
-- PostgreSQL plus native OpenAI and MSSQL feature combinations pass
-  compile-only checks. The exact `0.47.0`-to-`0.48.0` schema alteration passes
-  on in-memory SQLite and in an ownership-labeled disposable PostgreSQL 17
+- Bare PostgreSQL and MSSQL plus the OpenAI/MSSQL feature combinations pass
+  compile-only checks. The complete generated-ORM PostgreSQL parity test passes
+  with native OpenAI enabled in an ownership-labeled disposable PostgreSQL 17
   container, which was removed after the test.
-- Release-policy and package-file review pass against the pushed `0.51.0`
-  checkpoint. `cargo-semver-checks` completes successfully for `0.51.0` to
-  `0.52.0`; the pre-1.0 minor move is a breaking-version boundary, so no
+- `cargo-semver-checks` completes successfully for `0.52.0` to `0.53.0`; the
+  pre-1.0 minor move is a breaking-version boundary, so no
   compatibility lints are applicable. The package contains no ignored
   handoff, credential, local path, or consumer-specific artifact.
 - The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
@@ -566,8 +573,11 @@ intentional.
   `a715682d331db899742e3f5d21dde6c485964a42`, and its schema verification
   checkpoint is `e06eeb5cd85beac983e9a44ffeeffdbe56090952`. The bounded claim-runtime
   implementation and local verification are committed at
-  `30b09bb5f0bc6fc337164c4568957278c3e402e9`. No release, tag, publish, or
-  upstream-repository mutation has occurred.
+  `30b09bb5f0bc6fc337164c4568957278c3e402e9`; its follow-up plan/status
+  checkpoint is `85ecc8f5c22371c04bf3b2cb8b9ee7b0ce364154`. The fixed-destination
+  retrieval implementation is locally verified and awaiting its branch
+  checkpoint. No release, tag, publish, or upstream-repository mutation has
+  occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 

@@ -97,15 +97,18 @@ run, profile, response, and budget identities from `Debug`.
 
 ## Terminal reconciliation design
 
-Status: implementation in progress. Schema module `0.48.0` reserves the
+Status: implementation in progress. Schema module `0.49.0` reserves the
 content-free claim, retry, deadline, current retrieval-egress, reconciliation,
 and terminal-reference fields described below. Newly accepted submissions
 initialize the counters, next-attempt time, and a fixed deadline. A bounded
 generated-ORM worker now claims/reclaims, heartbeats, and voluntarily releases
-the exact reconciliation fence. The retrieval adapter, receipt selection,
-terminal normalizer, deadline/exhaustion closer, and terminal transaction are
-not implemented yet, so the current crate still leaves accepted submissions in
-`WaitingProvider`.
+the exact reconciliation fence. A separate current-authority retrieval service
+now audits and binds a fresh exact egress allow before a fixed-destination GET,
+and the native adapter returns only a bounded normalized observation. Receipt
+selection, nonterminal observation release/backoff, deadline/exhaustion
+closure, budget settlement, protected terminal persistence, and the terminal
+transaction are not implemented yet, so the current crate still cannot
+complete an accepted background run.
 
 OpenAI's background guide says to poll the exact Responses GET endpoint while
 the response is `queued` or `in_progress`; leaving those states is terminal.
@@ -177,8 +180,12 @@ row-version proof without extending the fixed deadline.
 `release_before_retrieval` exists only for shutdown or local backpressure known
 to precede provider I/O; it clears the owner, increments the retry count, and
 schedules a bounded next attempt atomically. Once retrieval has been attempted,
-that method is not a valid state transition. Receipt selection and every
-provider-facing or terminal operation remain closed.
+that method is not a valid state transition. The current retrieval service
+instead binds the allow ID as the durable transport marker. If no later
+terminal service consumes its in-memory result, expiry permits only a
+higher-generation reclaim; reclaim validates the prior allow and clears the
+stale marker before another retrieval. Receipt selection, nonterminal release,
+and every terminal operation remain closed.
 
 A receipt with no response ID, an unknown response ID, or no exact profile match
 cannot select a run. It remains content-free receipt work and is closed under
@@ -189,7 +196,8 @@ reclaimed with a higher generation; every heartbeat, retry release, receipt
 update, and terminal write checks the owner, generation, unexpired deadline, and
 row version.
 
-Before retrieval, the service freshly rehydrates the run's
+Before retrieval, `OrmAiOpenAiBackgroundRetrievalService` freshly rehydrates
+the run's
 `PrincipalReference`, proves current owner/scope/session write access, resolves
 the current content-protection policy, and re-authorizes the exact original
 profile, fixed destination, model, source classifications, and
@@ -200,21 +208,23 @@ eligibility facts; none substitutes for this current decision.
 
 ### Fixed-destination retrieval
 
-The provider seam must accept an opaque crate-authored retrieval binding, not a
-URL or arbitrary response ID. The native OpenAI adapter may issue only:
+The implemented provider seam accepts an opaque crate-authored retrieval
+binding, not a URL or arbitrary response ID. The native OpenAI adapter may
+issue only:
 
 ```text
 GET <the registered profile's fixed Responses endpoint>/<the bound resp_ ID>
 ```
 
-It must not list responses, follow redirects, select another profile, accept an
+It cannot list responses, follow redirects, select another profile, accept an
 absolute destination from stored data, or send the original prompt again. It
 resolves the profile credential just in time for each attempt, uses a timeout
 strictly shorter than the reconciliation lease, and bounds the complete JSON
 body by both a compiled hard maximum and deployment output limits. Retrieval is
-read-only, so timeouts, rate limits, server errors, and an early not-found may
-be retried with bounded backoff while the reviewed provider-retention deadline
-remains open. The create request is never repeated.
+read-only. Timeouts, rate limits, server errors, and an early not-found leave
+the retrieval-marked claim to expire and be reclaimed under a higher generation
+in this increment; policy-classified bounded backoff remains part of the next
+reconciliation step. The create request is never repeated.
 
 Every observation must revalidate `object`, exact response ID, positive original
 creation time, `background: true`, exact model, exact maximum output tokens,
@@ -235,6 +245,13 @@ input, output not exceeding the submitted ceiling, and every billable dimension
 needed by the pinned pricing policy. Unknown output item types, unknown terminal
 status, inconsistent metadata, malformed usage, or truncated JSON becomes
 `RecoveryRequired`, never forward-compatible assistant content.
+
+The implemented normalizer exposes completed visible content as bounded
+provider-neutral text, reasoning-summary, citation, usage, and completion
+events. Refusal content is retained only as visible text. Failed, incomplete,
+cancelled, and nonterminal observations expose no output events. This
+normalization is not terminal mutation authority: the result remains in memory
+until the later budget/protection/transaction slice is complete.
 
 If a linked receipt exists, its terminal event kind must agree with the
 retrieved terminal status. A terminal event followed briefly by a nonterminal

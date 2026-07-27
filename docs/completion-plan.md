@@ -1,7 +1,7 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.51.0` dependency-alignment checkpoint. The historical architecture
+current `0.53.0` Slice 1 retrieval checkpoint. The historical architecture
 plan at `1573017:docs/plan.md` remains useful design context, but its original
 delivery phases no longer describe the worktree: most foundation, provider,
 persistence, authorization, approval, and coordination contracts are already
@@ -14,8 +14,8 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.52.0` (unpublished Slice 1 development).
-- AI schema-module version: `0.48.0`.
+- Crate version: `0.53.0` (unpublished Slice 1 development).
+- AI schema-module version: `0.49.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
     `6beef53633befd90a4d4810887a3e4640dc4ad91`.
@@ -119,13 +119,19 @@ verified webhook intake already exist, but an accepted run remains parked in
 authority to retrieve output or mutate the run.
 
 Status: the complete design gate and negative/crash matrix are documented in
-the two focused guides. The `0.48.0` schema now reserves and initializes the
+the two focused guides. The `0.49.0` schema reserves and initializes the
 minimum reconciliation claim/deadline facts. The generated-ORM claim runtime
 now validates the complete accepted support graph, installs/reclaims a
 generation-fenced lease, rotates heartbeats, and voluntarily releases only
-before provider I/O under bounded scheduling. Concurrent/stale/deadline/
-migration-safe SQLite tests pass. Retrieval, receipt matching, terminal
-normalization, exhaustion closure, and terminal execution remain closed.
+before provider I/O under bounded scheduling. The current-authority retrieval
+runtime now revalidates access and protection, audits and CAS-binds a fresh
+exact egress allow, performs only an opaque fixed-destination OpenAI response
+GET, and returns bounded normalized reviewed status/output/usage. Expired
+transport-marked claims are reclaimable only under a higher generation that
+clears the stale marker. Concurrent/stale/deadline/migration/retrieval-swap/
+normalization-bound SQLite tests pass. Receipt matching, classified
+nonterminal release/backoff, exhaustion closure, budget/output settlement, and
+terminal execution remain closed.
 
 ### Design gate
 
@@ -155,7 +161,8 @@ boundaries in [OpenAI background submission](openai-background.md) and
 - Add only the minimum durable state and indexes needed for bounded claims and
   exact-once terminal reconciliation.
 - Add an OpenAI retrieval capability that cannot list responses, choose a
-  destination, or retrieve an unbound response ID.
+  destination, or retrieve an unbound response ID. Complete: the adapter also
+  rejects response metadata, profile, output-shape, usage, and bound overflows.
 - Reuse provider normalization, disclosure, content protection, egress audit,
   pricing, usage, and run-fence contracts rather than creating a background
   bypass.

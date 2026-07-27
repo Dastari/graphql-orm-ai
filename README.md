@@ -217,14 +217,18 @@ waits without polling, resuming, or executing them.
   awaiting one create acknowledgement that must echo the exact model, ceiling,
   and storage choice. Acceptance parks the run without a lease, while ambiguity
   closes it with an immutable attempt outcome for manual recovery and is never
-  retried. Schema `0.48.0` now reserves bounded reconciliation claim/scheduling
+  retried. Schema `0.49.0` now reserves bounded reconciliation claim/scheduling
   facts and captures a deployment-bounded fixed response deadline for new
   accepted rows. A generated-ORM worker can exclusively claim/reclaim,
   heartbeat, and voluntarily release those rows under a separate generation,
   immutable deadline, bounded retry count, and exact support-graph validation.
-  The opaque claim grants no provider or run authority; fixed-destination
-  retrieval, receipt matching, and terminal mutation remain deliberately
-  unavailable.
+  The opaque claim grants no provider or run authority. A separate service now
+  rehydrates current access/protection state, audits and CAS-binds an exact
+  current egress allow, and performs only the bound fixed-endpoint Responses
+  GET with a lease-shorter timeout. The native adapter returns bounded reviewed
+  status/output/usage shapes and rejects profile/metadata/tool/output swaps.
+  Receipt matching, nonterminal backoff, budget settlement, protected output,
+  and terminal run mutation remain deliberately unavailable.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 

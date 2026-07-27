@@ -26,16 +26,23 @@ use crate::orm_runs::{
 use crate::persistence::*;
 use crate::{
     AI_EGRESS_RETENTION_PROVIDER_RESPONSE, AiBudgetReconciliation, AiBudgetReconciliationOutcome,
-    AiBudgetReservationId, AiBudgetService, AiEgressCapability, AiEgressDecisionAudit, AiError,
-    AiProviderCallPlan, AiRunId, AiRunLease, AiRunState, AiRuntime, AiSessionAction,
-    ModelContinuationMode, ModelInputBlock, OrmAiRunService, ProviderBackgroundBinding,
-    ProviderBackgroundSubmission, ProviderKind, ProviderRequestContext,
+    AiBudgetReservationId, AiBudgetService, AiDataSourceRef, AiDestinationTrust,
+    AiEgressCapability, AiEgressDecisionAudit, AiEgressManifest, AiError, AiProviderCallPlan,
+    AiRunId, AiRunLease, AiRunState, AiRuntime, AiScope, AiSessionAction, AiSourceTrust,
+    DataClassification, ModelContinuationMode, ModelInputBlock, OrmAiRunService,
+    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
+    ProviderBackgroundRetrievalContext, ProviderBackgroundSubmission, ProviderKind,
+    ProviderRequestContext,
 };
 
 const MAXIMUM_TEMPORARY_RESPONSE_WINDOW: Duration = Duration::minutes(10);
 const MAXIMUM_STORED_RESPONSE_WINDOW: Duration = Duration::days(30);
 const MAXIMUM_RECONCILIATION_LEASE_TTL: Duration = Duration::minutes(5);
 const MAXIMUM_RECONCILIATION_RETRY_DELAY: Duration = Duration::hours(1);
+const MAXIMUM_BACKGROUND_RETRIEVAL_BYTES: usize = 64 * 1024 * 1024;
+const MAXIMUM_BACKGROUND_RETRIEVAL_ITEMS: usize = 4_096;
+const MAXIMUM_BACKGROUND_RETRIEVAL_TIMEOUT: Duration = Duration::minutes(5);
+const MAXIMUM_BACKGROUND_PRINCIPAL_AGE: Duration = Duration::hours(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackgroundSubmissionState {
@@ -305,6 +312,177 @@ impl Default for AiOpenAiBackgroundReconciliationLimits {
     }
 }
 
+/// Fixed logical OpenAI route used for current background-response retrieval.
+///
+/// The route contains no URL or credential. The native adapter remains fixed
+/// to OpenAI's official Responses endpoint and resolves its registered secret
+/// just in time. A retrieval claim must match both the logical profile and the
+/// original audited destination before a current egress decision can be bound.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AiOpenAiBackgroundRetrievalRoute {
+    provider_profile_id: String,
+    destination: String,
+    residency: Option<String>,
+    policy_version: String,
+    consent_reference: Option<String>,
+}
+
+impl std::fmt::Debug for AiOpenAiBackgroundRetrievalRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiOpenAiBackgroundRetrievalRoute")
+            .field("provider_profile_id", &"[REDACTED]")
+            .field("destination", &self.destination)
+            .field("residency", &self.residency)
+            .field("policy_version", &self.policy_version)
+            .field("consent_reference", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AiOpenAiBackgroundRetrievalRoute {
+    /// Creates a fixed logical retrieval route.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for empty, oversized, or
+    /// control-character profile, destination, or policy values.
+    pub fn new(
+        provider_profile_id: impl Into<String>,
+        destination: impl Into<String>,
+        policy_version: impl Into<String>,
+    ) -> Result<Self, AiError> {
+        let route = Self {
+            provider_profile_id: provider_profile_id.into(),
+            destination: destination.into(),
+            residency: None,
+            policy_version: policy_version.into(),
+            consent_reference: None,
+        };
+        route.validate()?;
+        Ok(route)
+    }
+
+    /// Adds a reviewed processing residency/region class.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for an empty, oversized, or
+    /// control-character value.
+    pub fn with_residency(mut self, residency: impl Into<String>) -> Result<Self, AiError> {
+        self.residency = Some(residency.into());
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Adds a current purpose-bound consent/grant reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] for an empty, oversized, or
+    /// control-character value.
+    pub fn with_consent_reference(
+        mut self,
+        consent_reference: impl Into<String>,
+    ) -> Result<Self, AiError> {
+        self.consent_reference = Some(consent_reference.into());
+        self.validate()?;
+        Ok(self)
+    }
+
+    fn validate(&self) -> Result<(), AiError> {
+        let valid = |value: &str, maximum: usize| {
+            !value.trim().is_empty()
+                && value.len() <= maximum
+                && !value.chars().any(char::is_control)
+        };
+        if !valid(&self.provider_profile_id, 200)
+            || !valid(&self.destination, 1_024)
+            || !valid(&self.policy_version, 256)
+            || self
+                .residency
+                .as_deref()
+                .is_some_and(|value| !valid(value, 256))
+            || self
+                .consent_reference
+                .as_deref()
+                .is_some_and(|value| !valid(value, 1_024))
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid OpenAI background retrieval route".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Deployment-owned bounds for one exact OpenAI background response GET.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AiOpenAiBackgroundRetrievalLimits {
+    maximum_response_bytes: usize,
+    maximum_visible_bytes: usize,
+    maximum_output_items: usize,
+    maximum_content_items: usize,
+    maximum_request_timeout: Duration,
+    maximum_principal_age: Duration,
+}
+
+impl AiOpenAiBackgroundRetrievalLimits {
+    /// Creates fixed response, normalization, transport, and authority bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiError::InvalidConfiguration`] unless byte bounds are
+    /// positive and at most 64 MiB, visible bytes do not exceed the full body,
+    /// item counts are within `1..=4096`, request timeout is at most five
+    /// minutes, and principal age is at most one hour.
+    pub fn new(
+        maximum_response_bytes: usize,
+        maximum_visible_bytes: usize,
+        maximum_output_items: usize,
+        maximum_content_items: usize,
+        maximum_request_timeout: Duration,
+        maximum_principal_age: Duration,
+    ) -> Result<Self, AiError> {
+        if maximum_response_bytes == 0
+            || maximum_response_bytes > MAXIMUM_BACKGROUND_RETRIEVAL_BYTES
+            || maximum_visible_bytes == 0
+            || maximum_visible_bytes > maximum_response_bytes
+            || !(1..=MAXIMUM_BACKGROUND_RETRIEVAL_ITEMS).contains(&maximum_output_items)
+            || !(1..=MAXIMUM_BACKGROUND_RETRIEVAL_ITEMS).contains(&maximum_content_items)
+            || maximum_request_timeout <= Duration::ZERO
+            || maximum_request_timeout > MAXIMUM_BACKGROUND_RETRIEVAL_TIMEOUT
+            || maximum_principal_age <= Duration::ZERO
+            || maximum_principal_age > MAXIMUM_BACKGROUND_PRINCIPAL_AGE
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid OpenAI background retrieval limits".to_owned(),
+            ));
+        }
+        Ok(Self {
+            maximum_response_bytes,
+            maximum_visible_bytes,
+            maximum_output_items,
+            maximum_content_items,
+            maximum_request_timeout,
+            maximum_principal_age,
+        })
+    }
+}
+
+impl Default for AiOpenAiBackgroundRetrievalLimits {
+    fn default() -> Self {
+        Self {
+            maximum_response_bytes: MAXIMUM_BACKGROUND_RETRIEVAL_BYTES,
+            maximum_visible_bytes: MAXIMUM_BACKGROUND_RETRIEVAL_BYTES,
+            maximum_output_items: MAXIMUM_BACKGROUND_RETRIEVAL_ITEMS,
+            maximum_content_items: MAXIMUM_BACKGROUND_RETRIEVAL_ITEMS,
+            maximum_request_timeout: Duration::seconds(30),
+            maximum_principal_age: Duration::minutes(5),
+        }
+    }
+}
+
 /// Exact owner/generation/row-version proof for one background reconciliation
 /// claim.
 ///
@@ -317,6 +495,7 @@ impl Default for AiOpenAiBackgroundReconciliationLimits {
 #[derive(Clone, PartialEq, Eq)]
 pub struct AiOpenAiBackgroundReconciliationClaim {
     submission_id: Uuid,
+    submission_key: String,
     session_id: crate::AiSessionId,
     run_id: AiRunId,
     attempt_id: Uuid,
@@ -338,6 +517,9 @@ pub struct AiOpenAiBackgroundReconciliationClaim {
     budget_reservation_id: AiBudgetReservationId,
     original_egress_decision_id: Uuid,
     original_egress_manifest_hash: String,
+    original_egress_destination: String,
+    original_maximum_classification: DataClassification,
+    retrieval_egress_decision_id: Option<Uuid>,
     scope_kind: String,
     scope_id: String,
     tenant_id: Option<String>,
@@ -395,6 +577,7 @@ impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
         formatter
             .debug_struct("AiOpenAiBackgroundReconciliationClaim")
             .field("submission_id", &"[REDACTED]")
+            .field("submission_key", &"[REDACTED]")
             .field("session_id", &"[REDACTED]")
             .field("run_id", &"[REDACTED]")
             .field("attempt_id", &"[REDACTED]")
@@ -418,6 +601,12 @@ impl std::fmt::Debug for AiOpenAiBackgroundReconciliationClaim {
             .field("budget_reservation_id", &"[REDACTED]")
             .field("original_egress_decision_id", &"[REDACTED]")
             .field("original_egress_manifest_hash", &"[REDACTED]")
+            .field("original_egress_destination", &"[REDACTED]")
+            .field(
+                "original_maximum_classification",
+                &self.original_maximum_classification,
+            )
+            .field("retrieval_egress_decision_id", &"[REDACTED]")
             .field("scope_kind", &self.scope_kind)
             .field("scope_id", &"[REDACTED]")
             .field("tenant_id", &"[REDACTED]")
@@ -437,6 +626,73 @@ pub struct OrmAiOpenAiBackgroundReconciliationService {
     database: Database<DefaultWriteBackend>,
     clock: Arc<dyn Clock>,
     limits: AiOpenAiBackgroundReconciliationLimits,
+}
+
+/// Current-authority, exact-egress OpenAI background retrieval service.
+///
+/// This service can bind and perform one bounded fixed-destination GET for an
+/// exact reconciliation claim. It cannot select webhook content, settle
+/// budget, protect or persist output, or mutate the parked run terminally.
+pub struct OrmAiOpenAiBackgroundRetrievalService {
+    database: Database<DefaultWriteBackend>,
+    runtime: Arc<AiRuntime>,
+    egress_audit: Arc<dyn AiEgressDecisionAudit>,
+    clock: Arc<dyn Clock>,
+    route: AiOpenAiBackgroundRetrievalRoute,
+    limits: AiOpenAiBackgroundRetrievalLimits,
+}
+
+/// In-memory normalized result bound to one durable retrieval generation.
+///
+/// This value may contain protected visible provider output. It is not a
+/// terminal persistence or run-completion proof. The claim remains
+/// `reconciling`; if no future terminal service consumes it, its lease expires
+/// and a higher generation may retrieve again.
+#[derive(Clone)]
+pub struct AiOpenAiBackgroundRetrievalObservation {
+    claim: AiOpenAiBackgroundReconciliationClaim,
+    observation: ProviderBackgroundObservation,
+}
+
+impl AiOpenAiBackgroundRetrievalObservation {
+    /// Exact reviewed provider status.
+    pub const fn status(&self) -> crate::ProviderBackgroundStatus {
+        self.observation.status()
+    }
+
+    /// Bounded visible completed-response events.
+    ///
+    /// This content remains protected backend data and has not passed the
+    /// fenced terminal persistence boundary.
+    pub fn events(&self) -> &[crate::ProviderEvent] {
+        self.observation.events()
+    }
+
+    /// Authoritative terminal provider usage, when present.
+    pub const fn usage(&self) -> Option<crate::ProviderBackgroundUsage> {
+        self.observation.usage()
+    }
+
+    /// Reconciliation generation that authorized this retrieval attempt.
+    pub const fn reconciliation_generation(&self) -> i64 {
+        self.claim.reconciliation_generation
+    }
+}
+
+impl std::fmt::Debug for AiOpenAiBackgroundRetrievalObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiOpenAiBackgroundRetrievalObservation")
+            .field(
+                "reconciliation_generation",
+                &self.claim.reconciliation_generation,
+            )
+            .field("status", &self.observation.status())
+            .field("event_count", &self.observation.events().len())
+            .field("visible_content", &"[REDACTED]")
+            .field("usage", &self.observation.usage())
+            .finish()
+    }
 }
 
 /// ORM-backed executor for one exact OpenAI background response submission.
@@ -1430,6 +1686,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
                                 reconciliation_generation: Some(generation),
                                 reconciliation_lease_expires_at: Some(Some(expiry)),
                                 reconciliation_next_attempt_at: Some(Some(expiry)),
+                                retrieval_egress_decision_id: Some(None),
                                 ..Default::default()
                             },
                         )
@@ -1441,7 +1698,9 @@ impl OrmAiOpenAiBackgroundReconciliationService {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                     };
-                    validate_active_reconciliation_record(&updated, &worker_id, generation, now)?;
+                    validate_active_reconciliation_record(
+                        &updated, &worker_id, generation, None, now,
+                    )?;
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
                         actor_principal_kind: "system".to_owned(),
                         actor_subject: worker_id,
@@ -1527,6 +1786,7 @@ impl OrmAiOpenAiBackgroundReconciliationService {
                         &updated,
                         &claim.worker_id,
                         claim.reconciliation_generation,
+                        None,
                         now,
                     )?;
                     let mut renewed = claim;
@@ -1622,11 +1882,405 @@ impl OrmAiOpenAiBackgroundReconciliationService {
     }
 }
 
+impl OrmAiOpenAiBackgroundRetrievalService {
+    /// Creates an exact-reference OpenAI background retrieval service.
+    ///
+    /// The egress audit must durably include the generated-ORM decision event
+    /// in this same database before the service can bind transport authority.
+    pub fn new(
+        database: Database<DefaultWriteBackend>,
+        runtime: Arc<AiRuntime>,
+        egress_audit: Arc<dyn AiEgressDecisionAudit>,
+        clock: Arc<dyn Clock>,
+        route: AiOpenAiBackgroundRetrievalRoute,
+        limits: AiOpenAiBackgroundRetrievalLimits,
+    ) -> Self {
+        Self {
+            database,
+            runtime,
+            egress_audit,
+            clock,
+            route,
+            limits,
+        }
+    }
+
+    /// Freshly authorizes and retrieves one exact bound OpenAI response.
+    ///
+    /// The service revalidates the complete durable claim graph, rehydrates
+    /// the current principal, proves scope/session write access and a ready
+    /// content-protection policy, audits a new exact egress decision, and
+    /// CAS-binds that allow before provider I/O. The adapter receives no URL
+    /// and uses a request timeout strictly shorter than the remaining claim.
+    ///
+    /// A successful return remains in-memory only. No budget, receipt,
+    /// transcript, attempt, submission terminal state, or run state is
+    /// mutated by this method.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for runtime readiness, a stale or malformed claim,
+    /// profile/destination mismatch, stale principal, current access,
+    /// protection or egress denial, failed egress audit/binding, insufficient
+    /// lease time, provider transport error, or malformed/oversized response.
+    pub async fn retrieve(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+    ) -> Result<AiOpenAiBackgroundRetrievalObservation, AiError> {
+        if !self.runtime.start_gate().is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        self.validate_retrieval_claim(claim).await?;
+        if claim.provider_profile_id != self.route.provider_profile_id
+            || claim.original_egress_destination != self.route.destination
+        {
+            return Err(AiError::EgressDenied);
+        }
+        let scope = claim_scope(claim);
+        self.require_current_authority(claim, &scope).await?;
+
+        let manifest = self.retrieval_manifest(claim)?;
+        let decision = self
+            .runtime
+            .authorize_egress(&claim.principal_reference, &manifest)
+            .await?;
+        self.egress_audit.record(&manifest, &decision).await?;
+        let proof = decision.authorize(&manifest)?;
+        self.require_current_authority(claim, &scope).await?;
+        let bound = self
+            .bind_retrieval_egress(claim.clone(), manifest.clone(), decision)
+            .await?;
+
+        let now = self.clock.now();
+        let request_timeout = retrieval_timeout(
+            now,
+            bound.reconciliation_lease_expires_at,
+            self.limits.maximum_request_timeout,
+        )?;
+        let binding = ProviderBackgroundRetrievalBinding::new(
+            bound.submission_id,
+            bound.submission_key.clone(),
+            bound.provider_profile_id.clone(),
+            bound.provider_response_id.clone(),
+            bound.provider_created_at,
+            bound.provider_model.clone(),
+            bound.maximum_output_tokens,
+            bound.provider_store,
+            self.limits.maximum_response_bytes,
+            self.limits.maximum_visible_bytes,
+            self.limits.maximum_output_items,
+            self.limits.maximum_content_items,
+            request_timeout,
+        )
+        .map_err(|_| AiError::ProviderFailed)?;
+        let context = ProviderBackgroundRetrievalContext::new(manifest, proof)
+            .map_err(|_| AiError::EgressDenied)?;
+        let observation = tokio::time::timeout(
+            request_timeout,
+            self.runtime
+                .retrieve_provider_background(&ProviderKind::OpenAi, binding, context),
+        )
+        .await
+        .map_err(|_| AiError::ProviderFailed)?
+        .map_err(|_| AiError::ProviderFailed)?;
+        Ok(AiOpenAiBackgroundRetrievalObservation {
+            claim: bound,
+            observation,
+        })
+    }
+
+    async fn require_current_authority(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+        scope: &AiScope,
+    ) -> Result<(), AiError> {
+        let now = self.clock.now();
+        let principal = self
+            .runtime
+            .resolve_current_principal(&claim.principal_reference)
+            .await?;
+        if principal.resolved_at() > now
+            || now - principal.resolved_at() > self.limits.maximum_principal_age
+            || principal
+                .reference()
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now)
+        {
+            return Err(AiError::ReauthorizationFailed);
+        }
+        if !self
+            .runtime
+            .access_policy()
+            .can_access_scope(principal.principal(), scope, AiSessionAction::Write)
+            .await
+            .is_allowed()
+            || !self
+                .runtime
+                .access_policy()
+                .can_access_session(
+                    principal.principal(),
+                    claim.session_id,
+                    AiSessionAction::Write,
+                )
+                .await
+                .is_allowed()
+        {
+            return Err(AiError::Forbidden);
+        }
+        let protection = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), scope)
+            .await?;
+        if !protection.ready || protection.scope != *scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        Ok(())
+    }
+
+    fn retrieval_manifest(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+    ) -> Result<AiEgressManifest, AiError> {
+        let estimated_bytes = u64::try_from(claim.provider_response_id.len())
+            .map_err(|_| AiError::InvalidConfiguration("response ID is too large".to_owned()))?;
+        Ok(AiEgressManifest {
+            provider_profile_id: self.route.provider_profile_id.clone(),
+            provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
+            model: claim.provider_model.clone(),
+            destination: self.route.destination.clone(),
+            destination_trust: AiDestinationTrust::ManagedProvider,
+            capability: AiEgressCapability::ModelInference,
+            scope: claim_scope(claim),
+            session_id: Some(claim.session_id),
+            run_id: Some(claim.run_id),
+            sources: vec![AiDataSourceRef {
+                kind: "provider_response".to_owned(),
+                reference: ProviderBackgroundRetrievalBinding::source_reference(
+                    claim.submission_id,
+                    &claim.provider_response_id,
+                ),
+                classification: claim.original_maximum_classification,
+                trust: AiSourceTrust::ExternalUntrusted,
+            }],
+            estimated_bytes,
+            estimated_tokens: 0,
+            attachment_count: 0,
+            purpose: "background_response_retrieval".to_owned(),
+            retention: AI_EGRESS_RETENTION_PROVIDER_RESPONSE.to_owned(),
+            residency: self.route.residency.clone(),
+            policy_version: self.route.policy_version.clone(),
+            consent_reference: self.route.consent_reference.clone(),
+        })
+    }
+
+    async fn validate_retrieval_claim(
+        &self,
+        claim: &AiOpenAiBackgroundReconciliationClaim,
+    ) -> Result<(), AiError> {
+        let database = self.database.clone();
+        let claim = claim.clone();
+        let now = canonical_second(self.clock.now());
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    validate_current_reconciliation_claim(&current, &claim, now)?;
+                    if claim.retrieval_egress_decision_id.is_some() {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let graph = load_background_claim_graph(tx, &current).await?;
+                    validate_claim_graph(&claim, &graph)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    async fn bind_retrieval_egress(
+        &self,
+        claim: AiOpenAiBackgroundReconciliationClaim,
+        manifest: AiEgressManifest,
+        decision: crate::AiEgressDecision,
+    ) -> Result<AiOpenAiBackgroundReconciliationClaim, AiError> {
+        let database = self.database.clone();
+        let now = canonical_second(self.clock.now());
+        database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = tx
+                        .find_by_id::<AiProviderBackgroundSubmissionRecord>(&claim.submission_id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    validate_current_reconciliation_claim(&current, &claim, now)?;
+                    if claim.retrieval_egress_decision_id.is_some() {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let graph = load_background_claim_graph(tx, &current).await?;
+                    validate_claim_graph(&claim, &graph)?;
+                    let egress = tx
+                        .query::<AiEgressEventRecord>()
+                        .filter(AiEgressEventRecordWhereInput {
+                            id: Some(UuidFilter {
+                                eq: Some(decision.id.0),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let [egress] = egress.as_slice() else {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    };
+                    validate_retrieval_egress_record(
+                        egress,
+                        &manifest,
+                        &decision,
+                        &claim.principal_reference.subject,
+                    )?;
+                    let outcome = tx
+                        .compare_and_swap::<AiProviderBackgroundSubmissionRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_background_state(BackgroundSubmissionState::Reconciling.as_str()),
+                            UpdateAiProviderBackgroundSubmissionRecordInput {
+                                retrieval_egress_decision_id: Some(Some(decision.id.0)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let updated = match outcome {
+                        ConditionalUpdateOutcome::Updated(updated) => updated,
+                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    };
+                    validate_active_reconciliation_record(
+                        &updated,
+                        &claim.worker_id,
+                        claim.reconciliation_generation,
+                        Some(decision.id.0),
+                        now,
+                    )?;
+                    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                        actor_principal_kind: "system".to_owned(),
+                        actor_subject: claim.worker_id.clone(),
+                        action: "bind_provider_background_retrieval_egress".to_owned(),
+                        resource_kind: "ai_provider_background_submission".to_owned(),
+                        resource_reference: updated.id.to_string(),
+                        outcome: "authorized".to_owned(),
+                        reason_code: "current_egress_allow_bound".to_owned(),
+                        correlation_id: updated.id.to_string(),
+                        causation_id: Some(updated.run_id.to_string()),
+                        policy_version: Some(decision.policy_version.clone()),
+                    })
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    let mut bound = claim;
+                    bound.retrieval_egress_decision_id = Some(decision.id.0);
+                    bound.row_version = updated.row_version;
+                    Ok(bound)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+}
+
+fn claim_scope(claim: &AiOpenAiBackgroundReconciliationClaim) -> AiScope {
+    AiScope {
+        kind: claim.scope_kind.clone(),
+        id: claim.scope_id.clone(),
+        tenant_id: claim.tenant_id.clone(),
+    }
+}
+
+fn validate_claim_graph(
+    claim: &AiOpenAiBackgroundReconciliationClaim,
+    graph: &BackgroundClaimGraph,
+) -> Result<(), OrmPublicError> {
+    if graph.principal_reference != claim.principal_reference
+        || graph.scope_kind != claim.scope_kind
+        || graph.scope_id != claim.scope_id
+        || graph.tenant_id != claim.tenant_id
+        || graph.original_egress_destination != claim.original_egress_destination
+        || graph.original_maximum_classification != claim.original_maximum_classification
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+fn validate_retrieval_egress_record(
+    record: &AiEgressEventRecord,
+    manifest: &AiEgressManifest,
+    decision: &crate::AiEgressDecision,
+    expected_principal_subject: &str,
+) -> Result<(), OrmPublicError> {
+    if record.id != decision.id.0
+        || record.run_id != manifest.run_id.map(|run_id| run_id.0)
+        || record.principal_subject != decision.principal_subject
+        || record.principal_subject != expected_principal_subject
+        || record.scope_kind != manifest.scope.kind
+        || record.scope_id != manifest.scope.id
+        || record.manifest_hash != decision.manifest_hash
+        || record.manifest_hash != manifest.stable_hash()
+        || record.destination != manifest.destination
+        || record.capability != "model_inference"
+        || record.classification != classification_value(manifest.maximum_classification())
+        || record.outcome != "allow"
+        || record.reason_code != "allowed"
+        || record.policy_version != decision.policy_version
+        || u64::try_from(record.estimated_bytes).ok() != Some(manifest.estimated_bytes)
+        || record.estimated_tokens != 0
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+fn classification_value(value: DataClassification) -> &'static str {
+    match value {
+        DataClassification::Public => "public",
+        DataClassification::Internal => "internal",
+        DataClassification::Confidential => "confidential",
+        DataClassification::Restricted => "restricted",
+        DataClassification::Secret => "secret",
+    }
+}
+
+fn retrieval_timeout(
+    now: OffsetDateTime,
+    claim_expiry: OffsetDateTime,
+    configured_maximum: Duration,
+) -> Result<std::time::Duration, AiError> {
+    let remaining = claim_expiry - now;
+    let safety_margin = Duration::milliseconds(1);
+    if remaining <= safety_margin {
+        return Err(AiError::Conflict);
+    }
+    let timeout = std::cmp::min(configured_maximum, remaining - safety_margin);
+    if timeout <= Duration::ZERO {
+        return Err(AiError::Conflict);
+    }
+    Ok(timeout.unsigned_abs())
+}
+
 struct BackgroundClaimGraph {
     principal_reference: PrincipalReference,
     scope_kind: String,
     scope_id: String,
     tenant_id: Option<String>,
+    original_egress_destination: String,
+    original_maximum_classification: DataClassification,
 }
 
 async fn load_background_claim_graph(
@@ -1682,6 +2336,32 @@ async fn load_background_claim_graph(
         .map_err(OrmPublicError::from)?;
     let [egress] = egress_events.as_slice() else {
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+    };
+    let provider_response_id = submission
+        .provider_response_id
+        .as_deref()
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let retrieval_egress = match submission.retrieval_egress_decision_id {
+        Some(decision_id) => {
+            let events = tx
+                .query::<AiEgressEventRecord>()
+                .filter(AiEgressEventRecordWhereInput {
+                    id: Some(UuidFilter {
+                        eq: Some(decision_id),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(2)
+                .fetch_all()
+                .await
+                .map_err(OrmPublicError::from)?;
+            let [event] = events.as_slice() else {
+                return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+            };
+            Some(event.clone())
+        }
+        None => None,
     };
     let outcomes = tx
         .query::<AiRunAttemptOutcomeRecord>()
@@ -1774,14 +2454,35 @@ async fn load_background_claim_graph(
         || egress.policy_version.trim().is_empty()
         || egress.estimated_bytes < 0
         || egress.estimated_tokens < 0
+        || retrieval_egress.is_some_and(|retrieval| {
+            Some(retrieval.id) != submission.retrieval_egress_decision_id
+                || retrieval.run_id != Some(submission.run_id)
+                || retrieval.principal_subject != principal_reference.subject
+                || retrieval.scope_kind != session.scope_kind
+                || retrieval.scope_id != session.scope_id
+                || retrieval.destination != egress.destination
+                || retrieval.capability != "model_inference"
+                || retrieval.classification != egress.classification
+                || retrieval.outcome != "allow"
+                || retrieval.reason_code != "allowed"
+                || !valid_sha256_hex(&retrieval.manifest_hash)
+                || retrieval.policy_version.trim().is_empty()
+                || u64::try_from(retrieval.estimated_bytes).ok()
+                    != Some(provider_response_id.len() as u64)
+                || retrieval.estimated_tokens != 0
+        })
     {
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
     }
+    let original_maximum_classification = persisted_classification(&egress.classification)
+        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
     Ok(BackgroundClaimGraph {
         principal_reference,
         scope_kind: session.scope_kind,
         scope_id: session.scope_id,
         tenant_id: session.tenant_id,
+        original_egress_destination: egress.destination.clone(),
+        original_maximum_classification,
     })
 }
 
@@ -1862,7 +2563,6 @@ fn validate_claimable_submission(
         || u32::try_from(submission.reconciliation_retry_count)
             .map_or(true, |count| count > maximum_retries)
         || submission.reconciled_at.is_some()
-        || submission.retrieval_egress_decision_id.is_some()
         || submission.terminal_message_id.is_some()
         || submission.row_version < 1
     {
@@ -1872,6 +2572,7 @@ fn validate_claimable_submission(
         BackgroundSubmissionState::WaitingProvider
             if submission.reconciliation_owner.is_none()
                 && submission.reconciliation_lease_expires_at.is_none()
+                && submission.retrieval_egress_decision_id.is_none()
                 && ((submission.reconciliation_generation == 0
                     && submission.reconciliation_retry_count == 0)
                     || (submission.reconciliation_generation > 0
@@ -1906,6 +2607,7 @@ fn validate_active_reconciliation_record(
     submission: &AiProviderBackgroundSubmissionRecord,
     worker_id: &str,
     generation: i64,
+    retrieval_egress_decision_id: Option<Uuid>,
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
     let expiry = submission
@@ -1922,7 +2624,7 @@ fn validate_active_reconciliation_record(
             .is_none_or(|deadline| expiry > deadline)
         || submission.safe_error_code.is_some()
         || submission.reconciled_at.is_some()
-        || submission.retrieval_egress_decision_id.is_some()
+        || submission.retrieval_egress_decision_id != retrieval_egress_decision_id
         || submission.terminal_message_id.is_some()
     {
         return Err(OrmPublicError::new(OrmErrorCode::InternalError));
@@ -1936,6 +2638,7 @@ fn validate_current_reconciliation_claim(
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
     if submission.id != claim.submission_id
+        || submission.submission_key != claim.submission_key
         || submission.session_id != claim.session_id.0
         || submission.run_id != claim.run_id.0
         || submission.attempt_id != claim.attempt_id
@@ -1950,6 +2653,7 @@ fn validate_current_reconciliation_claim(
         || submission.budget_reservation_id != claim.budget_reservation_id.0
         || submission.egress_decision_id != claim.original_egress_decision_id
         || submission.egress_manifest_hash != claim.original_egress_manifest_hash
+        || submission.retrieval_egress_decision_id != claim.retrieval_egress_decision_id
         || submission.reconciliation_owner.as_deref() != Some(&claim.worker_id)
         || submission.reconciliation_generation != claim.reconciliation_generation
         || submission.reconciliation_lease_expires_at
@@ -1968,6 +2672,7 @@ fn validate_current_reconciliation_claim(
         submission,
         &claim.worker_id,
         claim.reconciliation_generation,
+        claim.retrieval_egress_decision_id,
         now,
     )
 }
@@ -2004,6 +2709,7 @@ fn claim_from_records(
 ) -> Result<AiOpenAiBackgroundReconciliationClaim, AiError> {
     Ok(AiOpenAiBackgroundReconciliationClaim {
         submission_id: submission.id,
+        submission_key: submission.submission_key.clone(),
         session_id: crate::AiSessionId(submission.session_id),
         run_id: AiRunId(submission.run_id),
         attempt_id: submission.attempt_id,
@@ -2043,6 +2749,9 @@ fn claim_from_records(
         budget_reservation_id: AiBudgetReservationId(submission.budget_reservation_id),
         original_egress_decision_id: submission.egress_decision_id,
         original_egress_manifest_hash: submission.egress_manifest_hash.clone(),
+        original_egress_destination: graph.original_egress_destination,
+        original_maximum_classification: graph.original_maximum_classification,
+        retrieval_egress_decision_id: submission.retrieval_egress_decision_id,
         scope_kind: graph.scope_kind,
         scope_id: graph.scope_id,
         tenant_id: graph.tenant_id,
@@ -2061,6 +2770,17 @@ fn exact_background_state(state: &str) -> AiProviderBackgroundSubmissionRecordWh
 
 fn valid_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn persisted_classification(value: &str) -> Option<DataClassification> {
+    match value {
+        "public" => Some(DataClassification::Public),
+        "internal" => Some(DataClassification::Internal),
+        "confidential" => Some(DataClassification::Confidential),
+        "restricted" => Some(DataClassification::Restricted),
+        "secret" => Some(DataClassification::Secret),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]

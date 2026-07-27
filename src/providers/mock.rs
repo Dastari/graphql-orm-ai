@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use futures::stream;
 
 use crate::{
-    AiProvider, ModelRequest, ProviderBackgroundBinding, ProviderBackgroundSubmission,
-    ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
-    ProviderRequestContext,
+    AiProvider, ModelRequest, ProviderBackgroundBinding, ProviderBackgroundObservation,
+    ProviderBackgroundRetrievalBinding, ProviderBackgroundRetrievalContext,
+    ProviderBackgroundSubmission, ProviderCapabilities, ProviderError, ProviderEvent,
+    ProviderEventStream, ProviderKind, ProviderRequestContext,
 };
 
 #[cfg(test)]
@@ -33,6 +34,8 @@ pub struct MockProvider {
     background_delay: Option<std::time::Duration>,
     #[cfg(test)]
     background_binding: Option<(String, u64, bool)>,
+    #[cfg(test)]
+    background_observation: Option<ProviderBackgroundObservation>,
     request_count: Arc<AtomicU64>,
 }
 
@@ -58,6 +61,8 @@ impl MockProvider {
             background_delay: None,
             #[cfg(test)]
             background_binding: None,
+            #[cfg(test)]
+            background_observation: None,
             request_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -119,6 +124,15 @@ impl MockProvider {
     ) -> Self {
         self.background_binding =
             Some((provider_model.into(), maximum_output_tokens, provider_store));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_background_observation(
+        mut self,
+        observation: ProviderBackgroundObservation,
+    ) -> Self {
+        self.background_observation = Some(observation);
         self
     }
 }
@@ -191,6 +205,30 @@ impl AiProvider for MockProvider {
                 maximum_output_tokens,
                 provider_store,
             ))
+        }
+        #[cfg(not(test))]
+        {
+            let _ = binding;
+            Err(ProviderError::Unsupported)
+        }
+    }
+
+    async fn retrieve_background(
+        &self,
+        binding: ProviderBackgroundRetrievalBinding,
+        context: ProviderBackgroundRetrievalContext,
+    ) -> Result<ProviderBackgroundObservation, ProviderError> {
+        if !context.permits(&self.kind, &binding) {
+            return Err(ProviderError::EgressDenied);
+        }
+        #[cfg(test)]
+        {
+            let observation = self
+                .background_observation
+                .clone()
+                .ok_or(ProviderError::Unsupported)?;
+            self.request_count.fetch_add(1, Ordering::AcqRel);
+            Ok(observation)
         }
         #[cfg(not(test))]
         {

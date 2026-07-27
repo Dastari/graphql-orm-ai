@@ -4,6 +4,59 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: exact OpenAI background retrieval boundary (crate 0.52.0 to 0.53.0; schema 0.48.0 to 0.49.0)
+
+Apply AI schema module `0.49.0` while provider workers, webhook intake,
+backup/restore, and runtime start are closed. This increment does not add or
+remove a column: it activates the previously reserved nullable
+`retrieval_egress_decision_id` as the durable marker that a specific
+reconciliation generation was authorized to cross the provider retrieval
+boundary. That persistent lifecycle meaning changes the module identity and
+fingerprint even though the generated database target has no new structural
+DDL.
+
+Existing supported `0.48.0` rows require no data rewrite and have a null
+retrieval-egress marker. A non-null marker created outside the `0.53.0`
+generated-ORM service is not trusted migration input; keep that submission and
+its run closed for reviewed recovery rather than clearing or synthesizing an
+egress event manually. No application-domain data migration is required.
+
+Hosts may construct `OrmAiOpenAiBackgroundRetrievalService` with:
+
+- the same generated-ORM database used by the authoritative
+  `OrmAiEgressDecisionAudit`;
+- the ready `AiRuntime`;
+- a credential-free `AiOpenAiBackgroundRetrievalRoute` fixing the original
+  logical profile/destination and current policy, residency, and optional
+  consent references; and
+- bounded `AiOpenAiBackgroundRetrievalLimits` for the full response, visible
+  content, item counts, request timeout, and principal freshness.
+
+`retrieve` reloads the complete claim graph, rehydrates the current principal,
+checks current scope/session write access and content-protection readiness,
+audits a new exact `provider_response` egress decision, and atomically binds
+that allow ID before transport. The registered native OpenAI provider then
+performs only `GET /v1/responses/<bound resp_ ID>` at its compiled official
+endpoint, with redirects disabled, just-in-time credential resolution, and a
+timeout strictly shorter than the claim. Provider/profile/response swaps,
+unsupported output items, malformed usage, body/visible/item overflow, and
+security-relevant metadata drift fail closed.
+
+The returned `AiOpenAiBackgroundRetrievalObservation` is bounded in-memory
+provider truth only. This increment does not select or mutate webhook receipts,
+release a nonterminal observation with policy backoff, settle uncertain
+budget, protect/persist assistant output, append an attempt outcome, close
+deadline/retry exhaustion, or terminally mutate the submission/run. If no
+later terminal service consumes a retrieval result, the claim expires; a
+higher-generation reclaim validates the prior egress event and clears its
+stale marker before another attempt. Do not treat retrieval success as run
+completion.
+
+This is an additive public Rust API and private persistence/behavioral
+contract change. It changes no public GraphQL SDL. Exact receipt selection,
+nonterminal retry classification, terminal budget/output transactions,
+deadline/exhaustion closure, and terminal restore validation remain closed.
+
 ## Unreleased: OpenAI background reconciliation claim schema (crate 0.51.0 to 0.52.0; schema 0.47.0 to 0.48.0)
 
 Apply AI schema module `0.48.0` while provider workers, webhook intake,
@@ -57,13 +110,13 @@ normalization, budget settlement, receipt mutation, or run mutation. A
 deployment should not treat successful claiming as progress toward a terminal
 result. Exact-response retrieval, current-authority revalidation, receipt
 matching, terminal normalization, atomic terminal persistence, and deadline/
-retry exhaustion closure remain deliberately unavailable in this increment.
+retry exhaustion closure were deliberately unavailable in that increment.
 
 This is an additive public Rust API and private persistence/behavioral contract
 change. It changes no public GraphQL SDL and requires no additional data
-migration beyond schema `0.48.0`. Exact-response retrieval, receipt matching,
-budget settlement, protected output persistence, terminal run mutation, and
-terminal restore validation remain closed in this release increment.
+migration beyond schema `0.48.0`. At that checkpoint, exact-response retrieval,
+receipt matching, budget settlement, protected output persistence, terminal run
+mutation, and terminal restore validation remained closed.
 
 ## Unreleased: upstream dependency alignment to graphql-orm 0.15.0 and agql-auth 0.12.0
 

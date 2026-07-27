@@ -1400,6 +1400,362 @@ impl ProviderBackgroundSubmission {
     }
 }
 
+/// Reviewed provider status for one exact background response retrieval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderBackgroundStatus {
+    /// Provider has accepted the response but has not started processing.
+    Queued,
+    /// Provider is still processing the response.
+    InProgress,
+    /// Provider reports successful terminal completion.
+    Completed,
+    /// Provider reports terminal failure.
+    Failed,
+    /// Provider stopped before completing the requested response.
+    Incomplete,
+    /// Provider reports terminal cancellation.
+    Cancelled,
+}
+
+impl ProviderBackgroundStatus {
+    /// Returns whether the provider status is terminal.
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Incomplete | Self::Cancelled
+        )
+    }
+}
+
+/// Authoritative token counters from a terminal background response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderBackgroundUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_input_tokens: u64,
+}
+
+impl ProviderBackgroundUsage {
+    pub(crate) const fn new(
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+    ) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+        }
+    }
+
+    /// Provider-reported input tokens.
+    pub const fn input_tokens(self) -> u64 {
+        self.input_tokens
+    }
+
+    /// Provider-reported output tokens.
+    pub const fn output_tokens(self) -> u64 {
+        self.output_tokens
+    }
+
+    /// Provider-reported cached input tokens.
+    pub const fn cached_input_tokens(self) -> u64 {
+        self.cached_input_tokens
+    }
+}
+
+/// Bounded normalized observation of one exact provider background response.
+///
+/// Visible events may contain protected model output and are intended only for
+/// the trusted backend. This value proves neither current run-mutation
+/// authority nor successful persistence. A terminal reconciler must bind it
+/// to the durable retrieval claim, settle usage, reauthorize again, and commit
+/// through a fenced generated-ORM transaction.
+#[derive(Clone, PartialEq)]
+pub struct ProviderBackgroundObservation {
+    status: ProviderBackgroundStatus,
+    events: Vec<ProviderEvent>,
+    usage: Option<ProviderBackgroundUsage>,
+}
+
+impl ProviderBackgroundObservation {
+    pub(crate) fn new(
+        status: ProviderBackgroundStatus,
+        events: Vec<ProviderEvent>,
+        usage: Option<ProviderBackgroundUsage>,
+    ) -> Result<Self, ProviderError> {
+        if status.is_terminal() != usage.is_some()
+            || (!matches!(status, ProviderBackgroundStatus::Completed) && !events.is_empty())
+        {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(Self {
+            status,
+            events,
+            usage,
+        })
+    }
+
+    /// Exact reviewed provider status.
+    pub const fn status(&self) -> ProviderBackgroundStatus {
+        self.status
+    }
+
+    /// Bounded visible events for a completed response.
+    ///
+    /// Failed, incomplete, cancelled, and nonterminal observations expose no
+    /// response output.
+    pub fn events(&self) -> &[ProviderEvent] {
+        &self.events
+    }
+
+    /// Authoritative provider usage for a terminal observation.
+    pub const fn usage(&self) -> Option<ProviderBackgroundUsage> {
+        self.usage
+    }
+}
+
+impl std::fmt::Debug for ProviderBackgroundObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderBackgroundObservation")
+            .field("status", &self.status)
+            .field("event_count", &self.events.len())
+            .field("visible_content", &"[REDACTED]")
+            .field("usage", &self.usage)
+            .finish()
+    }
+}
+
+/// Opaque exact-reference binding for one provider background retrieval.
+///
+/// Construction is restricted to the crate's fenced reconciliation service.
+/// The value contains no prompt and accepts no destination URL. Possession is
+/// not current access, egress, budget, receipt, or run-mutation authority.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderBackgroundRetrievalBinding {
+    submission_id: Uuid,
+    submission_key: String,
+    provider_profile_id: String,
+    response_id: String,
+    provider_created_at: i64,
+    provider_model: String,
+    maximum_output_tokens: u64,
+    provider_store: bool,
+    maximum_response_bytes: usize,
+    maximum_visible_bytes: usize,
+    maximum_output_items: usize,
+    maximum_content_items: usize,
+    request_timeout: std::time::Duration,
+}
+
+impl ProviderBackgroundRetrievalBinding {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        submission_id: Uuid,
+        submission_key: String,
+        provider_profile_id: String,
+        response_id: String,
+        provider_created_at: i64,
+        provider_model: String,
+        maximum_output_tokens: u64,
+        provider_store: bool,
+        maximum_response_bytes: usize,
+        maximum_visible_bytes: usize,
+        maximum_output_items: usize,
+        maximum_content_items: usize,
+        request_timeout: std::time::Duration,
+    ) -> Result<Self, ProviderError> {
+        const MAXIMUM_BYTES: usize = 64 * 1024 * 1024;
+        if submission_key.len() != 64
+            || !submission_key.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || provider_profile_id.trim().is_empty()
+            || provider_profile_id.len() > 200
+            || response_id.trim().is_empty()
+            || response_id.len() > 200
+            || provider_created_at <= 0
+            || provider_model.trim().is_empty()
+            || provider_model.len() > 1_024
+            || maximum_output_tokens == 0
+            || maximum_response_bytes == 0
+            || maximum_response_bytes > MAXIMUM_BYTES
+            || maximum_visible_bytes == 0
+            || maximum_visible_bytes > maximum_response_bytes
+            || !(1..=4_096).contains(&maximum_output_items)
+            || !(1..=4_096).contains(&maximum_content_items)
+            || request_timeout.is_zero()
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
+        Ok(Self {
+            submission_id,
+            submission_key,
+            provider_profile_id,
+            response_id,
+            provider_created_at,
+            provider_model,
+            maximum_output_tokens,
+            provider_store,
+            maximum_response_bytes,
+            maximum_visible_bytes,
+            maximum_output_items,
+            maximum_content_items,
+            request_timeout,
+        })
+    }
+
+    /// Opaque durable submission identifier.
+    pub const fn submission_id(&self) -> Uuid {
+        self.submission_id
+    }
+
+    /// Full deterministic collision-check key.
+    pub fn submission_key(&self) -> &str {
+        &self.submission_key
+    }
+
+    /// Exact logical provider profile.
+    pub fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+
+    /// Exact provider response identifier.
+    pub fn response_id(&self) -> &str {
+        &self.response_id
+    }
+
+    /// Original provider creation timestamp.
+    pub const fn provider_created_at(&self) -> i64 {
+        self.provider_created_at
+    }
+
+    /// Exact submitted model/routing key.
+    pub fn provider_model(&self) -> &str {
+        &self.provider_model
+    }
+
+    /// Exact submitted output-token ceiling.
+    pub const fn maximum_output_tokens(&self) -> u64 {
+        self.maximum_output_tokens
+    }
+
+    /// Exact provider storage choice accepted at submission time.
+    pub const fn provider_store(&self) -> bool {
+        self.provider_store
+    }
+
+    pub(crate) const fn maximum_response_bytes(&self) -> usize {
+        self.maximum_response_bytes
+    }
+
+    pub(crate) const fn maximum_visible_bytes(&self) -> usize {
+        self.maximum_visible_bytes
+    }
+
+    pub(crate) const fn maximum_output_items(&self) -> usize {
+        self.maximum_output_items
+    }
+
+    pub(crate) const fn maximum_content_items(&self) -> usize {
+        self.maximum_content_items
+    }
+
+    pub(crate) const fn request_timeout(&self) -> std::time::Duration {
+        self.request_timeout
+    }
+
+    pub(crate) fn egress_source_reference(&self) -> String {
+        Self::source_reference(self.submission_id, &self.response_id)
+    }
+
+    pub(crate) fn source_reference(submission_id: Uuid, response_id: &str) -> String {
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        {
+            let mut hasher = Sha256::new();
+            hasher.update(b"graphql-orm-ai/provider-background-retrieval/v1\0");
+            hasher.update(submission_id.as_bytes());
+            hasher.update(response_id.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+        #[cfg(not(any(feature = "sqlite", feature = "postgres")))]
+        {
+            format!("{submission_id}:{response_id}")
+        }
+    }
+}
+
+impl std::fmt::Debug for ProviderBackgroundRetrievalBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderBackgroundRetrievalBinding")
+            .field("submission_id", &"[REDACTED]")
+            .field("submission_key", &"[REDACTED]")
+            .field("provider_profile_id", &"[REDACTED]")
+            .field("response_id", &"[REDACTED]")
+            .field("provider_created_at", &self.provider_created_at)
+            .field("provider_model", &self.provider_model)
+            .field("maximum_output_tokens", &self.maximum_output_tokens)
+            .field("provider_store", &self.provider_store)
+            .field("maximum_response_bytes", &self.maximum_response_bytes)
+            .field("maximum_visible_bytes", &self.maximum_visible_bytes)
+            .field("maximum_output_items", &self.maximum_output_items)
+            .field("maximum_content_items", &self.maximum_content_items)
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
+}
+
+/// Exact current-egress proof accompanying a background retrieval binding.
+///
+/// Fields are private so an adapter cannot be called with a manifest hash or
+/// provider response identifier in place of a freshly authorized proof.
+#[derive(Clone, Debug)]
+pub struct ProviderBackgroundRetrievalContext {
+    manifest: AiEgressManifest,
+    proof: AuthorizedEgress,
+}
+
+impl ProviderBackgroundRetrievalContext {
+    pub(crate) fn new(
+        manifest: AiEgressManifest,
+        proof: AuthorizedEgress,
+    ) -> Result<Self, AiError> {
+        if manifest.stable_hash() != proof.manifest_hash() {
+            return Err(AiError::EgressDenied);
+        }
+        Ok(Self { manifest, proof })
+    }
+
+    /// Current egress decision identifier suitable for redacted audit linkage.
+    pub fn egress_decision_id(&self) -> crate::AiEgressDecisionId {
+        self.proof.decision_id()
+    }
+
+    pub(crate) fn permits(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: &ProviderBackgroundRetrievalBinding,
+    ) -> bool {
+        self.manifest.provider_kind == provider_kind.as_str()
+            && self.manifest.provider_profile_id == binding.provider_profile_id
+            && self.manifest.model == binding.provider_model
+            && self.manifest.capability == AiEgressCapability::ModelInference
+            && self.manifest.destination_trust == crate::AiDestinationTrust::ManagedProvider
+            && self.manifest.retention == AI_EGRESS_RETENTION_PROVIDER_RESPONSE
+            && self.manifest.purpose == "background_response_retrieval"
+            && self.manifest.session_id.is_some()
+            && self.manifest.run_id.is_some()
+            && self.manifest.sources.len() == 1
+            && self.manifest.sources[0].kind == "provider_response"
+            && self.manifest.sources[0].reference == binding.egress_source_reference()
+            && self.manifest.estimated_bytes >= binding.response_id.len() as u64
+            && self.manifest.estimated_tokens == 0
+            && self.manifest.attachment_count == 0
+            && self.manifest.stable_hash() == self.proof.manifest_hash()
+    }
+}
+
 /// Provider-neutral adapter.
 #[async_trait]
 pub trait AiProvider: Send + Sync {
@@ -1428,6 +1784,20 @@ pub trait AiProvider: Send + Sync {
         _context: ProviderRequestContext,
         _binding: ProviderBackgroundBinding,
     ) -> Result<ProviderBackgroundSubmission, ProviderError> {
+        Err(ProviderError::Unsupported)
+    }
+
+    /// Retrieves one exact provider background response under a fresh egress
+    /// proof.
+    ///
+    /// The default is fail-closed. Implementations must use only their fixed
+    /// registered destination and the opaque bound response reference. They
+    /// must return bounded normalized output, never raw provider JSON.
+    async fn retrieve_background(
+        &self,
+        _binding: ProviderBackgroundRetrievalBinding,
+        _context: ProviderBackgroundRetrievalContext,
+    ) -> Result<ProviderBackgroundObservation, ProviderError> {
         Err(ProviderError::Unsupported)
     }
 }

@@ -279,9 +279,13 @@ pub mod prelude {
         feature = "provider-openai"
     ))]
     pub use crate::{
-        AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundSubmission,
-        AiProviderWebhookReceiptOutcome, OrmAiOpenAiBackgroundSubmissionService,
-        OrmAiProviderWebhookReceiptService,
+        AiOpenAiBackgroundReconciliationClaim, AiOpenAiBackgroundReconciliationLimits,
+        AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundRetrievalLimits,
+        AiOpenAiBackgroundRetrievalObservation, AiOpenAiBackgroundRetrievalRoute,
+        AiOpenAiBackgroundSubmission, AiProviderWebhookReceiptOutcome,
+        OrmAiOpenAiBackgroundReconciliationService, OrmAiOpenAiBackgroundRetrievalService,
+        OrmAiOpenAiBackgroundSubmissionService, OrmAiProviderWebhookReceiptService,
+        ProviderBackgroundStatus, ProviderBackgroundUsage,
     };
     #[cfg(feature = "provider-openai")]
     pub use crate::{

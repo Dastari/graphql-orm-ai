@@ -13,8 +13,10 @@ use crate::{
     AiSecretStore, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCatalog,
     AiToolDescriptor, AiToolId, AuthenticatedGraphqlExecutor, AuthenticatedToolBridge,
     ConsumedAiApproval, GraphqlExecutionTargetRegistry, GraphqlRequestContextFactory, ModelRequest,
-    ProviderBackgroundBinding, ProviderBackgroundSubmission, ProviderError, ProviderEventStream,
-    ProviderKind, ProviderRequestContext, ToolGraphqlRequest, ToolGraphqlResponse, ToolMaturity,
+    ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
+    ProviderBackgroundRetrievalContext, ProviderBackgroundSubmission, ProviderError,
+    ProviderEventStream, ProviderKind, ProviderRequestContext, ToolGraphqlRequest,
+    ToolGraphqlResponse, ToolMaturity,
 };
 use graphql_orm::graphql::orm::{OrmSchemaModule, SchemaModuleCatalog};
 
@@ -494,6 +496,40 @@ impl AiRuntime {
             return Err(ProviderError::Unsupported);
         }
         provider.submit_background(request, context, binding).await
+    }
+
+    /// Retrieves one exactly bound provider background response after runtime,
+    /// capability, and current egress validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the runtime is closed, the provider is
+    /// absent or mismatched, background processing is unsupported, or the
+    /// exact retrieval proof fails closed.
+    pub async fn retrieve_provider_background(
+        &self,
+        provider_kind: &ProviderKind,
+        binding: ProviderBackgroundRetrievalBinding,
+        context: ProviderBackgroundRetrievalContext,
+    ) -> Result<ProviderBackgroundObservation, ProviderError> {
+        if !self.start_gate.is_ready() {
+            return Err(ProviderError::InvalidConfiguration(
+                "AI runtime is not ready".to_owned(),
+            ));
+        }
+        let provider = self
+            .providers
+            .get(provider_kind)
+            .ok_or(ProviderError::Unsupported)?;
+        if provider.provider_kind() != *provider_kind {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider registry kind mismatch".to_owned(),
+            ));
+        }
+        if !provider.capabilities().background {
+            return Err(ProviderError::Unsupported);
+        }
+        provider.retrieve_background(binding, context).await
     }
 }
 

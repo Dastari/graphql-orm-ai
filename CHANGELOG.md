@@ -5,12 +5,29 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.52.0` and AI
-schema module to `0.48.0`. It aligns the reviewed dependency universe and
+This development line advances the pre-1.0 crate version to `0.53.0` and AI
+schema module to `0.49.0`. It aligns the reviewed dependency universe and
 starts the durable OpenAI background terminal-reconciliation implementation.
 
 ### Added
 
+- With `provider-openai` plus SQLite/PostgreSQL,
+  `OrmAiOpenAiBackgroundRetrievalService` now revalidates an exact active
+  reconciliation claim, freshly rehydrates principal authority, proves
+  current scope/session write access and a ready content-protection policy,
+  audits a new profile/destination/model/classification-bound egress decision,
+  and CAS-binds the allow ID before provider I/O. Public fixed logical route
+  and response/normalization/timeout limits contain no URL or credential.
+  The native OpenAI adapter accepts only an opaque crate-authored binding and
+  issues one exact fixed-endpoint Responses GET with redirects disabled and
+  just-in-time credentials. It bounds the full JSON and visible output,
+  revalidates every durable response/metadata fact, accepts only reviewed
+  statuses and message/reasoning/refusal/citation shapes, rejects tool or
+  built-in output, and validates terminal token usage against the submitted
+  ceiling. The result remains in-memory and grants no receipt, budget,
+  persistence, or run-mutation authority. An expired transport-marked claim
+  can be reclaimed only under a higher generation, which clears the stale
+  retrieval marker before another attempt.
 - Schema module `0.48.0` adds content-free reconciliation owner/generation/
   lease, next-attempt/retry, fixed deadline, current retrieval-egress,
   reconciled-time, and terminal-message fields to OpenAI background
@@ -36,8 +53,9 @@ starts the durable OpenAI background terminal-reconciliation implementation.
   one claim, stale generations fail closed, and migrated rows without a
   deadline remain ineligible. Claims grant no credential, current-authority,
   provider-retrieval, egress, output, budget-settlement, or run-mutation
-  authority. Exact-response retrieval and terminal reconciliation remain
-  closed, so accepted runs are still parked in `WaitingProvider`.
+  authority; the separate retrieval service requires the claim plus fresh
+  access/protection/egress proofs. Terminal reconciliation remains closed, so
+  accepted runs are still parked in `WaitingProvider`.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundSubmissionService` now prepares one exact
   run/attempt/fence/profile/model/request/budget/egress binding, rehydrates
