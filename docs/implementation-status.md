@@ -563,7 +563,10 @@ intentional.
   and SemVer jobs. The Slice 1 terminal-reconciliation design checkpoint is
   pushed at `a10b3d6f35798367229ce605872b666dbf925993`; its first durable claim-
   schema implementation checkpoint is
-  `a715682d331db899742e3f5d21dde6c485964a42`. No release, tag, publish, or
+  `a715682d331db899742e3f5d21dde6c485964a42`, and its schema verification
+  checkpoint is `e06eeb5cd85beac983e9a44ffeeffdbe56090952`. The bounded claim-runtime
+  implementation and local verification are committed at
+  `30b09bb5f0bc6fc337164c4568957278c3e402e9`. No release, tag, publish, or
   upstream-repository mutation has occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
