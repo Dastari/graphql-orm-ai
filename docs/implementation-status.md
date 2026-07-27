@@ -535,6 +535,11 @@ intentional.
   compile-only checks. The exact `0.47.0`-to-`0.48.0` schema alteration passes
   on in-memory SQLite and in an ownership-labeled disposable PostgreSQL 17
   container, which was removed after the test.
+- Release-policy and package-file review pass against the pushed `0.51.0`
+  checkpoint. `cargo-semver-checks` completes successfully for `0.51.0` to
+  `0.52.0`; the pre-1.0 minor move is a breaking-version boundary, so no
+  compatibility lints are applicable. The package contains no ignored
+  handoff, credential, local path, or consumer-specific artifact.
 - The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
   `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
   `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
@@ -544,8 +549,10 @@ intentional.
   at `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
   `30253200905` passed unit/compile, owned PostgreSQL parity, release-policy,
   and SemVer jobs. The Slice 1 terminal-reconciliation design checkpoint is
-  pushed at `a10b3d6f35798367229ce605872b666dbf925993`. No release, tag, publish,
-  or upstream-repository mutation has occurred.
+  pushed at `a10b3d6f35798367229ce605872b666dbf925993`; its first durable claim-
+  schema implementation checkpoint is
+  `a715682d331db899742e3f5d21dde6c485964a42`. No release, tag, publish, or
+  upstream-repository mutation has occurred.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 
