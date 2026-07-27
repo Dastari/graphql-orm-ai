@@ -460,9 +460,15 @@ and deliberately incomplete inventory.
   file-type preflight and full built-in result normalization. Exact raw-body
   webhook verification, durable content-free receipt intake, and exact initial
   background submission are implemented, but accepted runs and receipts remain
-  inert until an independently fenced reconciler exists. Exact inline image/
-  file input remains independently gated by host MIME policy, budget, egress,
-  current authority, and reopening limits.
+  inert until an independently fenced reconciler exists. The complete
+  submission-claim, fixed-destination retrieval, current-authority, atomic
+  terminal-graph, crash, receipt-redelivery, and restore contract is now
+  documented in the
+  [background guide](openai-background.md#terminal-reconciliation-design) and
+  [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation); schema
+  and runtime implementation remain. Exact inline image/file input remains
+  independently gated by host MIME policy, budget, egress, current authority,
+  and reopening limits.
 - Privileged uncertain-call recovery and complete retention/purge application.
   Budget-policy management, ordinary transactional reservation/reconciliation,
   authenticated usage reporting, and the content-free operational telemetry

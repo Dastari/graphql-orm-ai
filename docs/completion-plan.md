@@ -25,9 +25,9 @@ what remains deliberately closed.
   Rustdoc, PascalCase GraphQL, PostgreSQL/MSSQL compile-only, owned disposable
   PostgreSQL migration, release-policy, package, and SemVer checks pass
   locally.
-- The dependency-alignment implementation checkpoint is committed and pushed at
-  `72757bdc63d28ee63d48d0e3e0cd503cb1f27566`; draft PR #2 CI run
-  `30252247582` passed all four jobs.
+- The dependency-alignment checkpoint is committed and pushed at
+  `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
+  `30253200905` passed all four jobs.
 - No upstream handoff is currently open.
 
 ## Rules for every slice
@@ -117,6 +117,9 @@ This is the first runtime implementation slice. Exact background submission and
 verified webhook intake already exist, but an accepted run remains parked in
 `WaitingProvider`, its budget remains uncertain, and a receipt grants no
 authority to retrieve output or mutate the run.
+
+Status: the complete design gate and negative/crash matrix are documented in
+the two focused guides. Runtime and schema implementation have not started.
 
 ### Design gate
 
@@ -410,7 +413,8 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Write the Slice 1 OpenAI background reconciliation state-machine design and
-   negative-test table.
-2. Implement Slice 1 only after that design makes every external-I/O and crash
-   boundary explicit.
+1. Implement Slice 1's minimum submission claim/lease fields, legal state
+   validation, schema migration, and bounded concurrent claim tests.
+2. Add the fixed-destination OpenAI retrieval binding and terminal normalizer.
+3. Add the one-transaction terminal graph, restore validation, PostgreSQL
+   parity, and full release-matrix proof.
