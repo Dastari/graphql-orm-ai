@@ -1,11 +1,11 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.54.0` Slice 1 terminal-reconciliation checkpoint. The historical architecture
-plan at `1573017:docs/plan.md` remains useful design context, but its original
-delivery phases no longer describe the worktree: most foundation, provider,
-persistence, authorization, approval, and coordination contracts are already
-implemented.
+current `0.54.0` Slice 1 terminal-reconciliation checkpoint. The historical
+architecture plan at `1573017:docs/plan.md` remains useful design context, but
+its original delivery phases no longer describe the worktree: most foundation,
+provider, persistence, authorization, approval, and coordination contracts are
+already implemented.
 
 [Implementation status](implementation-status.md) is authoritative for the
 current inventory. This document is authoritative for work order, dependencies,
@@ -14,18 +14,17 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.54.0` (unpublished Slice 1 development).
+- Crate version: `0.54.0` (unpublished Slice 1 checkpoint).
 - AI schema-module version: `0.50.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
     `6beef53633befd90a4d4810887a3e4640dc4ad91`.
   - `agql-auth` `0.12.0` at
     `3f3b0c5365adfbe436514a681d977b600991b797`.
-- The prior checkpoint's SQLite/provider, warnings-denied Clippy,
+- The complete SQLite/provider, warnings-denied Clippy,
   warnings/missing-docs-denied Rustdoc, PascalCase GraphQL,
   PostgreSQL/MSSQL compile-only, owned disposable PostgreSQL migration,
-  release-policy, package, and SemVer checks passed locally. The complete
-  `0.54.0` matrix is the current exit gate.
+  release-policy, package-file, and SemVer matrix passes locally.
 - The dependency-alignment checkpoint is committed and pushed at
   `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
   `30253200905` passed all four jobs.
@@ -123,8 +122,8 @@ verified webhook intake already exist, but an accepted run remains parked in
 `WaitingProvider`, its budget remains uncertain, and a receipt grants no
 authority to retrieve output or mutate the run.
 
-Status: implementation complete; the `0.54.0` exit matrix and checkpoint are
-in progress. Schema `0.50.0` adds the bounded exact receipt-match index and
+Status: complete at the `0.54.0` local exit gate. Schema `0.50.0` adds the
+bounded exact receipt-match index and
 activates the complete terminal lifecycle. Claiming selects at most one exact
 signature-verified receipt without making webhooks a liveness dependency.
 Retrieval now yields private retryable or recovery-required proofs after
@@ -431,9 +430,9 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Finish Slice 1 PostgreSQL parity, restore/schema assertions, and the full
-   `0.54.0` release matrix; commit and push the exact checkpoint.
-2. Complete the Slice 2 provider-persistent file lifecycle design gate before
+1. Complete the Slice 2 provider-persistent file lifecycle design gate before
    opening upload or search runtime paths.
-3. Implement only the Slice 2 capabilities whose authority, budget, cleanup,
+2. Implement only the Slice 2 capabilities whose authority, budget, cleanup,
    retention, restore, and backend parity contracts are complete.
+3. Keep file listing, arbitrary provider IDs, cross-scope reuse, and any
+   incomplete cost/deletion/restore path closed.
