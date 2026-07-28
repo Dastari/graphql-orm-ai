@@ -24,6 +24,8 @@ mod xai;
 #[cfg(feature = "provider-ollama")]
 mod ollama;
 
+#[cfg(test)]
+pub(crate) use mock::MockBackgroundRetrievalFailure;
 pub use mock::MockProvider;
 
 #[cfg(feature = "provider-anthropic")]
@@ -32,6 +34,11 @@ pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
 #[cfg(feature = "provider-openai")]
 pub use openai::{OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig};
 
+#[cfg(all(
+    feature = "provider-openai",
+    any(feature = "sqlite", feature = "postgres")
+))]
+pub(crate) use openai_webhooks::webhook_receipt_identity;
 #[cfg(feature = "provider-openai")]
 pub use openai_webhooks::{
     OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind, OpenAiWebhookHeaders,

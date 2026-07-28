@@ -4,6 +4,57 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: complete OpenAI background terminal reconciliation (crate 0.53.0 to 0.54.0; schema 0.49.0 to 0.50.0)
+
+Apply AI schema module `0.50.0` while provider workers, webhook intake,
+backup/restore, and runtime start are closed. The generated migration adds a
+non-unique composite index over
+`graphql_orm_ai_provider_webhook_receipts(provider_kind,
+provider_profile_id, provider_response_id, state)`. It does not add, remove, or
+rewrite columns. Existing receipt and submission rows require no data rewrite;
+the index is the only structural data-store change.
+
+The module identity also activates the previously reserved reconciliation,
+terminal-message, receipt linkage/state, budget, usage, checkpoint, session
+event, and inbox event facts as one terminal lifecycle contract. A restored
+adapter must validate each terminal or recovery-required background submission
+against its exact run, original attempt/fence, immutable outcome, uncertain or
+committed reservation, usage row, optional protected output/checkpoint/events,
+and processed/duplicate/recovery receipt states. Report any invalid graph
+through `invalid_provider_background_submission_count` or
+`invalid_provider_webhook_receipt_count`; a nonzero count keeps runtime
+readiness closed. No restore path performs provider I/O.
+
+Hosts can use the new lifecycle-aware APIs:
+
+- `retrieve_classified` returns `Observed`, a private retryable failure proof,
+  or a private recovery-required failure proof after the exact retrieval egress
+  marker has been durably bound. Existing `retrieve` remains available and maps
+  either classified transport failure to `AiError::ProviderFailed`.
+- `handle_retrieval_failure` consumes that exact proof. Timeout, rate limiting,
+  and temporary unavailability release under bounded exponential backoff;
+  credential/configuration/validation/rejection failures close for recovery.
+- `release_nonterminal` releases exact `queued` or `in_progress` observations.
+  `close_expired` closes a bounded batch past its immutable response deadline.
+- `OrmAiOpenAiBackgroundTerminalService::commit` consumes a terminal
+  observation and atomically commits authoritative usage, budget/counters,
+  optional protected completed output, checkpoint/session/inbox events,
+  receipt states, immutable outcome, audit, submission, and run. Failed,
+  incomplete, and cancelled responses never create assistant output.
+
+The terminal service must use the deployment's immutable
+`AiProviderUsageAccounting`, current `AiRuntime`, content-protection policy,
+trusted clock, output bounds, principal-freshness bound, and transaction retry
+bound. Do not clear an uncertain reservation, synthesize a receipt, or complete
+a parked run manually. Exact replay returns `AlreadyReconciled` only after
+validating the already-durable graph; conflicting evidence becomes
+`RecoveryRequired`.
+
+This is an additive public Rust API and private persistence/behavioral contract
+change. It changes no public GraphQL SDL and requires no application-domain
+data migration. Regenerate `Cargo.lock`, rehearse the generated prior-to-current
+migration in test-owned stores, and rerun the backend-specific release matrix.
+
 ## Unreleased: exact OpenAI background retrieval boundary (crate 0.52.0 to 0.53.0; schema 0.48.0 to 0.49.0)
 
 Apply AI schema module `0.49.0` while provider workers, webhook intake,

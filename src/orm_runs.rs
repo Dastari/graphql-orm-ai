@@ -341,6 +341,7 @@ pub struct OrmAiRunService {
     limits: AiRunServiceLimits,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedProviderBlock {
     pub id: Uuid,
     pub kind: String,
@@ -349,6 +350,7 @@ pub(crate) struct PreparedProviderBlock {
     pub line_count: i64,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedProviderOutput {
     pub message_id: Uuid,
     pub event_id: Uuid,

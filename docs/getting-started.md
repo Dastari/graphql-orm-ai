@@ -345,6 +345,8 @@ OpenAI file deletion is implemented through the host-only attachment cleanup
 worker; see the [attachment guide](attachments.md). Exact raw-body OpenAI
 webhook verification and content-free durable receipt intake are implemented,
 and exact initial background submission can park a response-bound run without
-a lease. Receipt-to-submission matching, response retrieval, settlement, and
-run reconciliation remain closed; see the [webhook intake guide](openai-webhooks.md)
-and [background submission guide](openai-background.md).
+a lease. Exact optional receipt matching, fixed-destination response retrieval,
+classified bounded retry/recovery, exact-once settlement, protected output,
+and atomic terminal run reconciliation are implemented; see the
+[webhook intake guide](openai-webhooks.md) and
+[background submission guide](openai-background.md).

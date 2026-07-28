@@ -97,18 +97,15 @@ run, profile, response, and budget identities from `Debug`.
 
 ## Terminal reconciliation design
 
-Status: implementation in progress. Schema module `0.49.0` reserves the
-content-free claim, retry, deadline, current retrieval-egress, reconciliation,
-and terminal-reference fields described below. Newly accepted submissions
-initialize the counters, next-attempt time, and a fixed deadline. A bounded
-generated-ORM worker now claims/reclaims, heartbeats, and voluntarily releases
-the exact reconciliation fence. A separate current-authority retrieval service
-now audits and binds a fresh exact egress allow before a fixed-destination GET,
-and the native adapter returns only a bounded normalized observation. Receipt
-selection, nonterminal observation release/backoff, deadline/exhaustion
-closure, budget settlement, protected terminal persistence, and the terminal
-transaction are not implemented yet, so the current crate still cannot
-complete an accepted background run.
+Status: implemented in schema module `0.50.0`. Newly accepted submissions
+initialize bounded claim counters, next-attempt time, and a fixed deadline. A
+generated-ORM worker claims/reclaims and heartbeats the exact fence,
+deterministically matches at most one exact verified receipt, and closes
+nonterminal, transport-failure, expiry, and retry-exhaustion paths. A separate
+current-authority retrieval service audits and binds a fresh exact egress allow
+before a fixed-destination GET. The terminal service rehydrates current
+authority again, prices usage, protects completed output, and commits the
+complete graph in one generated-ORM state-machine transaction.
 
 OpenAI's background guide says to poll the exact Responses GET endpoint while
 the response is `queued` or `in_progress`; leaving those states is terminal.
@@ -169,8 +166,7 @@ candidate and atomically:
 6. CAS-increments the reconciliation generation and installs an owner and
    expiry.
 
-The current `OrmAiOpenAiBackgroundReconciliationService` implements the
-content-free validation and fence operations in steps 1 through 4 and 6.
+`OrmAiOpenAiBackgroundReconciliationService` implements all six steps.
 `AiOpenAiBackgroundReconciliationLimits` bounds the scan, lease, pre-retrieval
 release delay/count, and serialization retries. Its opaque
 `AiOpenAiBackgroundReconciliationClaim` exposes only safe scheduling and
@@ -184,8 +180,10 @@ that method is not a valid state transition. The current retrieval service
 instead binds the allow ID as the durable transport marker. If no later
 terminal service consumes its in-memory result, expiry permits only a
 higher-generation reclaim; reclaim validates the prior allow and clears the
-stale marker before another retrieval. Receipt selection, nonterminal release,
-and every terminal operation remain closed.
+stale marker before another retrieval. `release_nonterminal` consumes only an
+exact retrieved `queued` or `in_progress` observation.
+`handle_retrieval_failure` consumes a private generation-bound classified
+failure proof, and `close_expired` closes a bounded deadline-expired batch.
 
 A receipt with no response ID, an unknown response ID, or no exact profile match
 cannot select a run. It remains content-free receipt work and is closed under
@@ -221,10 +219,12 @@ absolute destination from stored data, or send the original prompt again. It
 resolves the profile credential just in time for each attempt, uses a timeout
 strictly shorter than the reconciliation lease, and bounds the complete JSON
 body by both a compiled hard maximum and deployment output limits. Retrieval is
-read-only. Timeouts, rate limits, server errors, and an early not-found leave
-the retrieval-marked claim to expire and be reclaimed under a higher generation
-in this increment; policy-classified bounded backoff remains part of the next
-reconciliation step. The create request is never repeated.
+read-only. `retrieve_classified` returns a private retryable proof for timeout,
+rate limiting, server/transport unavailability, and an early not-found.
+Credential, configuration, validation, capability, and rejection failures
+return a private recovery-required proof. The reconciliation service consumes
+those proofs to release under bounded backoff or atomically close the parked
+graph. The create request is never repeated.
 
 Every observation must revalidate `object`, exact response ID, positive original
 creation time, `background: true`, exact model, exact maximum output tokens,
@@ -246,12 +246,13 @@ needed by the pinned pricing policy. Unknown output item types, unknown terminal
 status, inconsistent metadata, malformed usage, or truncated JSON becomes
 `RecoveryRequired`, never forward-compatible assistant content.
 
-The implemented normalizer exposes completed visible content as bounded
+The normalizer exposes completed visible content as bounded
 provider-neutral text, reasoning-summary, citation, usage, and completion
 events. Refusal content is retained only as visible text. Failed, incomplete,
 cancelled, and nonterminal observations expose no output events. This
 normalization is not terminal mutation authority: the result remains in memory
-until the later budget/protection/transaction slice is complete.
+until `OrmAiOpenAiBackgroundTerminalService::commit` revalidates and commits
+the exact graph.
 
 If a linked receipt exists, its terminal event kind must agree with the
 retrieved terminal status. A terminal event followed briefly by a nonterminal
@@ -261,14 +262,14 @@ source of output and usage truth.
 
 ### Terminal transaction
 
-Pricing settlement and content protection may execute outside the database
+Pricing settlement and content protection execute outside the database
 transaction, but they produce only in-memory prepared values bound to the
 submission, response, budget, principal, scope, and reconciliation fence.
 Immediately before mutation, the service rehydrates the current principal again
 and repeats current session/scope access and protection-policy checks. If that
 proof changed or expired, retrieved content is discarded and never persisted.
-A redacted fail-closed recovery operation may close the claim, but it cannot act
-on behalf of the stale principal or store provider output.
+The service writes nothing when this proof is stale or denied; the claim remains
+fenced for bounded expiry/reclaim and no provider content is persisted.
 
 One generated-ORM `StateMachine` transaction is the only successful terminal
 commit boundary. It reloads and revalidates the complete claim, run, session,
@@ -299,7 +300,7 @@ absent. `ReleaseUnused` is forbidden after the background create boundary.
 
 | Condition | Durable result |
 | --- | --- |
-| Current principal, session access, egress, retention, or protection policy denied before GET | No retrieval; redacted `recovery_required`, budget remains uncertain |
+| Current principal, session access, egress, retention, or protection policy denied before GET | No retrieval or mutation; bounded claim release/expiry policy applies and budget remains uncertain |
 | GET timeout, 429, 5xx, or bounded early not-found | Release to `waiting_provider` with backoff until retry/retention cutoff |
 | `queued` or `in_progress` | Release to `waiting_provider`; no output or budget mutation |
 | Exact `completed` plus valid usage/output | One atomic `completed` commit |
@@ -329,7 +330,7 @@ Invalid or partial graphs increment
 `RecoveryRequired` remains operator-visible but never automatically retrieves,
 releases budget, or changes terminal classification.
 
-Focused tests must cover receipt-present and polling-only success, delayed and
+Focused tests cover receipt-present and polling-only success, delayed and
 duplicate receipts, concurrent and expired claims, terminal idempotency,
 transport retries, every reviewed provider status, every binding mismatch,
 revoked/expired authority before GET and before commit, egress/retention/policy

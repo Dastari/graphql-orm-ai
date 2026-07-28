@@ -467,7 +467,7 @@ fn verify_signature(
     }
 }
 
-fn webhook_receipt_identity(profile_id: &str, event_id: &str) -> (String, uuid::Uuid) {
+pub(crate) fn webhook_receipt_identity(profile_id: &str, event_id: &str) -> (String, uuid::Uuid) {
     let mut hasher = Sha256::new();
     hasher.update(b"graphql-orm-ai/openai-webhook-receipt/v1\0");
     hasher.update(profile_id.as_bytes());

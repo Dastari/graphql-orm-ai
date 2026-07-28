@@ -21,7 +21,7 @@ and deliberately incomplete inventory.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.49.0`) and 40 private records
+- AI schema-module identity (currently version `0.50.0`) and 40 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, background submissions,
@@ -215,6 +215,21 @@ and deliberately incomplete inventory.
   workers, expired reclaim, stale proofs, deadline/retry bounds, missing legacy
   deadlines, and malformed support graphs are covered by in-memory SQLite
   tests. The opaque claim grants no provider or terminal authority.
+- Complete exact OpenAI background terminal reconciliation. Claiming
+  deterministically links at most one exact verified receipt through a bounded
+  composite index but polling remains independently live. Retrieval rehydrates
+  current principal/access/protection authority, audits and binds one exact
+  fixed-destination response egress decision, and returns only bounded reviewed
+  status/output/usage. Private classified failure proofs drive retryable
+  exponential backoff or recovery closure; queued/in-progress observations
+  release similarly, and bounded expiry closes immutable deadline failures.
+  Terminal commit rehydrates and rechecks authority, applies immutable host
+  pricing, protects completed output, then atomically commits exact-once
+  budget/counters/usage, optional message/blocks/checkpoint/session/inbox
+  events, receipt states, attempt outcome, audit, submission, and run. Failed,
+  incomplete, and cancelled responses settle usage without output; conflicts
+  preserve uncertain capacity for recovery. Exact replay validates the durable
+  terminal graph instead of repeating settlement or output.
 - Provider-neutral exact attachment reopening with private-field request and
   resolved payloads, deployment raw-byte/cardinality limits, current owner/
   session/scope checks, released/clean/message-linked enforcement, object
@@ -465,31 +480,8 @@ and deliberately incomplete inventory.
 - Per-item proposal review and application-specific proposal rendering. Whole
   structured payload accept/edit/reject and trusted post-mutation outcome
   linkage are implemented.
-- OpenAI receipt-to-submission/run reconciliation, provider output retrieval,
-  and provider-persistent file upload/search, plus richer provider
-  file-type preflight and full built-in result normalization. Exact raw-body
-  webhook verification, durable content-free receipt intake, and exact initial
-  background submission and independently fenced content-free claim runtime
-  are implemented. The separate current-authority retrieval service now
-  validates the complete claim graph, rehydrates current scope/session and
-  protection authority, audits and CAS-binds an exact egress allow, and calls
-  only the native fixed-destination GET with an opaque response binding and
-  lease-shorter timeout. The adapter bounds the entire response and visible
-  content, validates all immutable metadata and terminal usage, normalizes only
-  reviewed text/refusal/reasoning-summary/citation shapes, and rejects tools,
-  built-ins, unknown output, profile swaps, and overflows. The result remains
-  in memory, so accepted runs and receipts remain inert after observation. The
-  complete atomic
-  terminal-graph, crash, receipt-redelivery, and restore contract is now
-  documented in the
-  [background guide](openai-background.md#terminal-reconciliation-design) and
-  [webhook guide](openai-webhooks.md#role-in-terminal-reconciliation). Schema
-  `0.49.0` reserves and initializes the bounded claim generation/owner/lease,
-  retry/deadline, current retrieval-egress, reconciliation time, and terminal
-  message facts. Receipt matching, classified nonterminal release/backoff,
-  deadline/exhaustion closure, budget settlement, protected output, and
-  terminal persistence remain.
-  Exact inline image/file input remains
+- Provider-persistent file upload/search, plus richer provider file-type
+  preflight and full built-in result normalization. Exact inline image/file input remains
   independently gated by host MIME policy, budget, egress, current authority,
   and reopening limits.
 - Privileged uncertain-call recovery and complete retention/purge application.
@@ -524,11 +516,8 @@ and deliberately incomplete inventory.
 The detailed sequence and acceptance gates are maintained in the
 [completion plan](completion-plan.md). The leading runtime priorities are:
 
-1. Continue the OpenAI background lifecycle after exact submission, receipt
-   intake, fenced claiming, and fixed-destination normalized retrieval: add
-   exact optional receipt selection plus policy-classified nonterminal
-   release/backoff, then re-prove current authority, budget, retention, usage,
-   and provider output before the atomic terminal mutation.
+1. Finish the `0.54.0` PostgreSQL/restore/release-matrix checkpoint for the
+   complete OpenAI background terminal lifecycle.
 2. Add provider-persistent file upload/search behind independent authority,
    egress, budget, fencing, retention, and restore proofs, building on exact
    profile-bound deletion. Extend authoritative unit pricing only when each

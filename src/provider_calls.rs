@@ -968,6 +968,28 @@ pub struct AiProviderUsageObservation {
 }
 
 impl AiProviderUsageObservation {
+    #[cfg(all(
+        any(feature = "sqlite", feature = "postgres"),
+        feature = "provider-openai"
+    ))]
+    pub(crate) fn for_background_response(
+        scope: AiScope,
+        model: impl Into<String>,
+        pricing_policy_version: impl Into<String>,
+        usage: crate::ProviderBackgroundUsage,
+    ) -> Self {
+        Self {
+            scope,
+            provider_kind: ProviderKind::OpenAi,
+            model: model.into(),
+            pricing_policy_version: pricing_policy_version.into(),
+            input_tokens: usage.input_tokens(),
+            output_tokens: usage.output_tokens(),
+            cached_input_tokens: usage.cached_input_tokens(),
+            builtin_usage: AiProviderBuiltinUsage::default(),
+        }
+    }
+
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn test_observation(
@@ -2292,6 +2314,8 @@ mod tests {
         coordinator_checkpoint_hash,
     };
     use crate::persistence::*;
+    #[cfg(feature = "provider-openai")]
+    use crate::providers::MockBackgroundRetrievalFailure;
     use crate::*;
 
     #[cfg(feature = "provider-openai")]
@@ -3281,6 +3305,23 @@ mod tests {
         limits: AiOpenAiBackgroundReconciliationLimits,
         access_policy: Arc<dyn AiAccessPolicy>,
     ) -> BackgroundReconciliationFixture {
+        background_reconciliation_fixture_with_observation(
+            windows,
+            limits,
+            access_policy,
+            ProviderBackgroundObservation::new(ProviderBackgroundStatus::Queued, Vec::new(), None)
+                .expect("queued observation should validate"),
+        )
+        .await
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn background_reconciliation_fixture_with_observation(
+        windows: AiOpenAiBackgroundReconciliationWindows,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        observation: ProviderBackgroundObservation,
+    ) -> BackgroundReconciliationFixture {
         let provider_created_at = OffsetDateTime::now_utc().unix_timestamp();
         let mock = MockProvider::new(Vec::new())
             .with_kind(ProviderKind::OpenAi)
@@ -3297,14 +3338,44 @@ mod tests {
                 "queued",
                 provider_created_at,
             )
-            .with_background_observation(
-                ProviderBackgroundObservation::new(
-                    ProviderBackgroundStatus::Queued,
-                    Vec::new(),
-                    None,
-                )
-                .expect("queued observation should validate"),
-            );
+            .with_background_observation(observation);
+        background_reconciliation_fixture_with_mock(windows, limits, access_policy, mock).await
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn background_reconciliation_fixture_with_retrieval_failure(
+        windows: AiOpenAiBackgroundReconciliationWindows,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+        failure: MockBackgroundRetrievalFailure,
+    ) -> BackgroundReconciliationFixture {
+        let provider_created_at = OffsetDateTime::now_utc().unix_timestamp();
+        let mock = MockProvider::new(Vec::new())
+            .with_kind(ProviderKind::OpenAi)
+            .with_capabilities(ProviderCapabilities {
+                streaming: true,
+                structured_output: true,
+                background: true,
+                provider_retained_continuation: true,
+                local: true,
+                ..ProviderCapabilities::default()
+            })
+            .with_background_submission(
+                "resp_background_reconciliation_1",
+                "queued",
+                provider_created_at,
+            )
+            .with_background_retrieval_failure(failure);
+        background_reconciliation_fixture_with_mock(windows, limits, Arc::new(AllowAccess), mock)
+            .await
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn background_reconciliation_fixture_with_mock(
+        windows: AiOpenAiBackgroundReconciliationWindows,
+        limits: AiOpenAiBackgroundReconciliationLimits,
+        access_policy: Arc<dyn AiAccessPolicy>,
+        mock: MockProvider,
+    ) -> BackgroundReconciliationFixture {
         let fixture = fixture_with_provider_and_access(mock, access_policy).await;
         let submission_service = OrmAiOpenAiBackgroundSubmissionService::new(
             fixture.run_service.clone(),
@@ -3343,6 +3414,59 @@ mod tests {
             clock,
             service,
         }
+    }
+
+    #[cfg(feature = "provider-openai")]
+    async fn insert_background_receipt(
+        test: &BackgroundReconciliationFixture,
+        provider_profile_id: &str,
+        provider_event_id: &str,
+        provider_event_kind: &str,
+        provider_response_id: &str,
+    ) -> AiProviderWebhookReceiptRecordKey {
+        let (receipt_key, id) =
+            crate::providers::webhook_receipt_identity(provider_profile_id, provider_event_id);
+        let key = AiProviderWebhookReceiptRecordKey {
+            id,
+            provider_kind: "openai".to_owned(),
+        };
+        let create_key = key.clone();
+        let provider_profile_id = provider_profile_id.to_owned();
+        let provider_event_id = provider_event_id.to_owned();
+        let provider_event_kind = provider_event_kind.to_owned();
+        let provider_response_id = provider_response_id.to_owned();
+        let now = test.clock.now().unix_timestamp();
+        test.service
+            .database()
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.insert::<AiProviderWebhookReceiptRecord>(
+                        CreateAiProviderWebhookReceiptRecordInput {
+                            id: create_key.id,
+                            receipt_key,
+                            provider_kind: create_key.provider_kind,
+                            provider_profile_id,
+                            provider_event_id,
+                            provider_event_kind,
+                            provider_created_at: now,
+                            provider_response_id: Some(provider_response_id),
+                            run_id: None,
+                            attempt_id: None,
+                            signature_verified: true,
+                            state: "pending_reconciliation".to_owned(),
+                            safe_error_code: None,
+                            received_at: now,
+                            processed_at: None,
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("verified background receipt should insert");
+        key
     }
 
     #[cfg(feature = "provider-openai")]
@@ -3699,6 +3823,121 @@ mod tests {
 
     #[cfg(feature = "provider-openai")]
     #[tokio::test]
+    async fn reconciliation_claim_matches_only_the_exact_verified_receipt() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let wrong_profile = insert_background_receipt(
+            &test,
+            "other-profile",
+            "evt_wrong_profile",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        let wrong_response = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_wrong_response",
+            "response_completed",
+            "resp_other_background",
+        )
+        .await;
+        let exact = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_exact_background",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+
+        let claim = test
+            .service
+            .claim_next("reconciler-receipt")
+            .await
+            .expect("receipt-backed claim should not fail")
+            .expect("accepted submission should be eligible");
+        let exact_receipt =
+            AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &exact)
+                .await
+                .expect("exact receipt should query")
+                .expect("exact receipt should exist");
+        assert_eq!(exact_receipt.state, "matched_pending");
+        assert_eq!(exact_receipt.run_id, Some(claim.run_id().0));
+        assert_eq!(exact_receipt.attempt_id, Some(claim.attempt_id()));
+        for key in [wrong_profile, wrong_response] {
+            let receipt = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &key)
+                .await
+                .expect("mismatched receipt should query")
+                .expect("mismatched receipt should exist");
+            assert_eq!(receipt.state, "pending_reconciliation");
+            assert!(receipt.run_id.is_none());
+            assert!(receipt.attempt_id.is_none());
+        }
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn reclaim_retains_one_match_and_leaves_duplicate_receipts_pending() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let first = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_first_terminal",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        let initial = test
+            .service
+            .claim_next("reconciler-first-receipt")
+            .await
+            .expect("initial claim should not fail")
+            .expect("accepted submission should be eligible");
+        let duplicate = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_duplicate_terminal",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.clock.advance_seconds(61);
+        let replacement = test
+            .service
+            .claim_next("reconciler-receipt-reclaim")
+            .await
+            .expect("expired claim should be reclaimable")
+            .expect("replacement claim should exist");
+        assert_eq!(
+            replacement.reconciliation_generation(),
+            initial.reconciliation_generation() + 1
+        );
+        let first = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &first)
+            .await
+            .expect("first receipt should query")
+            .expect("first receipt should exist");
+        assert_eq!(first.state, "matched_pending");
+        assert_eq!(first.run_id, Some(replacement.run_id().0));
+        let duplicate =
+            AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &duplicate)
+                .await
+                .expect("duplicate receipt should query")
+                .expect("duplicate receipt should exist");
+        assert_eq!(duplicate.state, "pending_reconciliation");
+        assert!(duplicate.run_id.is_none());
+        assert!(duplicate.attempt_id.is_none());
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
     async fn background_retrieval_binds_current_egress_before_provider_io_and_reclaims_after_expiry()
      {
         let test = background_reconciliation_fixture(
@@ -3798,6 +4037,630 @@ mod tests {
         .expect("submission should exist");
         assert!(submission.retrieval_egress_decision_id.is_none());
         assert!(!format!("{observation:?}").contains("resp_background_reconciliation_1"));
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn nonterminal_retrieval_releases_with_bounded_backoff() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let receipt = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_nonterminal_hint",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-nonterminal")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("queued response should retrieve");
+        test.service
+            .release_nonterminal(&observation)
+            .await
+            .expect("nonterminal observation should release");
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "waiting_provider");
+        assert_eq!(submission.provider_status.as_deref(), Some("queued"));
+        assert_eq!(submission.reconciliation_retry_count, 1);
+        assert_eq!(
+            submission.reconciliation_next_attempt_at,
+            Some(test.clock.now().unix_timestamp() + 1)
+        );
+        assert!(submission.reconciliation_owner.is_none());
+        assert!(submission.reconciliation_lease_expires_at.is_none());
+        assert!(submission.retrieval_egress_decision_id.is_none());
+        let receipt = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &receipt)
+            .await
+            .expect("matched receipt should query")
+            .expect("matched receipt should exist");
+        assert_eq!(receipt.state, "matched_pending");
+        assert!(
+            test.service
+                .claim_next("reconciler-too-early")
+                .await
+                .expect("early claim scan should succeed")
+                .is_none()
+        );
+        test.clock.advance_seconds(1);
+        let replacement = test
+            .service
+            .claim_next("reconciler-after-backoff")
+            .await
+            .expect("scheduled claim should not fail")
+            .expect("submission should be eligible after backoff");
+        assert_eq!(replacement.retry_count(), 1);
+        assert_eq!(
+            replacement.reconciliation_generation(),
+            claim.reconciliation_generation() + 1
+        );
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn retryable_retrieval_failure_releases_exact_generation_with_backoff() {
+        let test = background_reconciliation_fixture_with_retrieval_failure(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            MockBackgroundRetrievalFailure::Unavailable,
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-unavailable")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let attempt = retrieval
+            .retrieve_classified(&claim)
+            .await
+            .expect("pre-transport retrieval validation should succeed");
+        let failure = match attempt {
+            AiOpenAiBackgroundRetrievalAttempt::Retryable(failure) => failure,
+            other => panic!("unexpected classified retrieval: {other:?}"),
+        };
+        assert_eq!(
+            failure.safe_error_code(),
+            "provider_response_retrieval_unavailable"
+        );
+        assert!(!format!("{failure:?}").contains(test.accepted.provider_response_id()));
+        test.service
+            .handle_retrieval_failure(&failure)
+            .await
+            .expect("retryable transport failure should release");
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "waiting_provider");
+        assert_eq!(submission.reconciliation_retry_count, 1);
+        assert_eq!(
+            submission.reconciliation_next_attempt_at,
+            Some(test.clock.now().unix_timestamp() + 1)
+        );
+        assert!(submission.reconciliation_owner.is_none());
+        assert!(submission.reconciliation_lease_expires_at.is_none());
+        assert!(submission.retrieval_egress_decision_id.is_none());
+        let budget = AiBudgetReservationRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(budget.state, "uncertain");
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn nonretryable_retrieval_failure_closes_for_recovery() {
+        let test = background_reconciliation_fixture_with_retrieval_failure(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            MockBackgroundRetrievalFailure::CredentialUnavailable,
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-credential-failure")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let attempt = retrieval
+            .retrieve_classified(&claim)
+            .await
+            .expect("pre-transport retrieval validation should succeed");
+        let failure = match attempt {
+            AiOpenAiBackgroundRetrievalAttempt::RecoveryRequired(failure) => failure,
+            other => panic!("unexpected classified retrieval: {other:?}"),
+        };
+        assert_eq!(
+            failure.safe_error_code(),
+            "provider_response_credential_unavailable"
+        );
+        test.service
+            .handle_retrieval_failure(&failure)
+            .await
+            .expect("credential failure should close for recovery");
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "recovery_required");
+        assert_eq!(
+            submission.safe_error_code.as_deref(),
+            Some("provider_response_credential_unavailable")
+        );
+        assert!(submission.retrieval_egress_decision_id.is_some());
+        let run = AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("provider_response_credential_unavailable")
+        );
+        let budget = AiBudgetReservationRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(budget.state, "uncertain");
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn retrieval_failure_classification_covers_rate_limit_and_rejection() {
+        for (provider_failure, expected_code, retryable) in [
+            (
+                MockBackgroundRetrievalFailure::RateLimited,
+                "provider_response_retrieval_rate_limited",
+                true,
+            ),
+            (
+                MockBackgroundRetrievalFailure::Rejected,
+                "provider_response_retrieval_rejected",
+                false,
+            ),
+        ] {
+            let test = background_reconciliation_fixture_with_retrieval_failure(
+                AiOpenAiBackgroundReconciliationWindows::default(),
+                AiOpenAiBackgroundReconciliationLimits::default(),
+                provider_failure,
+            )
+            .await;
+            test.clock.advance_seconds(10);
+            let claim = test
+                .service
+                .claim_next("reconciler-classification")
+                .await
+                .expect("claim should not fail")
+                .expect("submission should be eligible");
+            let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+                test.fixture.database.clone(),
+                test.fixture.runtime.clone(),
+                test.fixture.audit.clone(),
+                Arc::new(test.clock.clone()),
+                AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                    .expect("retrieval route should validate"),
+                AiOpenAiBackgroundRetrievalLimits::default(),
+            );
+            let attempt = retrieval
+                .retrieve_classified(&claim)
+                .await
+                .expect("pre-transport retrieval validation should succeed");
+            let failure = match (attempt, retryable) {
+                (AiOpenAiBackgroundRetrievalAttempt::Retryable(failure), true)
+                | (AiOpenAiBackgroundRetrievalAttempt::RecoveryRequired(failure), false) => failure,
+                (other, _) => panic!("unexpected classified retrieval: {other:?}"),
+            };
+            assert_eq!(failure.safe_error_code(), expected_code);
+            assert!(!format!("{failure:?}").contains(test.accepted.provider_response_id()));
+        }
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn terminal_completion_commits_one_protected_exactly_once_graph() {
+        let usage = ProviderBackgroundUsage::new(12, 5, 3);
+        let test = background_reconciliation_fixture_with_observation(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(AllowAccess),
+            ProviderBackgroundObservation::new(
+                ProviderBackgroundStatus::Completed,
+                vec![ProviderEvent::TextDelta {
+                    text: "terminal background output".to_owned(),
+                }],
+                Some(usage),
+            )
+            .expect("terminal observation should validate"),
+        )
+        .await;
+        let receipt = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_000_terminal_completion",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        let duplicate_receipt = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_999_terminal_duplicate",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-terminal")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("terminal response should retrieve");
+        let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(test.clock.clone()),
+            AiProviderOutputLimits::default(),
+            Duration::minutes(5),
+        )
+        .expect("terminal service limits should validate");
+        let outcome = terminal
+            .commit(&observation)
+            .await
+            .expect("terminal graph should commit");
+        let message_id = match outcome {
+            AiOpenAiBackgroundTerminalOutcome::Completed { message_id } => message_id,
+            other => panic!("unexpected terminal outcome: {other:?}"),
+        };
+        assert_eq!(
+            terminal
+                .commit(&observation)
+                .await
+                .expect("exact terminal retry should validate"),
+            AiOpenAiBackgroundTerminalOutcome::AlreadyReconciled
+        );
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "completed");
+        assert_eq!(submission.provider_status.as_deref(), Some("completed"));
+        assert_eq!(submission.terminal_message_id, Some(message_id));
+        assert!(submission.reconciled_at.is_some());
+        let run = AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::Completed.as_str());
+        assert_eq!(run.latest_checkpoint_id, Some(message_id));
+        let budget = AiBudgetReservationRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(budget.state, "committed");
+        assert_eq!(budget.actual_input_tokens, Some(12));
+        assert_eq!(budget.actual_cached_input_tokens, Some(3));
+        assert_eq!(budget.actual_output_tokens, Some(5));
+        assert_eq!(budget.actual_runs, Some(1));
+        let message = AiMessageRecord::find_by_id(&test.fixture.database, &message_id)
+            .await
+            .expect("message lookup should succeed")
+            .expect("assistant message should exist");
+        assert_eq!(message.message_role, "assistant");
+        assert_eq!(message.completion_state, "complete");
+        assert_eq!(message.block_count, 1);
+        let receipt = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &receipt)
+            .await
+            .expect("receipt should query")
+            .expect("receipt should exist");
+        assert!(
+            matches!(receipt.state.as_str(), "processed" | "duplicate_terminal"),
+            "one exact receipt is primary and the other is a duplicate"
+        );
+        assert!(receipt.processed_at.is_some());
+        let duplicate =
+            AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &duplicate_receipt)
+                .await
+                .expect("duplicate receipt should query")
+                .expect("duplicate receipt should exist");
+        assert!(
+            matches!(duplicate.state.as_str(), "processed" | "duplicate_terminal"),
+            "one exact receipt is primary and the other is a duplicate"
+        );
+        assert_ne!(receipt.state, duplicate.state);
+        assert_eq!(duplicate.run_id, Some(test.fixture.lease.run_id().0));
+        assert_eq!(duplicate.attempt_id, Some(test.fixture.lease.attempt_id()));
+        assert_eq!(test.fixture.mock.request_count(), 2);
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn conflicting_matched_terminal_receipt_closes_without_budget_release() {
+        let test = background_reconciliation_fixture_with_observation(
+            AiOpenAiBackgroundReconciliationWindows::default(),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+            Arc::new(AllowAccess),
+            ProviderBackgroundObservation::new(
+                ProviderBackgroundStatus::Completed,
+                vec![ProviderEvent::TextDelta {
+                    text: "must not persist".to_owned(),
+                }],
+                Some(ProviderBackgroundUsage::new(4, 2, 0)),
+            )
+            .expect("terminal observation should validate"),
+        )
+        .await;
+        let receipt = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_conflicting_terminal",
+            "response_failed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.clock.advance_seconds(10);
+        let claim = test
+            .service
+            .claim_next("reconciler-conflicting-receipt")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            test.fixture.audit.clone(),
+            Arc::new(test.clock.clone()),
+            AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                .expect("retrieval route should validate"),
+            AiOpenAiBackgroundRetrievalLimits::default(),
+        );
+        let observation = retrieval
+            .retrieve(&claim)
+            .await
+            .expect("authoritative response should retrieve");
+        let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+            test.fixture.database.clone(),
+            test.fixture.runtime.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(test.clock.clone()),
+            AiProviderOutputLimits::default(),
+            Duration::minutes(5),
+        )
+        .expect("terminal service limits should validate");
+        assert_eq!(
+            terminal
+                .commit(&observation)
+                .await
+                .expect("receipt conflict should close deterministically"),
+            AiOpenAiBackgroundTerminalOutcome::RecoveryRequired
+        );
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "recovery_required");
+        assert_eq!(
+            submission.safe_error_code.as_deref(),
+            Some("provider_terminal_receipt_conflict")
+        );
+        assert!(submission.terminal_message_id.is_none());
+        let budget = AiBudgetReservationRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should exist");
+        assert_eq!(budget.state, "uncertain");
+        assert!(budget.actual_runs.is_none());
+        let receipt = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &receipt)
+            .await
+            .expect("receipt should query")
+            .expect("receipt should exist");
+        assert_eq!(receipt.state, "recovery_required");
+        assert_eq!(
+            receipt.safe_error_code.as_deref(),
+            Some("provider_terminal_receipt_conflict")
+        );
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn failed_incomplete_and_cancelled_responses_commit_without_output() {
+        for (status, receipt_kind, expected_submission_state, expected_error) in [
+            (
+                ProviderBackgroundStatus::Failed,
+                "response_failed",
+                "failed",
+                "provider_response_failed",
+            ),
+            (
+                ProviderBackgroundStatus::Incomplete,
+                "response_incomplete",
+                "failed",
+                "provider_response_incomplete",
+            ),
+            (
+                ProviderBackgroundStatus::Cancelled,
+                "response_cancelled",
+                "cancelled",
+                "provider_response_cancelled",
+            ),
+        ] {
+            let test = background_reconciliation_fixture_with_observation(
+                AiOpenAiBackgroundReconciliationWindows::default(),
+                AiOpenAiBackgroundReconciliationLimits::default(),
+                Arc::new(AllowAccess),
+                ProviderBackgroundObservation::new(
+                    status,
+                    Vec::new(),
+                    Some(ProviderBackgroundUsage::new(7, 1, 2)),
+                )
+                .expect("terminal observation should validate"),
+            )
+            .await;
+            insert_background_receipt(
+                &test,
+                test.accepted.provider_profile_id(),
+                &format!("evt_{expected_error}"),
+                receipt_kind,
+                test.accepted.provider_response_id(),
+            )
+            .await;
+            test.clock.advance_seconds(10);
+            let claim = test
+                .service
+                .claim_next(&format!("reconciler-{expected_submission_state}"))
+                .await
+                .expect("claim should not fail")
+                .expect("submission should be eligible");
+            let retrieval = OrmAiOpenAiBackgroundRetrievalService::new(
+                test.fixture.database.clone(),
+                test.fixture.runtime.clone(),
+                test.fixture.audit.clone(),
+                Arc::new(test.clock.clone()),
+                AiOpenAiBackgroundRetrievalRoute::new("mock-profile", "local-mock", "retrieval-v1")
+                    .expect("retrieval route should validate"),
+                AiOpenAiBackgroundRetrievalLimits::default(),
+            );
+            let observation = retrieval
+                .retrieve(&claim)
+                .await
+                .expect("terminal response should retrieve");
+            let terminal = OrmAiOpenAiBackgroundTerminalService::new(
+                test.fixture.database.clone(),
+                test.fixture.runtime.clone(),
+                Arc::new(TestUsageAccounting),
+                Arc::new(test.clock.clone()),
+                AiProviderOutputLimits::default(),
+                Duration::minutes(5),
+            )
+            .expect("terminal service limits should validate");
+            let outcome = terminal
+                .commit(&observation)
+                .await
+                .expect("terminal response should commit");
+            match status {
+                ProviderBackgroundStatus::Failed | ProviderBackgroundStatus::Incomplete => {
+                    assert_eq!(outcome, AiOpenAiBackgroundTerminalOutcome::Failed);
+                }
+                ProviderBackgroundStatus::Cancelled => {
+                    assert_eq!(outcome, AiOpenAiBackgroundTerminalOutcome::Cancelled);
+                }
+                _ => unreachable!("test cases are terminal failures or cancellation"),
+            }
+            let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+                &test.fixture.database,
+                &test.accepted.submission_id(),
+            )
+            .await
+            .expect("submission lookup should succeed")
+            .expect("submission should exist");
+            assert_eq!(submission.state, expected_submission_state);
+            assert_eq!(submission.safe_error_code.as_deref(), Some(expected_error));
+            assert!(submission.terminal_message_id.is_none());
+            let run =
+                AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+                    .await
+                    .expect("run lookup should succeed")
+                    .expect("run should exist");
+            assert_eq!(run.error_code.as_deref(), Some(expected_error));
+            let budget = AiBudgetReservationRecord::find_by_id(
+                &test.fixture.database,
+                &test.accepted.budget_reservation_id().0,
+            )
+            .await
+            .expect("budget lookup should succeed")
+            .expect("budget should exist");
+            assert_eq!(budget.state, "committed");
+            assert_eq!(budget.actual_runs, Some(1));
+        }
     }
 
     #[cfg(feature = "provider-openai")]
@@ -4008,7 +4871,7 @@ mod tests {
 
     #[cfg(feature = "provider-openai")]
     #[tokio::test]
-    async fn release_rejects_retry_exhaustion_and_the_response_deadline() {
+    async fn release_closes_retry_exhaustion_and_the_response_deadline() {
         let no_retry_limits = AiOpenAiBackgroundReconciliationLimits::new(
             Duration::seconds(10),
             Duration::minutes(1),
@@ -4028,13 +4891,31 @@ mod tests {
             .await
             .expect("claim should not fail")
             .expect("submission should be eligible");
-        assert!(matches!(
-            no_retry
-                .service
-                .release_before_retrieval(&claim, Duration::seconds(1))
-                .await,
-            Err(AiError::Conflict)
-        ));
+        no_retry
+            .service
+            .release_before_retrieval(&claim, Duration::seconds(1))
+            .await
+            .expect("retry exhaustion should close for recovery");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &no_retry.fixture.database,
+            &no_retry.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "recovery_required");
+        assert_eq!(
+            submission.safe_error_code.as_deref(),
+            Some("provider_response_retry_exhausted")
+        );
+        let run = AiRunRecord::find_by_id(
+            &no_retry.fixture.database,
+            &no_retry.fixture.lease.run_id().0,
+        )
+        .await
+        .expect("run lookup should succeed")
+        .expect("run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
 
         let deadline = background_reconciliation_fixture(
             AiOpenAiBackgroundReconciliationWindows::new(
@@ -4055,13 +4936,126 @@ mod tests {
             claim.reconciliation_lease_expires_at(),
             claim.reconciliation_deadline()
         );
-        assert!(matches!(
-            deadline
-                .service
-                .release_before_retrieval(&claim, Duration::seconds(30))
-                .await,
-            Err(AiError::Conflict)
-        ));
+        deadline
+            .service
+            .release_before_retrieval(&claim, Duration::seconds(30))
+            .await
+            .expect("deadline exhaustion should close for recovery");
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &deadline.fixture.database,
+            &deadline.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "recovery_required");
+        assert_eq!(
+            submission.safe_error_code.as_deref(),
+            Some("provider_response_deadline_exhausted")
+        );
+    }
+
+    #[cfg(feature = "provider-openai")]
+    #[tokio::test]
+    async fn expired_deadline_closure_is_atomic_and_idempotent() {
+        let test = background_reconciliation_fixture(
+            AiOpenAiBackgroundReconciliationWindows::new(
+                Duration::seconds(30),
+                Duration::seconds(30),
+            )
+            .expect("short reconciliation windows should validate"),
+            AiOpenAiBackgroundReconciliationLimits::default(),
+        )
+        .await;
+        let receipt = insert_background_receipt(
+            &test,
+            test.accepted.provider_profile_id(),
+            "evt_expired_deadline",
+            "response_completed",
+            test.accepted.provider_response_id(),
+        )
+        .await;
+        test.service
+            .claim_next("reconciler-expiring")
+            .await
+            .expect("claim should not fail")
+            .expect("submission should be eligible");
+        test.clock.advance_seconds(31);
+        assert_eq!(
+            test.service
+                .close_expired()
+                .await
+                .expect("expired closure should succeed"),
+            1
+        );
+        assert_eq!(
+            test.service
+                .close_expired()
+                .await
+                .expect("repeated closure should be idempotent"),
+            0
+        );
+
+        let submission = AiProviderBackgroundSubmissionRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.submission_id(),
+        )
+        .await
+        .expect("submission lookup should succeed")
+        .expect("submission should exist");
+        assert_eq!(submission.state, "recovery_required");
+        assert_eq!(
+            submission.safe_error_code.as_deref(),
+            Some("provider_response_deadline_expired")
+        );
+        assert!(submission.reconciliation_owner.is_none());
+        assert!(submission.reconciliation_lease_expires_at.is_none());
+        assert!(submission.reconciliation_next_attempt_at.is_none());
+        let run = AiRunRecord::find_by_id(&test.fixture.database, &test.fixture.lease.run_id().0)
+            .await
+            .expect("run lookup should succeed")
+            .expect("run should exist");
+        assert_eq!(run.state, AiRunState::RecoveryRequired.as_str());
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("provider_response_deadline_expired")
+        );
+        let budget = AiBudgetReservationRecord::find_by_id(
+            &test.fixture.database,
+            &test.accepted.budget_reservation_id().0,
+        )
+        .await
+        .expect("budget lookup should succeed")
+        .expect("budget should remain durable");
+        assert_eq!(budget.state, "uncertain");
+        let receipt = AiProviderWebhookReceiptRecord::find_by_key(&test.fixture.database, &receipt)
+            .await
+            .expect("receipt should query")
+            .expect("receipt should exist");
+        assert_eq!(receipt.state, "recovery_required");
+        assert_eq!(
+            receipt.safe_error_code.as_deref(),
+            Some("provider_response_deadline_expired")
+        );
+        let outcomes = test
+            .fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiRunAttemptOutcomeRecord>()
+                        .limit(2)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("attempt outcomes should query");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].outcome_code,
+            "provider_response_deadline_expired"
+        );
     }
 
     #[cfg(feature = "provider-openai")]

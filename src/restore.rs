@@ -95,12 +95,14 @@ pub struct AiRestoreSnapshotFacts {
     pub invalid_context_checkpoint_count: u64,
     /// Provider webhook receipts with invalid deterministic identity,
     /// provider/profile/event/response binding, signature fact, lifecycle
-    /// state, or creation-audit linkage.
+    /// state, exact submission/run/attempt terminal linkage, or creation and
+    /// reconciliation audit linkage.
     #[serde(default)]
     pub invalid_provider_webhook_receipt_count: u64,
     /// Provider background submissions with invalid deterministic identity,
     /// run/attempt/fence/profile/request/budget/egress/response binding,
-    /// lifecycle state, or preparation/acceptance audit linkage.
+    /// lifecycle state, terminal outcome/usage/output/checkpoint/event/receipt
+    /// graph, or preparation/acceptance/reconciliation audit linkage.
     #[serde(default)]
     pub invalid_provider_background_submission_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,

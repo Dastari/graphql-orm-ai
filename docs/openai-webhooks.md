@@ -75,14 +75,15 @@ response belongs to a durable run. Supported events therefore remain
 
 ## Role in terminal reconciliation
 
-Status: design contract only. Receipt intake is implemented, but the matching
-and terminal states below are not.
+Status: implemented for exact matching and terminal closure. Receipt intake
+remains an authority-free boundary.
 
 The background submission, not the receipt, is the unit of work and the only
 claimable row. Polling must complete an exact response even when no webhook
-arrives. A receipt can only accelerate the next-attempt time of a submission
-that the reconciler independently locates by the exact native provider family,
-logical profile, and provider response ID.
+arrives. A receipt is considered only while the reconciler independently
+claims an eligible submission with the exact native provider family, logical
+profile, and provider response ID; receipt intake does not itself schedule or
+claim work.
 
 | Receipt state | Meaning |
 | --- | --- |
@@ -94,13 +95,14 @@ logical profile, and provider response ID.
 | `recovery_required` | Missing response ID, conflicting profile/event facts, status disagreement, or malformed durable linkage requires review |
 | `ignored` | Validly signed event kind is outside the reviewed set |
 
-Linking is one state-machine transaction with the submission claim. It fills
+Linking is one state-machine transaction with the submission claim and uses the
+schema `0.50.0` composite provider/profile/response/state index. It fills
 `run_id` and `attempt_id` only after the deterministic submission, run, original
 fence, response, profile, budget, egress, and session facts all agree. A receipt
 with a missing response ID or an unknown/profile-mismatched response never
-selects the nearest run and never causes a provider GET. Unknown receipts are
-retried only for a short bounded race with acknowledgement persistence, then
-closed as `unmatched` with a redacted audit.
+selects the nearest run and never causes a provider GET. Pending unknown or
+profile-mismatched receipts remain inert; bounded age-based transition to
+`unmatched` is reserved for a separate maintenance policy.
 
 The event kind is a hint about the expected terminal state:
 

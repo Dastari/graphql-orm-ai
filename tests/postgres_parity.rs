@@ -78,6 +78,50 @@ struct LegacyProviderBackgroundSubmissionRecord {
     row_version: i64,
 }
 
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_provider_webhook_receipts",
+    plural = "LegacyGraphqlOrmAiProviderWebhookReceipts",
+    default_sort = "received_at DESC",
+    repository_mutations = true
+)]
+struct LegacyProviderWebhookReceiptRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    #[sortable]
+    id: graphql_orm::uuid::Uuid,
+    receipt_key: String,
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    provider_kind: String,
+    #[filterable(type = "string")]
+    provider_profile_id: String,
+    #[filterable(type = "string")]
+    #[sortable]
+    provider_event_id: String,
+    provider_event_kind: String,
+    provider_created_at: i64,
+    #[filterable(type = "string")]
+    provider_response_id: Option<String>,
+    #[filterable(type = "uuid")]
+    run_id: Option<graphql_orm::uuid::Uuid>,
+    #[filterable(type = "uuid")]
+    attempt_id: Option<graphql_orm::uuid::Uuid>,
+    signature_verified: bool,
+    #[filterable(type = "string")]
+    state: String,
+    safe_error_code: Option<String>,
+    #[sortable]
+    received_at: i64,
+    processed_at: Option<i64>,
+    #[graphql_orm(version, default = "0")]
+    row_version: i64,
+}
+
 struct OwnedPostgres {
     container_id: String,
     owner_token: String,
@@ -486,9 +530,16 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
         .entities()
         .iter()
         .copied()
-        .filter(|entity| entity.table_name != "graphql_orm_ai_provider_background_submissions")
+        .filter(|entity| {
+            !matches!(
+                entity.table_name,
+                "graphql_orm_ai_provider_background_submissions"
+                    | "graphql_orm_ai_provider_webhook_receipts"
+            )
+        })
         .collect::<Vec<_>>();
     prior_entities.push(LegacyProviderBackgroundSubmissionRecord::metadata());
+    prior_entities.push(LegacyProviderWebhookReceiptRecord::metadata());
     let prior_migration = database
         .schema()
         .plan_migration_to_entities(

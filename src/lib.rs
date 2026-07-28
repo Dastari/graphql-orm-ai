@@ -280,11 +280,13 @@ pub mod prelude {
     ))]
     pub use crate::{
         AiOpenAiBackgroundReconciliationClaim, AiOpenAiBackgroundReconciliationLimits,
-        AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundRetrievalLimits,
+        AiOpenAiBackgroundReconciliationWindows, AiOpenAiBackgroundRetrievalAttempt,
+        AiOpenAiBackgroundRetrievalFailure, AiOpenAiBackgroundRetrievalLimits,
         AiOpenAiBackgroundRetrievalObservation, AiOpenAiBackgroundRetrievalRoute,
-        AiOpenAiBackgroundSubmission, AiProviderWebhookReceiptOutcome,
-        OrmAiOpenAiBackgroundReconciliationService, OrmAiOpenAiBackgroundRetrievalService,
-        OrmAiOpenAiBackgroundSubmissionService, OrmAiProviderWebhookReceiptService,
+        AiOpenAiBackgroundSubmission, AiOpenAiBackgroundTerminalOutcome,
+        AiProviderWebhookReceiptOutcome, OrmAiOpenAiBackgroundReconciliationService,
+        OrmAiOpenAiBackgroundRetrievalService, OrmAiOpenAiBackgroundSubmissionService,
+        OrmAiOpenAiBackgroundTerminalService, OrmAiProviderWebhookReceiptService,
         ProviderBackgroundStatus, ProviderBackgroundUsage,
     };
     #[cfg(feature = "provider-openai")]

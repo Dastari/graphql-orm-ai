@@ -698,6 +698,138 @@ struct CounterPlan {
     committed: AiBudgetAmounts,
 }
 
+/// Commits authoritative terminal usage for an already uncertain background
+/// reservation inside the caller's wider state-machine transaction.
+///
+/// The caller owns validation of the exact background submission/run/attempt
+/// graph and current authorization. This helper owns the existing counter
+/// arithmetic, usage insertion, and reservation CAS so those budget semantics
+/// cannot diverge from ordinary provider reconciliation.
+#[cfg(feature = "provider-openai")]
+pub(crate) async fn commit_uncertain_background_budget(
+    tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
+    record: &AiBudgetReservationRecord,
+    actual: AiBudgetAmounts,
+    cached_input_tokens: u64,
+    now: OffsetDateTime,
+) -> Result<AiBudgetReservationRecord, OrmPublicError> {
+    if parse_reservation_state(&record.state)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?
+        != AiBudgetReservationState::Uncertain
+        || record.reconciled_at.is_none()
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    let reserved = reservation_amounts(record)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let actual = validate_reconciliation_actual(
+        reserved,
+        Some(actual),
+        Some(cached_input_tokens),
+        AiBudgetReconciliationOutcome::Commit,
+    )
+    .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?
+    .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    let counter_ids = reservation_counter_ids(record)
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    for counter_id in counter_ids {
+        let counter = tx
+            .find_by_id::<AiBudgetCounterRecord>(&counter_id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        let reserved_counter = counter_reserved(&counter)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let committed_counter = counter_committed(&counter)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let next_reserved = checked_sub(reserved_counter, reserved)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let next_committed = checked_add(committed_counter, actual)
+            .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+        let update = counter_amount_update(next_reserved, next_committed)?;
+        if !matches!(
+            tx.compare_and_swap::<AiBudgetCounterRecord>(
+                &counter.id,
+                counter.row_version,
+                AiBudgetCounterRecordWhereInput::default(),
+                update,
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+    }
+    tx.insert::<AiUsageEntryRecord>(CreateAiUsageEntryRecordInput {
+        id: background_usage_identity(record.id),
+        budget_reservation_id: record.id,
+        scope_kind: record.scope_kind.clone(),
+        scope_id: record.scope_id.clone(),
+        tenant_id: record.tenant_id.clone(),
+        principal_kind: record.principal_kind.clone(),
+        principal_subject: record.principal_subject.clone(),
+        session_id: Some(record.session_id),
+        run_id: Some(record.run_id),
+        provider_kind: record.provider_kind.clone(),
+        provider_model: record.provider_model.clone(),
+        input_tokens: amount_to_i64(actual.input_tokens)?,
+        cached_input_tokens: amount_to_i64(cached_input_tokens)?,
+        output_tokens: amount_to_i64(actual.output_tokens)?,
+        tool_units: amount_to_i64(actual.tool_units)?,
+        image_units: amount_to_i64(actual.image_units)?,
+        cost_microunits: Some(amount_to_i64(actual.cost_microunits)?),
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    let updated = match tx
+        .compare_and_swap::<AiBudgetReservationRecord>(
+            &record.id,
+            record.row_version,
+            AiBudgetReservationRecordWhereInput {
+                state: Some(StringFilter {
+                    eq: Some("uncertain".to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            UpdateAiBudgetReservationRecordInput {
+                actual_input_tokens: Some(Some(amount_to_i64(actual.input_tokens)?)),
+                actual_cached_input_tokens: Some(Some(amount_to_i64(cached_input_tokens)?)),
+                actual_output_tokens: Some(Some(amount_to_i64(actual.output_tokens)?)),
+                actual_tool_units: Some(Some(amount_to_i64(actual.tool_units)?)),
+                actual_image_units: Some(Some(amount_to_i64(actual.image_units)?)),
+                actual_cost_microunits: Some(Some(amount_to_i64(actual.cost_microunits)?)),
+                actual_runs: Some(Some(amount_to_i64(actual.runs)?)),
+                state: Some("committed".to_owned()),
+                reconciled_at: Some(Some(now.unix_timestamp())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?
+    {
+        ConditionalUpdateOutcome::Updated(updated) => updated,
+        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+    };
+    Ok(updated)
+}
+
+#[cfg(feature = "provider-openai")]
+fn background_usage_identity(reservation_id: Uuid) -> Uuid {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphql-orm-ai/background-usage/v1\0");
+    hasher.update(reservation_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0_u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(id)
+}
+
 fn validate_reservation_request(
     principal: &ResolvedPrincipal,
     request: &AiBudgetReservationRequest,

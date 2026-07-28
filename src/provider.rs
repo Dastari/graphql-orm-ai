@@ -1437,6 +1437,7 @@ pub struct ProviderBackgroundUsage {
 }
 
 impl ProviderBackgroundUsage {
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn new(
         input_tokens: u64,
         output_tokens: u64,
@@ -1480,6 +1481,7 @@ pub struct ProviderBackgroundObservation {
 }
 
 impl ProviderBackgroundObservation {
+    #[cfg(feature = "provider-openai")]
     pub(crate) fn new(
         status: ProviderBackgroundStatus,
         events: Vec<ProviderEvent>,
@@ -1552,6 +1554,10 @@ pub struct ProviderBackgroundRetrievalBinding {
 
 impl ProviderBackgroundRetrievalBinding {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(all(
+        feature = "provider-openai",
+        any(feature = "sqlite", feature = "postgres")
+    ))]
     pub(crate) fn new(
         submission_id: Uuid,
         submission_key: String,
@@ -1645,22 +1651,27 @@ impl ProviderBackgroundRetrievalBinding {
         self.provider_store
     }
 
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn maximum_response_bytes(&self) -> usize {
         self.maximum_response_bytes
     }
 
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn maximum_visible_bytes(&self) -> usize {
         self.maximum_visible_bytes
     }
 
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn maximum_output_items(&self) -> usize {
         self.maximum_output_items
     }
 
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn maximum_content_items(&self) -> usize {
         self.maximum_content_items
     }
 
+    #[cfg(feature = "provider-openai")]
     pub(crate) const fn request_timeout(&self) -> std::time::Duration {
         self.request_timeout
     }
@@ -1717,6 +1728,10 @@ pub struct ProviderBackgroundRetrievalContext {
 }
 
 impl ProviderBackgroundRetrievalContext {
+    #[cfg(all(
+        feature = "provider-openai",
+        any(feature = "sqlite", feature = "postgres")
+    ))]
     pub(crate) fn new(
         manifest: AiEgressManifest,
         proof: AuthorizedEgress,

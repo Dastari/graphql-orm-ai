@@ -1,7 +1,7 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.53.0` Slice 1 retrieval checkpoint. The historical architecture
+current `0.54.0` Slice 1 terminal-reconciliation checkpoint. The historical architecture
 plan at `1573017:docs/plan.md` remains useful design context, but its original
 delivery phases no longer describe the worktree: most foundation, provider,
 persistence, authorization, approval, and coordination contracts are already
@@ -14,21 +14,26 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.53.0` (unpublished Slice 1 development).
-- AI schema-module version: `0.49.0`.
+- Crate version: `0.54.0` (unpublished Slice 1 development).
+- AI schema-module version: `0.50.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
     `6beef53633befd90a4d4810887a3e4640dc4ad91`.
   - `agql-auth` `0.12.0` at
     `3f3b0c5365adfbe436514a681d977b600991b797`.
-- SQLite/provider, warnings-denied Clippy, warnings/missing-docs-denied
-  Rustdoc, PascalCase GraphQL, PostgreSQL/MSSQL compile-only, owned disposable
-  PostgreSQL migration, release-policy, package, and SemVer checks pass
-  locally.
+- The prior checkpoint's SQLite/provider, warnings-denied Clippy,
+  warnings/missing-docs-denied Rustdoc, PascalCase GraphQL,
+  PostgreSQL/MSSQL compile-only, owned disposable PostgreSQL migration,
+  release-policy, package, and SemVer checks passed locally. The complete
+  `0.54.0` matrix is the current exit gate.
 - The dependency-alignment checkpoint is committed and pushed at
   `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
   `30253200905` passed all four jobs.
 - No upstream handoff is currently open.
+- A 2026-07-28 read-only upstream audit confirmed those exact pins are still
+  the latest reviewed `main` revisions. SQLite, PostgreSQL, and MSSQL
+  compile checks resolve one dependency universe without downstream
+  compatibility changes.
 
 ## Rules for every slice
 
@@ -118,20 +123,20 @@ verified webhook intake already exist, but an accepted run remains parked in
 `WaitingProvider`, its budget remains uncertain, and a receipt grants no
 authority to retrieve output or mutate the run.
 
-Status: the complete design gate and negative/crash matrix are documented in
-the two focused guides. The `0.49.0` schema reserves and initializes the
-minimum reconciliation claim/deadline facts. The generated-ORM claim runtime
-now validates the complete accepted support graph, installs/reclaims a
-generation-fenced lease, rotates heartbeats, and voluntarily releases only
-before provider I/O under bounded scheduling. The current-authority retrieval
-runtime now revalidates access and protection, audits and CAS-binds a fresh
-exact egress allow, performs only an opaque fixed-destination OpenAI response
-GET, and returns bounded normalized reviewed status/output/usage. Expired
-transport-marked claims are reclaimable only under a higher generation that
-clears the stale marker. Concurrent/stale/deadline/migration/retrieval-swap/
-normalization-bound SQLite tests pass. Receipt matching, classified
-nonterminal release/backoff, exhaustion closure, budget/output settlement, and
-terminal execution remain closed.
+Status: implementation complete; the `0.54.0` exit matrix and checkpoint are
+in progress. Schema `0.50.0` adds the bounded exact receipt-match index and
+activates the complete terminal lifecycle. Claiming selects at most one exact
+signature-verified receipt without making webhooks a liveness dependency.
+Retrieval now yields private retryable or recovery-required proofs after
+binding exact egress. Nonterminal responses and retryable failures release
+under bounded backoff; deadline/retry exhaustion and non-retryable failures
+close atomically for recovery with uncertain budget retained. Terminal commit
+rehydrates and rechecks current authority/protection, settles immutable pricing
+and usage exactly once, protects completed output, and atomically commits the
+optional message/block/checkpoint/session/inbox graph, receipt states, attempt
+outcome, audit, submission, run, budget, counters, and usage. Exact replay
+validates the durable graph. Focused SQLite receipt, concurrency, failure,
+terminal, duplicate, conflict, and idempotency tests pass.
 
 ### Design gate
 
@@ -426,9 +431,9 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Add the fixed-destination OpenAI retrieval binding, current-authority/egress
-   proof, and bounded terminal/nonterminal response normalizer.
-2. Add receipt selection plus deadline/retry-exhaustion closure without making
-   webhook delivery an authority or liveness requirement.
-3. Add the one-transaction terminal graph, restore validation, PostgreSQL
-   parity, and full release-matrix proof.
+1. Finish Slice 1 PostgreSQL parity, restore/schema assertions, and the full
+   `0.54.0` release matrix; commit and push the exact checkpoint.
+2. Complete the Slice 2 provider-persistent file lifecycle design gate before
+   opening upload or search runtime paths.
+3. Implement only the Slice 2 capabilities whose authority, budget, cleanup,
+   retention, restore, and backend parity contracts are complete.

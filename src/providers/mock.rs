@@ -20,6 +20,15 @@ use crate::{
 #[cfg(test)]
 type MockEventBatches = Arc<Mutex<VecDeque<Arc<[ProviderEvent]>>>>;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MockBackgroundRetrievalFailure {
+    RateLimited,
+    Unavailable,
+    CredentialUnavailable,
+    Rejected,
+}
+
 /// Deterministic, network-free provider fixture.
 #[derive(Clone, Debug)]
 pub struct MockProvider {
@@ -36,6 +45,8 @@ pub struct MockProvider {
     background_binding: Option<(String, u64, bool)>,
     #[cfg(test)]
     background_observation: Option<ProviderBackgroundObservation>,
+    #[cfg(test)]
+    background_retrieval_failure: Option<MockBackgroundRetrievalFailure>,
     request_count: Arc<AtomicU64>,
 }
 
@@ -63,6 +74,8 @@ impl MockProvider {
             background_binding: None,
             #[cfg(test)]
             background_observation: None,
+            #[cfg(test)]
+            background_retrieval_failure: None,
             request_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -133,6 +146,15 @@ impl MockProvider {
         observation: ProviderBackgroundObservation,
     ) -> Self {
         self.background_observation = Some(observation);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_background_retrieval_failure(
+        mut self,
+        failure: MockBackgroundRetrievalFailure,
+    ) -> Self {
+        self.background_retrieval_failure = Some(failure);
         self
     }
 }
@@ -223,11 +245,21 @@ impl AiProvider for MockProvider {
         }
         #[cfg(test)]
         {
+            self.request_count.fetch_add(1, Ordering::AcqRel);
+            if let Some(failure) = self.background_retrieval_failure {
+                return Err(match failure {
+                    MockBackgroundRetrievalFailure::RateLimited => ProviderError::RateLimited,
+                    MockBackgroundRetrievalFailure::Unavailable => ProviderError::Unavailable,
+                    MockBackgroundRetrievalFailure::CredentialUnavailable => {
+                        ProviderError::CredentialUnavailable
+                    }
+                    MockBackgroundRetrievalFailure::Rejected => ProviderError::Rejected,
+                });
+            }
             let observation = self
                 .background_observation
                 .clone()
                 .ok_or(ProviderError::Unsupported)?;
-            self.request_count.fetch_add(1, Ordering::AcqRel);
             Ok(observation)
         }
         #[cfg(not(test))]

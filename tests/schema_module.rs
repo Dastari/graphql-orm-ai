@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.49.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.50.0");
     assert_eq!(catalog.entities().len(), 40);
     assert!(
         catalog
@@ -205,6 +205,16 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
         .find(|table| table.table_name == "graphql_orm_ai_provider_webhook_receipts")
         .expect("provider webhook receipt table should exist");
     assert_eq!(webhook_receipt.primary_keys(), ["id", "provider_kind"]);
+    assert!(webhook_receipt.indexes.iter().any(|index| {
+        index.columns
+            == [
+                "provider_kind".to_owned(),
+                "provider_profile_id".to_owned(),
+                "provider_response_id".to_owned(),
+                "state".to_owned(),
+            ]
+            && !index.is_unique
+    }));
     for required_column in [
         "receipt_key",
         "provider_profile_id",

@@ -217,7 +217,7 @@ waits without polling, resuming, or executing them.
   awaiting one create acknowledgement that must echo the exact model, ceiling,
   and storage choice. Acceptance parks the run without a lease, while ambiguity
   closes it with an immutable attempt outcome for manual recovery and is never
-  retried. Schema `0.49.0` now reserves bounded reconciliation claim/scheduling
+  retried. Schema `0.50.0` provides bounded reconciliation claim/scheduling
   facts and captures a deployment-bounded fixed response deadline for new
   accepted rows. A generated-ORM worker can exclusively claim/reclaim,
   heartbeat, and voluntarily release those rows under a separate generation,
@@ -227,8 +227,15 @@ waits without polling, resuming, or executing them.
   current egress allow, and performs only the bound fixed-endpoint Responses
   GET with a lease-shorter timeout. The native adapter returns bounded reviewed
   status/output/usage shapes and rejects profile/metadata/tool/output swaps.
-  Receipt matching, nonterminal backoff, budget settlement, protected output,
-  and terminal run mutation remain deliberately unavailable.
+  Exact optional receipt matching uses a bounded profile/response/state index
+  but never makes webhook delivery authoritative. Classified transport failures
+  and nonterminal responses release with bounded backoff; deadline, retry, and
+  non-retryable failures close for recovery without releasing uncertain
+  capacity. A terminal service rehydrates and rechecks current authority,
+  prices usage, protects completed output, and atomically commits exact-once
+  budget/usage, optional message/checkpoint/events, receipt states, immutable
+  attempt outcome, submission, and run. Exact replay validates rather than
+  repeats the terminal graph.
 - Optional coherent PascalCase GraphQL naming for consumers whose schema
   conventions require it; lowercase aliases are not emitted.
 

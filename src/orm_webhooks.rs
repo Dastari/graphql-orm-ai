@@ -79,10 +79,10 @@ impl EntityPolicy<DefaultWriteBackend> for ProviderWebhookReceiptEntityPolicy {
 
 impl OrmAiProviderWebhookReceiptService {
     /// Creates a receipt service over the AI schema database.
-    pub fn new(mut database: Database<DefaultWriteBackend>) -> Self {
-        let delegate = database.entity_policy().cloned();
-        database.set_entity_policy(ProviderWebhookReceiptEntityPolicy { delegate });
-        Self { database }
+    pub fn new(database: Database<DefaultWriteBackend>) -> Self {
+        Self {
+            database: with_provider_webhook_receipt_policy(database),
+        }
     }
 
     /// Returns the ORM database handle for host composition.
@@ -229,6 +229,14 @@ impl OrmAiProviderWebhookReceiptService {
             })
             .await
     }
+}
+
+pub(crate) fn with_provider_webhook_receipt_policy(
+    mut database: Database<DefaultWriteBackend>,
+) -> Database<DefaultWriteBackend> {
+    let delegate = database.entity_policy().cloned();
+    database.set_entity_policy(ProviderWebhookReceiptEntityPolicy { delegate });
+    database
 }
 
 #[allow(clippy::too_many_arguments)]

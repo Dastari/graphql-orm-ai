@@ -5,12 +5,45 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.53.0` and AI
-schema module to `0.49.0`. It aligns the reviewed dependency universe and
-starts the durable OpenAI background terminal-reconciliation implementation.
+This development line advances the pre-1.0 crate version to `0.54.0` and AI
+schema module to `0.50.0`. It aligns the reviewed dependency universe and
+completes the durable OpenAI background terminal-reconciliation runtime.
 
 ### Added
 
+- With `provider-openai` plus SQLite/PostgreSQL, exact accepted background
+  submissions now reach a complete local terminal graph. Claiming
+  deterministically matches at most one signature-verified receipt by native
+  provider, logical profile, response ID, and pending state; webhook delivery
+  remains optional and never supplies response content or execution authority.
+  A new composite receipt index keeps that lookup bounded. Reclaim retains the
+  exact match, while later agreeing terminal receipts become
+  `duplicate_terminal` and disagreements become `recovery_required`.
+- `OrmAiOpenAiBackgroundRetrievalService::retrieve_classified` distinguishes
+  bounded retryable timeout/rate-limit/unavailability proofs from
+  credential/configuration/rejection recovery proofs without retaining provider
+  diagnostics. `handle_retrieval_failure`, `release_nonterminal`, and
+  `close_expired` consume exact private generation-bound proofs, apply bounded
+  exponential backoff, and atomically close retry/deadline exhaustion or
+  non-retryable failures while leaving uncertain budget reserved.
+- `OrmAiOpenAiBackgroundTerminalService` rehydrates current principal, access,
+  protection, and egress policy, prices authoritative usage, protects reviewed
+  completed output, then rechecks authority immediately before one generated-
+  ORM state-machine transaction. That transaction settles budget/counters and
+  one usage row exactly once, commits the optional assistant message/blocks,
+  checkpoint, session and inbox events, closes receipts, appends the immutable
+  attempt outcome and audit, and transitions the submission and parked run.
+  Failed, incomplete, and cancelled observations settle usage without assistant
+  output. Conflicting terminal evidence closes for recovery without releasing
+  uncertain capacity. Exact replay validates the durable graph and returns
+  `AlreadyReconciled`.
+- The latest reviewed upstream audit was repeated before this slice:
+  `graphql-orm`/`graphql-orm-macros` remain at `0.15.0`
+  (`6beef53633befd90a4d4810887a3e4640dc4ad91`) and `agql-auth` remains at
+  `0.12.0` (`3f3b0c5365adfbe436514a681d977b600991b797`).
+  These are the current upstream `main` revisions, resolve as one package/type
+  universe, and require no downstream compatibility change or upstream
+  handoff.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundRetrievalService` now revalidates an exact active
   reconciliation claim, freshly rehydrates principal authority, proves
@@ -54,8 +87,8 @@ starts the durable OpenAI background terminal-reconciliation implementation.
   deadline remain ineligible. Claims grant no credential, current-authority,
   provider-retrieval, egress, output, budget-settlement, or run-mutation
   authority; the separate retrieval service requires the claim plus fresh
-  access/protection/egress proofs. Terminal reconciliation remains closed, so
-  accepted runs are still parked in `WaitingProvider`.
+  access/protection/egress proofs, and the terminal service requires a bounded
+  exact observation plus a second current-authority check.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundSubmissionService` now prepares one exact
   run/attempt/fence/profile/model/request/budget/egress binding, rehydrates

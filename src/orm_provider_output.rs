@@ -68,6 +68,18 @@ impl AiProviderOutputLimits {
     }
 }
 
+impl Default for AiProviderOutputLimits {
+    fn default() -> Self {
+        Self {
+            maximum_block_bytes: 1024 * 1024,
+            maximum_blocks: 64,
+            maximum_preview_bytes: 4 * 1024,
+            maximum_total_bytes: 64 * 1024 * 1024,
+            maximum_principal_age: Duration::minutes(5),
+        }
+    }
+}
+
 /// Durable result of a fenced assistant-message append.
 #[derive(Clone, Debug)]
 pub struct AiPersistedProviderOutput {
@@ -117,6 +129,174 @@ pub struct OrmAiProviderOutputService {
     content_protector: Arc<dyn AiContentProtector>,
     clock: Arc<dyn Clock>,
     limits: AiProviderOutputLimits,
+}
+
+#[cfg(feature = "provider-openai")]
+pub(crate) struct BackgroundProviderOutputPreparation {
+    pub message_id: Uuid,
+    pub event_id: Uuid,
+    pub inbox_event_id: Uuid,
+    pub run_id: crate::AiRunId,
+    pub attempt_id: Uuid,
+    pub lease_generation: i64,
+    pub provider_model: String,
+    pub provider_response_id: String,
+    pub budget_reservation_id: Uuid,
+    pub correlation_id: String,
+    pub owner_principal_kind: String,
+    pub owner_subject: String,
+    pub scope: AiScope,
+}
+
+#[cfg(feature = "provider-openai")]
+pub(crate) async fn prepare_background_provider_output(
+    protector: &dyn AiContentProtector,
+    policy: &crate::AiContentProtectionPolicy,
+    preparation: BackgroundProviderOutputPreparation,
+    events: &[ProviderEvent],
+    limits: AiProviderOutputLimits,
+) -> Result<PreparedProviderOutput, AiError> {
+    if !policy.ready || policy.scope != preparation.scope {
+        return Err(AiError::RuntimeNotReady);
+    }
+    let raw_blocks = normalize_blocks(events, limits)?;
+    let preview_text = raw_blocks
+        .iter()
+        .find_map(|block| (block.kind == "text").then_some(block.preview_text.as_str()))
+        .unwrap_or("[structured assistant response]");
+    let preview_text = bounded_prefix(preview_text, limits.maximum_preview_bytes);
+    let protected_preview = protect_value(
+        protector,
+        policy,
+        context(
+            "graphql_orm_ai_messages",
+            preparation.message_id,
+            "protected_preview",
+            &preparation.scope,
+        ),
+        json!({"text": preview_text}),
+    )
+    .await?;
+    let mut blocks = Vec::with_capacity(raw_blocks.len());
+    for (index, raw) in raw_blocks.into_iter().enumerate() {
+        let block_id = background_output_block_identity(preparation.message_id, index)?;
+        let protected_content = protect_value(
+            protector,
+            policy,
+            context(
+                "graphql_orm_ai_message_blocks",
+                block_id,
+                "protected_content",
+                &preparation.scope,
+            ),
+            raw.value,
+        )
+        .await?;
+        blocks.push(PreparedProviderBlock {
+            id: block_id,
+            kind: raw.kind,
+            protected_content,
+            byte_count: i64::try_from(raw.byte_count)
+                .map_err(|_| AiError::InvalidInput("provider output too large".to_owned()))?,
+            line_count: i64::try_from(raw.line_count)
+                .map_err(|_| AiError::InvalidInput("provider output too large".to_owned()))?,
+        });
+    }
+    let protected_event = protect_value(
+        protector,
+        policy,
+        context(
+            "graphql_orm_ai_session_events",
+            preparation.event_id,
+            "protected_payload",
+            &preparation.scope,
+        ),
+        json!({
+            "messageId": preparation.message_id,
+            "runId": preparation.run_id.0,
+            "blockCount": blocks.len(),
+            "budgetReservationId": preparation.budget_reservation_id,
+        }),
+    )
+    .await?;
+    let protected_inbox_event = protect_value(
+        protector,
+        policy,
+        context(
+            "graphql_orm_ai_inbox_events",
+            preparation.inbox_event_id,
+            "protected_payload",
+            &preparation.scope,
+        ),
+        json!({
+            "messageId": preparation.message_id,
+            "runId": preparation.run_id.0,
+            "blockCount": blocks.len(),
+        }),
+    )
+    .await?;
+    let checkpoint_hash = final_output_checkpoint_hash(
+        preparation.run_id,
+        preparation.attempt_id,
+        preparation.lease_generation,
+        preparation.message_id,
+        Some(&preparation.provider_response_id),
+        preparation.budget_reservation_id,
+    );
+    Ok(PreparedProviderOutput {
+        message_id: preparation.message_id,
+        event_id: preparation.event_id,
+        inbox_event_id: preparation.inbox_event_id,
+        provider_kind: "openai".to_owned(),
+        provider_model: preparation.provider_model,
+        protected_preview,
+        protected_event,
+        protected_inbox_event,
+        blocks,
+        correlation_id: preparation.correlation_id,
+        provider_response_id: Some(preparation.provider_response_id),
+        budget_reservation_id: preparation.budget_reservation_id,
+        checkpoint_hash,
+        expected_owner_principal_kind: preparation.owner_principal_kind,
+        expected_owner_subject: preparation.owner_subject,
+        expected_scope_kind: preparation.scope.kind,
+        expected_scope_id: preparation.scope.id,
+        expected_tenant_id: preparation.scope.tenant_id,
+    })
+}
+
+#[cfg(feature = "provider-openai")]
+async fn protect_value(
+    protector: &dyn AiContentProtector,
+    policy: &crate::AiContentProtectionPolicy,
+    context: ContentProtectionContext,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, AiError> {
+    let envelope =
+        protector
+            .protect(policy, &context, value)
+            .await
+            .map_err(|error| match error {
+                crate::ContentProtectionError::PolicyNotReady => AiError::RuntimeNotReady,
+                _ => AiError::PersistenceFailed,
+            })?;
+    serde_json::to_value(envelope).map_err(|_| AiError::PersistenceFailed)
+}
+
+#[cfg(feature = "provider-openai")]
+fn background_output_block_identity(message_id: Uuid, index: usize) -> Result<Uuid, AiError> {
+    use sha2::{Digest, Sha256};
+
+    let index = u64::try_from(index)
+        .map_err(|_| AiError::InvalidInput("provider output too large".to_owned()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphql-orm-ai/background-output-block/v1\0");
+    hasher.update(message_id.as_bytes());
+    hasher.update(index.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0_u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    Ok(Uuid::from_bytes(id))
 }
 
 impl OrmAiProviderOutputService {
