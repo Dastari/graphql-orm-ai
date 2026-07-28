@@ -170,3 +170,8 @@ no provider-side delete obligation. The native OpenAI cleanup adapter can
 safely retire exact profile-bound references created by a host-owned
 persistent-file lifecycle, but this crate still does not upload, search, or
 otherwise create provider file objects.
+
+The separate [provider-persistent file contract](provider-files.md) defines the
+required upload, index, logical-use, cost, cleanup, and restore evidence. Until
+that complete graph exists, `ModelBuiltinTool::FileSearch` is rejected and a
+raw provider store ID cannot be adopted as authority.

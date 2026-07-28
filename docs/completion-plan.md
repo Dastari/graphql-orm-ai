@@ -1,7 +1,7 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.54.0` Slice 1 terminal-reconciliation checkpoint. The historical
+current `0.55.0` Slice 2-7 audited checkpoint. The historical
 architecture plan at `1573017:docs/plan.md` remains useful design context, but
 its original delivery phases no longer describe the worktree: most foundation,
 provider, persistence, authorization, approval, and coordination contracts are
@@ -14,7 +14,7 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.54.0` (unpublished Slice 1 checkpoint).
+- Crate version: `0.55.0` (unpublished Slice 2-7 audited checkpoint).
 - AI schema-module version: `0.50.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.15.0` at
@@ -28,7 +28,12 @@ what remains deliberately closed.
 - The dependency-alignment checkpoint is committed and pushed at
   `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
   `30253200905` passed all four jobs.
-- No upstream handoff is currently open.
+- Three upstream handoffs are open: align `graphql-orm-backup` with the
+  reviewed 0.15.0 type universe, add project-agnostic generated
+  resolver-operation metadata to `graphql-orm`, and implement the reusable
+  MSSQL write/runtime production capability set in `graphql-orm`. Copy-ready
+  owning-agent prompts are staged under `.handoffs/`; no sibling repository
+  has been modified.
 - A 2026-07-28 read-only upstream audit confirmed those exact pins are still
   the latest reviewed `main` revisions. SQLite, PostgreSQL, and MSSQL
   compile checks resolve one dependency universe without downstream
@@ -211,6 +216,22 @@ boundaries in [OpenAI background submission](openai-background.md) and
 Build this on the existing attachment quarantine/release/reopening flow and the
 exact profile-bound OpenAI deletion seam.
 
+Status: complete as a reviewed closed capability at `0.55.0`; see
+[provider-persistent files](provider-files.md). The design now specifies
+independent upload, index, logical-use/search, and deletion authority; the
+durable owner/scope/session/attachment/hash/profile/retention identity graph;
+fenced external-effect states; byte/count quotas; exact egress and pricing;
+dependency-ordered cleanup; restore closure; and conformance evidence.
+
+The current OpenAI lifecycle requires provider-assigned File and vector-store
+create identities without a reviewed deterministic idempotency/recovery proof,
+and bills vector-store byte-time beyond the existing per-call pricing
+dimension. No safely complete upload/search subset is therefore enabled.
+`ModelRequest::validate` rejects the legacy raw `store_ids` file-search shape.
+Inline attachment input and exact profile-bound file deletion remain separate
+implemented capabilities. The reviewed ORM/auth revisions are sufficient for
+the downstream design, so no upstream handoff is open.
+
 ### Design gate
 
 Define separate capabilities for upload, retrieval/use, search, and deletion.
@@ -255,6 +276,16 @@ The design must bind:
 This slice is a design deliverable, not permission to open additional runtime
 paths.
 
+Status: complete as a design and existing-runtime classification at `0.55.0`;
+see [canonical ordering and history](ordering-history.md). The proof fixes the
+effect coordinates and phase order, capacity-before-consumption rules,
+cross-generation adoption matrix, provider-family stateless reconstruction,
+crash windows, and negative tests. It confirms that the existing exact
+complete read-only and single supervised provider-retained adoption paths are
+safe within their current bounds. Partial batches, mixed batches, stateless
+supervised work, and parallel application execution remain closed. Generic
+parallel consequential execution is explicitly unsupported.
+
 ### Work
 
 - Specify canonical ordering for provider calls, parallel application calls,
@@ -283,6 +314,21 @@ paths.
 ## Slice 4: recovery, retention, and restore closure
 
 Complete lifecycle safety before broadening orchestration.
+
+Status: audited and partially blocked; see
+[recovery, retention, backup, and restore](recovery-and-restore.md). Ordinary
+expired-lease/background reconciliation and the dependency-ordered
+deleting-session/age-retention paths already classify every current state as
+requeued, terminal, retained-with-reason, or blocked. Append-only facts and
+incomplete external dependencies are reported truthfully. The privileged
+generic uncertain-effect evidence service remains downstream work.
+
+Applied backup/restore is blocked on `graphql-orm-backup`, whose reviewed main
+pins `graphql-orm` 0.6.1 rather than this crate's 0.15.0 runtime. A copy-ready
+prompt is staged at
+`.handoffs/graphql-orm-backup-0.15-integration.md`. Do not add that dependency,
+create a duplicate type universe, or claim production restore until a separate
+owner returns a reviewed final SHA.
 
 ### Work
 
@@ -334,6 +380,16 @@ closed boundary, not enabling every provider feature.
 Also add generic per-item proposal review while leaving application-specific
 rendering and final domain mutation in the consumer.
 
+Status: design/classification complete and runtime expansion blocked on Slice
+4; see [coordination gates](coordination-gates.md). The paths currently admitted
+by the ordering proof—exact completed read-only adoption and one supervised
+provider-retained mutation per sequential provider turn—are already
+implemented. Provider-turn-only adoption, partial batches, mixed batches,
+parallel resolver execution, and stateless supervised continuation remain
+closed. Generic parallel consequential execution is permanently unsupported.
+Per-item proposal review remains unimplemented because its new persistent
+partial-review graph cannot precede applied backup/restore.
+
 ### Exit gate
 
 - Every consequential action has fresh current authority, exact policy and
@@ -345,6 +401,17 @@ rendering and final domain mutation in the consumer.
 - Unsupported batch shapes fail before approval consumption or external I/O.
 
 ## Slice 6: control-plane and production integration closure
+
+Status: audited and blocked on prerequisite/upstream gates; see
+[control-plane and production integration gates](control-plane-production.md).
+The existing explicit catalog/disclosure, secret-store, delegated-authority,
+and private-transport contracts remain supported. Durable tool-policy
+management is not opened because its persisted call/output constraints are not
+yet complete live execution proofs and applied restore is still blocked.
+Generated schema-aware resolver metadata is absent from `graphql-orm` 0.15.0;
+a narrowly project-agnostic owning-agent prompt is staged at
+`.handoffs/graphql-orm-resolver-operation-metadata.md`. Raw provider-file
+authority remains closed.
 
 ### Work
 
@@ -378,6 +445,14 @@ the sibling repository from this worktree.
 ## Slice 7: backend production acceptance
 
 Run acceptance separately for each backend and capability profile.
+
+Status: capability classification and local candidate verification complete;
+see the [backend and capability acceptance matrix](backend-capability-matrix.md).
+SQLite and PostgreSQL pass the currently implemented crate capability set, but
+applied restore prevents the complete production exit gate. MSSQL is
+compile/schema-only. Its reusable write/runtime gap is documented in
+`.handoffs/graphql-orm-mssql-write-runtime.md`; no downstream emulation or
+sibling change was made.
 
 ### SQLite and PostgreSQL
 
@@ -430,9 +505,11 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Complete the Slice 2 provider-persistent file lifecycle design gate before
-   opening upload or search runtime paths.
-2. Implement only the Slice 2 capabilities whose authority, budget, cleanup,
-   retention, restore, and backend parity contracts are complete.
-3. Keep file listing, arbitrary provider IDs, cross-scope reuse, and any
-   incomplete cost/deletion/restore path closed.
+1. Wait for the reviewed final `graphql-orm-backup` integration SHA before
+   implementing applied restore; keep the downstream dependency absent.
+2. Wait for reviewed final `graphql-orm` resolver-metadata and MSSQL
+   write/runtime SHAs before their dependent paths; never pin PR-head commits.
+3. After applied restore, implement and enforce the complete durable
+   tool-policy lifecycle before exposing its authenticated GraphQL management.
+4. Keep provider-file listing/upload/search, partial/mixed/parallel execution,
+   and replay of any ambiguous external effect closed.

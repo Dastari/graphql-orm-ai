@@ -1,5 +1,9 @@
 # Bounded Session Retention
 
+The cross-lifecycle status, privileged recovery boundary, and applied-restore
+gate are summarized in
+[recovery, retention, backup, and restore](recovery-and-restore.md).
+
 `OrmAiSessionRetentionService` is a trusted, host-scheduled maintenance service
 for narrowly defined classes of protected chat data:
 

@@ -416,16 +416,12 @@ impl ModelRequest {
                         && allowed_domains.len() <= 100
                         && unique_valid_values(allowed_domains, valid_web_domain)
                 }
-                ModelBuiltinTool::FileSearch {
-                    store_ids,
-                    maximum_results,
-                } => {
-                    builtin_kinds.insert("file_search")
-                        && !store_ids.is_empty()
-                        && store_ids.len() <= 20
-                        && unique_valid_values(store_ids, valid_provider_reference)
-                        && maximum_results.is_none_or(|value| (1..=50).contains(&value))
-                }
+                // A caller-authored provider store ID is not durable creation,
+                // ownership, scope, retention, cost, or deletion authority.
+                // Keep this legacy wire shape closed until it can be replaced
+                // by a crate-authored logical reference resolved from the
+                // complete provider-file lifecycle.
+                ModelBuiltinTool::FileSearch { .. } => false,
                 ModelBuiltinTool::CodeInterpreter => builtin_kinds.insert("code_interpreter"),
                 ModelBuiltinTool::ImageGeneration => builtin_kinds.insert("image_generation"),
             };
@@ -752,11 +748,16 @@ pub enum ModelBuiltinTool {
         /// Optional administrator-approved domain restriction.
         allowed_domains: Vec<String>,
     },
-    /// Provider-hosted search over already-authorized provider stores.
+    /// Reserved provider-hosted file search shape.
+    ///
+    /// This variant is rejected by [`ModelRequest::validate`]. Raw provider
+    /// store identifiers cannot prove creation, scope, retention, cost, or
+    /// cleanup authority. A future implementation must replace them with
+    /// crate-authored logical references resolved from durable lifecycle state.
     FileSearch {
-        /// Non-secret provider store references.
+        /// Legacy raw provider store references; never accepted for transport.
         store_ids: Vec<String>,
-        /// Bounded result count.
+        /// Requested result count; never accepted for transport.
         maximum_results: Option<u32>,
     },
     /// Provider-hosted code interpreter.

@@ -41,10 +41,12 @@ and deliberately incomplete inventory.
 - Deterministic mock provider and native feature-gated OpenAI Responses/SSE
   adapter with `store: false` by default, redirects disabled, secret resolution
   immediately before each request, structured output, custom functions,
-  built-in web/file/code/image request mapping, typed normalization, usage,
+  built-in web/code/image request mapping, typed normalization, usage,
   citations, forward-compatible unknown events, and no hidden reasoning
   persistence. Exact released PNG/JPEG/WEBP/GIF and direct file inputs are
   encoded inline without creating provider-persistent file IDs.
+  The legacy raw-store-ID file-search request shape is rejected before
+  transport.
 - Native feature-gated Anthropic Messages/SSE adapter with a fixed official
   endpoint/version, just-in-time secret resolution, bounded text/JSON,
   JSON-schema output, registered custom and parallel application tools,
@@ -466,7 +468,8 @@ and deliberately incomplete inventory.
   implementations. Database-managed protection and the safe service seams are
   implemented.
 - Attachment quotas, derivative-artifact production, and provider-persistent
-  file upload/search. Core ticketed quarantine/
+  file upload/search. The complete provider-file design is documented and the
+  raw store-ID request path now rejects before transport. Core ticketed quarantine/
   scan/promotion/release, exact ephemeral provider reopening, OpenAI inline
   image/file input, expired/interrupted exact-reference cleanup, and verified
   deleting-session cleanup for artifacts and parent attachment
@@ -483,7 +486,8 @@ and deliberately incomplete inventory.
 - Provider-persistent file upload/search, plus richer provider file-type
   preflight and full built-in result normalization. Exact inline image/file input remains
   independently gated by host MIME policy, budget, egress, current authority,
-  and reopening limits.
+  and reopening limits. The closed-state authority, cost, cleanup, and restore
+  contract is complete in [provider-persistent files](provider-files.md).
 - Privileged uncertain-call recovery and complete retention/purge application.
   Budget-policy management, ordinary transactional reservation/reconciliation,
   authenticated usage reporting, and the content-free operational telemetry
@@ -495,10 +499,16 @@ and deliberately incomplete inventory.
   live output, and final-output crash reconciliation are implemented; all
   ambiguous resume remains closed.
 - Backup adapter execution and applied restore transactions.
+- Authenticated durable tool-policy reads/mutations and resolution into a live
+  bounded `AiToolPolicySet`. The private record exists, but stored call/output
+  constraints are not runtime proof and the lifecycle remains closed pending
+  applied restore; see
+  [control-plane and production integration gates](control-plane-production.md).
 - Resolver-operation disclosure metadata generation and complete schema-aware
   control-plane recursion validation. The current catalog uses explicit
   reviewed operation contracts, disclosure schemas, and a fail-closed
-  identifier scanner.
+  identifier scanner. A copy-ready project-agnostic `graphql-orm` metadata
+  handoff is staged in `.handoffs/`.
 - Deployment-specific delegated-credential issuers and private HTTP GraphQL
   transports. The generic exact-binding adapter is implemented; credential
   format, fixed destination mapping, network isolation, and application audit
@@ -514,17 +524,20 @@ and deliberately incomplete inventory.
 ## Next implementation slice
 
 The detailed sequence and acceptance gates are maintained in the
-[completion plan](completion-plan.md). The leading runtime priorities are:
+[completion plan](completion-plan.md). The leading priorities are:
 
-1. Finish the `0.54.0` PostgreSQL/restore/release-matrix checkpoint for the
-   complete OpenAI background terminal lifecycle.
-2. Add provider-persistent file upload/search behind independent authority,
-   egress, budget, fencing, retention, and restore proofs, building on exact
-   profile-bound deletion. Extend authoritative unit pricing only when each
-   additional billing dimension is complete.
-3. Design complete ordering/history proofs before considering multi-call or
-   stateless supervised resumption; keep both paths closed until those proofs
-   are reviewable.
+1. Wait for reviewed final `graphql-orm-backup` and `graphql-orm`
+   resolver-metadata SHAs before applied restore or schema-aware generated
+   disclosure integration; copy-ready prompts are staged in `.handoffs/`.
+2. Keep the durable tool-policy GraphQL lifecycle closed until applied restore
+   exists and every stored bound is enforced by live execution.
+3. Treat MSSQL as compile/schema-only while the separate upstream
+   write/runtime handoff and downstream disposable acceptance matrix remain
+   incomplete.
+4. Keep provider-persistent upload/search closed until provider create
+   ambiguity, logical-store authority, storage-time pricing, quotas, cleanup,
+   and restore pass the contract in
+   [provider-persistent files](provider-files.md).
 
 A production OS/container local-harness launcher remains deployment-owned. A
 generic `Command` implementation in this crate could not prove immutable-image
@@ -534,9 +547,11 @@ intentional.
 
 ## Current verification
 
-- The complete `0.54.0` SQLite/provider matrix passes: 176 unit tests, all
-  integration tests, one explicit live OpenAI test ignored, and 31 generated
-  private-ORM doctests intentionally ignored.
+- The complete `0.55.0` Slice 2-7 candidate SQLite/provider matrix passes: 176
+  unit tests, all integration tests, one explicit live OpenAI test ignored,
+  and 31 generated private-ORM doctests intentionally ignored. The focused
+  provider/content security integration target now has seven passing tests,
+  including rejection of raw provider file-search IDs before transport.
 - Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
   with all native/profiled provider adapters and the installed harness.
   PascalCase SDL and missing-docs Rustdoc also passed with no lowercase aliases.
@@ -546,12 +561,13 @@ intentional.
   exact receipt intake, and passes the existing session/skill/rule/fence suite
   in an ownership-labeled disposable PostgreSQL 17 container, which is removed
   after the test.
-- Release-policy and the 322-file package review pass against the `0.53.0`
-  checkpoint. `cargo-semver-checks` completes successfully for `0.53.0` to
-  `0.54.0`; the
-  pre-1.0 minor move is a breaking-version boundary, so no compatibility lints
-  are applicable. The package contains no ignored handoff, credential, local
-  path, or consumer-specific artifact.
+- The 328-file `cargo package --list` review contains no ignored handoff,
+  credential, local path, target output, or consumer-specific artifact.
+  Full `cargo package` upload preparation remains intentionally unavailable
+  because unpublished Git-only `agql-auth` has no crates.io package; this is
+  not a candidate regression. `cargo-semver-checks` completes successfully for
+  `0.54.0` to `0.55.0`; the pre-1.0 minor move is a breaking-version boundary,
+  so no compatibility lints are applicable.
 - The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
   `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
   `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
@@ -575,6 +591,12 @@ intentional.
   `323612a4c4c6313afc8ef5041210f3c9354908b1`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
+- `git diff --check` and the one-source dependency audit pass. Release-policy
+  verification and the final pushed checkpoint are recorded after the
+  candidate is committed. The
+  [backend capability matrix](backend-capability-matrix.md) remains the
+  authoritative claim boundary; the green compile profile does not promote
+  MSSQL beyond experimental schema/read compatibility.
 
 ## Provider test note
 

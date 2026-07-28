@@ -1,5 +1,9 @@
 # Supervised Mutation and Approval Execution
 
+The [canonical ordering and history proof](ordering-history.md) defines the
+phase order and explains why multi-call, partial, stateless, and parallel
+consequential adoption remain closed.
+
 The supervised path is deliberately separate from the read-only coordinator.
 It enables a host to expose a reviewed application mutation to a model without
 turning discovery, model intent, or human approval into application authority.

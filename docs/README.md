@@ -11,10 +11,12 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Protected context compaction](context-compaction.md)
 - [Durable cross-session principal inbox](principal-inbox.md)
 - [Bounded session retention](session-retention.md)
+- [Recovery, backup, and restore](recovery-and-restore.md)
 - [Content-free operational telemetry](operational-telemetry.md)
 - [Protected skills and typed UI intents](skills-and-ui-intents.md)
 - [Hierarchical AI rule narrowing](hierarchical-rules.md)
 - [Attachment intake, quarantine, and cleanup](attachments.md)
+- [Provider-persistent file lifecycle](provider-files.md)
 - [Verified OpenAI webhook intake](openai-webhooks.md)
 - [Exact OpenAI background submission](openai-background.md)
 - [Native Anthropic provider](anthropic.md)
@@ -24,6 +26,10 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Installed local harness boundary](local-harness.md)
 - [Read-only application-tool loop](read-only-tool-loop.md)
 - [Protected coordinator checkpoints](coordinator-checkpoints.md)
+- [Canonical ordering and history proof](ordering-history.md)
+- [Coordination and review expansion gates](coordination-gates.md)
+- [Control-plane and production integration gates](control-plane-production.md)
+- [Backend and capability acceptance matrix](backend-capability-matrix.md)
 - [Supervised mutation and approval execution](supervised-tool-loop.md)
 - [Private remote GraphQL execution](remote-graphql-execution.md)
 - [Proposal and approval lifecycles](review-lifecycles.md)
@@ -35,6 +41,6 @@ Start with the root [README](../README.md), then use the focused guides below.
 - [Migration guide](../MIGRATION.md)
 - [Changelog](../CHANGELOG.md)
 
-Additional provider-file, derivative, approval, and tool-authoring guides will be
-added as their production implementations land. Public Rust API details are
+Additional derivative, approval, and tool-authoring guides will be added as
+their production implementations land. Public Rust API details are
 available through generated rustdoc.

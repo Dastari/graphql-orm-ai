@@ -186,6 +186,17 @@ async fn each_provider_builtin_requires_its_own_egress_capability() {
 
 #[tokio::test]
 async fn provider_metadata_is_bounded_unique_and_included_in_egress_size() {
+    let mut raw_file_search = request("test-model");
+    raw_file_search.builtin_tools = vec![ModelBuiltinTool::FileSearch {
+        store_ids: vec!["vs_caller_authored".to_owned()],
+        maximum_results: Some(5),
+    }];
+    raw_file_search.maximum_builtin_tool_calls = Some(1);
+    assert!(matches!(
+        raw_file_search.validate(),
+        Err(ProviderError::InvalidRequest)
+    ));
+
     let mut mismatched_ceiling = request("test-model");
     mismatched_ceiling.maximum_builtin_tool_calls = Some(1);
     assert!(matches!(

@@ -5,12 +5,52 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.54.0` and AI
+This development line advances the pre-1.0 crate version to `0.55.0` and AI
 schema module to `0.50.0`. It aligns the reviewed dependency universe and
-completes the durable OpenAI background terminal-reconciliation runtime.
+completes the durable OpenAI background terminal-reconciliation runtime, then
+closes raw provider file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- `docs/provider-files.md` now defines the complete default-deny capability,
+  durable identity, state-machine, quota, pricing, egress, cleanup, retention,
+  restore, and conformance contract for future provider-persistent upload and
+  search. The design records why current provider-assigned create identities
+  and storage-time billing prevent a safe partial implementation; no upstream
+  ORM or auth change is required at this checkpoint.
+- `docs/ordering-history.md` fixes canonical effect coordinates and phase
+  order, capacity checks before approval/checkpoint consumption, the
+  cross-generation adoption matrix, provider-family stateless transcript
+  rules, crash-window outcomes, and negative-test obligations. It confirms the
+  existing complete read-only and single supervised retained-result adoption
+  paths while keeping partial, mixed, stateless supervised, and parallel
+  execution closed; generic parallel consequential execution is explicitly
+  unsupported.
+- `docs/recovery-and-restore.md` classifies current recovery, retention,
+  append-only, backup, and restore states and fixes the evidence contract for a
+  future privileged uncertain-effect service. The applied-restore audit found
+  that current `graphql-orm-backup` main still resolves `graphql-orm` 0.6.1;
+  a copy-ready owning-agent handoff requests alignment to the reviewed 0.15.0
+  runtime. No duplicate dependency universe or downstream workaround is added.
+- `docs/coordination-gates.md` applies the ordering proof to every Slice 5
+  shape. Existing complete read-only adoption and sequential single-mutation
+  provider-retained turns are confirmed; provider-turn-only, partial, mixed,
+  parallel, and stateless supervised paths remain closed. Per-item proposal
+  review remains gated behind applied restore, and generic parallel
+  consequential execution is permanently unsupported.
+- `docs/control-plane-production.md` records the Slice 6 production-boundary
+  audit. The explicit catalog/disclosure, secret-store, delegated-authority,
+  and private-transport seams remain supported, while durable tool-policy
+  management stays closed until its stored constraints are enforced and
+  applied restore passes. A copy-ready `graphql-orm` owning-agent handoff
+  requests project-agnostic generated resolver-operation metadata; no sibling
+  repository was modified.
+- `docs/backend-capability-matrix.md` records the Slice 7 evidence boundary:
+  SQLite and PostgreSQL are classified separately from host/consumer proof,
+  applied restore remains closed, and MSSQL remains an experimental
+  compile/schema profile rather than a production claim. A separate
+  copy-ready upstream prompt requests the missing reusable MSSQL write,
+  transaction, migration, restore, and concurrency runtime.
 - With `provider-openai` plus SQLite/PostgreSQL, exact accepted background
   submissions now reach a complete local terminal graph. Claiming
   deterministically matches at most one signature-verified receipt by native
@@ -234,6 +274,12 @@ completes the durable OpenAI background terminal-reconciliation runtime.
 
 ### Changed
 
+- `ModelRequest::validate` now rejects the reserved
+  `ModelBuiltinTool::FileSearch` raw `store_ids` shape. A syntactically valid
+  provider vector-store ID is not durable creation, ownership, scope,
+  retention, cost, or deletion authority. Existing inline attachment input,
+  exact provider-file deletion, rule vocabulary, and immutable per-search-call
+  pricing remain available independently.
 - The exact Git dependency universe now pins `graphql-orm` 0.15.0 at
   `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at the
   peeled `v0.12.0` target

@@ -112,8 +112,11 @@ waits without polling, resuming, or executing them.
   calls, and deterministic fake-process conformance tests. The crate
   intentionally supplies no generic unsandboxed subprocess launcher.
 - Separate, exact proofs for provider egress and atomic budget reservation.
-  Provider built-ins such as web search, file search, code execution, image
+  Enabled provider built-ins such as web search, code execution, image
   analysis, and image generation require their own authorized transfer.
+  Provider file search is reserved but closed until provider-object creation,
+  logical-store resolution, storage-time pricing, cleanup, and restore are
+  complete; raw provider store IDs are rejected.
   Request validation and transfer estimates cover bounded tool/schema/built-in
   metadata and attachment encoding, not only visible prompt text.
 - Structured AI-owned proposals and exact one-shot approval envelopes bound to
@@ -353,6 +356,8 @@ artifact cleanup/retention is implemented for deleting sessions through a
 host-supplied exact provider-absence seam, including a profile-bound native
 OpenAI implementation. Artifact production, quotas, and provider-persistent
 file upload/search remain gated.
+The complete closed-state contract is in the
+[provider-persistent file guide](docs/provider-files.md).
 
 ## Current maturity
 
@@ -384,7 +389,8 @@ tool-batch adoption, code-interpreter/image-generation
 pricing dimensions, privileged uncertain-call
 recovery, completion of deleting-session/provider-raw/audit retention workflows,
 per-item proposal review, OpenAI background response reconciliation,
-provider-persistent file upload/search lifecycle,
+provider-persistent file upload/search lifecycle (with raw store-ID requests
+now rejected),
 attachment quotas/derivative production, production mutable secret
 stores/keyrings,
 deployment-specific delegated credential issuers/private HTTP transports,
@@ -434,13 +440,14 @@ callbacks remain separately gated; see the
 ## Development safety and checks
 
 Automated tests never connect to an external database. SQLite tests use only
-in-memory databases. PostgreSQL/MSSQL checks are compile-only unless a test
-harness proves that it created and owns a disposable Docker container, unique
-credentials, database, and cleanup. Generic `DATABASE_URL` fallbacks are
-forbidden. Consumer-application integration tests belong to those consumers.
-The owned PostgreSQL harness exercises only generated ORM migrations,
-transactions, queries, keysets, skill/rule persistence, and fencing; it
-contains no application raw SQL.
+in-memory databases. The PostgreSQL behavioral test creates and owns a
+disposable Docker container, unique credentials, database, and cleanup; bare
+PostgreSQL and MSSQL profiles also receive compile checks. MSSQL remains an
+experimental compile/schema profile because neither the required upstream
+write runtime nor an owned downstream behavioral harness exists. Generic
+`DATABASE_URL` fallbacks are forbidden. Consumer-application integration tests
+belong to those consumers. See the
+[backend capability matrix](docs/backend-capability-matrix.md).
 
 ```bash
 cargo fmt --check

@@ -1,5 +1,9 @@
 # Protected Coordinator Checkpoints
 
+The cross-cutting phase order, adoption classes, provider-family history rules,
+and crash-window classification are fixed in the
+[canonical ordering and history proof](ordering-history.md).
+
 The read-only coordinator durably checkpoints the two in-memory handoffs that
 previously existed between an accepted provider result and the next protected
 phase. This narrows recovery ambiguity without treating persistence as replay

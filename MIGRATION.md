@@ -4,6 +4,42 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: close raw provider file-search authority (crate 0.54.0 to 0.55.0; schema remains 0.50.0)
+
+`ModelRequest::validate` now rejects
+`ModelBuiltinTool::FileSearch { store_ids, maximum_results }`. The public enum
+variant remains source-compatible as a reserved shape, but valid raw
+provider vector-store IDs no longer pass provider-neutral request validation.
+This is a deliberate pre-1.0 behavioral breaking change: a caller-supplied ID
+cannot prove the provider object's exact creation, owner/scope/session,
+attachment hash, logical profile, retention, byte-time cost, or
+dependency-ordered deletion.
+
+Hosts must remove any construction of this variant; there is no replacement
+search API in this checkpoint. Continue using released attachment references
+with the separately authorized ephemeral inline provider-input path where its
+MIME/size policy permits. The exact profile-bound provider-file deletion seam
+also remains available for already durable cleanup artifacts.
+
+The complete future upload/index/logical-use/deletion contract is documented in
+`docs/provider-files.md`. Do not work around the closed boundary by injecting a
+provider ID through a custom tool, application GraphQL field, egress manifest,
+or locally authored artifact row. Provider upload/search may reopen only after
+all creation ambiguity, storage-time pricing, quotas, retention, cleanup, and
+restore gates pass.
+
+This change adds no entity, column, index, constraint, GraphQL SDL, backup
+descriptor, or persistent semantic. AI schema module `0.50.0` is therefore
+unchanged and no data migration is needed.
+
+The accompanying Slice 3-7 audit documents do not open another public Rust,
+GraphQL, provider, backend, or persistence capability. In particular, durable
+tool-policy management, generated resolver-operation metadata, applied
+backup/restore, provider-persistent upload/search, and MSSQL production writes
+remain unavailable. Their `.handoffs/` prompts are ignored coordination state,
+not dependencies or packaged migration artifacts. No additional data migration
+is required for those documentation-only classifications.
+
 ## Unreleased: complete OpenAI background terminal reconciliation (crate 0.53.0 to 0.54.0; schema 0.49.0 to 0.50.0)
 
 Apply AI schema module `0.50.0` while provider workers, webhook intake,
