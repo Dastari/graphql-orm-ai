@@ -592,8 +592,9 @@ intentional.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
 - `git diff --check` and the one-source dependency audit pass. Release-policy
-  verification and the final pushed checkpoint are recorded after the
-  candidate is committed. The
+  verification passes against the `0.54.0` checkpoint. The Slice 2-7
+  provider-file closure and remaining-gate audit is committed at
+  `5a3e18771aeb4faa58b279385b768b39cfa68ec3`. The
   [backend capability matrix](backend-capability-matrix.md) remains the
   authoritative claim boundary; the green compile profile does not promote
   MSSQL beyond experimental schema/read compatibility.
