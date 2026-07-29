@@ -5,14 +5,28 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.56.0` and AI
-schema module to `0.50.0`. It aligns the reviewed dependency universe,
+This development line advances the pre-1.0 crate version to `0.57.0` and AI
+schema module to `0.51.0`. It aligns the reviewed dependency universe,
 integrates generated resolver-operation metadata, completes the durable OpenAI
 background terminal-reconciliation runtime, and closes raw provider
 file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- SQLite and PostgreSQL builds now resolve the exact reviewed
+  `graphql-orm-backup` 0.6.0 merge
+  (`6a9ccedd76fd140c351c8861de72c4cb7c99feea`) alongside
+  `graphql-orm` 0.16.0 and `graphql-orm-storage` 0.5.0 in one source/type
+  universe. This is a dependency and backup-schema compatibility checkpoint;
+  the AI-specific empty-target restore collector, repair applier, validation,
+  recovery epoch, and readiness gate remain deliberately closed.
+- Schema module 0.51.0 includes finalized local attachment and derived-artifact
+  `blob_reference` values in confidential database backups so restored rows can
+  reconnect to the separately restored object bytes. Quarantine references,
+  upload-token hashes, provider-file references, credentials, and secrets
+  remain redacted. Snapshots made with the prior redacted linkage are not
+  eligible for a complete local-object restore and must be replaced with a new
+  full snapshot.
 - `GraphqlOperationContract::with_generated_operation`,
   `GraphqlGeneratedOperationBinding`, and
   `AiToolCatalog::register_generated_with_disclosure` bind one
@@ -41,13 +55,10 @@ file-search IDs behind the reviewed persistent-file design.
   unsupported.
 - `docs/recovery-and-restore.md` classifies current recovery, retention,
   append-only, backup, and restore states and fixes the evidence contract for a
-  future privileged uncertain-effect service. `graphql-orm-backup` PR #2 is
-  merged at `20c12e45dad00bda9183751effa969d19c1c5d80` and implements the
-  adapter hardening against ORM 0.15.0, but is not compatible with this crate's
-  reviewed ORM 0.16.0 universe. The copy-ready owning-agent handoff now
-  requests a focused follow-up 0.16.0 integration and a new reviewed final
-  merge/release SHA. No incompatible pin, duplicate dependency universe, or
-  downstream workaround is accepted.
+  future privileged uncertain-effect service. The follow-up
+  `graphql-orm-backup` 0.6.0 merge aligns that hardening with this crate's
+  reviewed ORM 0.16.0 universe. No incompatible pin, duplicate dependency
+  universe, or downstream workaround is accepted.
 - `docs/coordination-gates.md` applies the ordering proof to every Slice 5
   shape. Existing complete read-only adoption and sequential single-mutation
   provider-retained turns are confirmed; provider-turn-only, partial, mixed,

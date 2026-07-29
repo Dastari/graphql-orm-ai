@@ -27,7 +27,7 @@ and deliberately incomplete inventory.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
   `last/before` connections.
-- AI schema-module identity (currently version `0.50.0`) and 40 private records
+- AI schema-module identity (currently version `0.51.0`) and 40 private records
   spanning provider/model configuration, content/egress/tool/retention/budget
   policy and atomic reservations, sessions, attachments, runs, approvals,
   proposals/items, checkpoints, skills/versions, usage, background submissions,
@@ -531,9 +531,11 @@ and deliberately incomplete inventory.
 The detailed sequence and acceptance gates are maintained in the
 [completion plan](completion-plan.md). The leading priorities are:
 
-1. Wait for a reviewed final `graphql-orm-backup` SHA aligned to ORM 0.16.0
-   before applied restore. Merged version 0.5.0 targets ORM 0.15.0 and is not
-   eligible; the updated copy-ready prompt is staged in `.handoffs/`.
+1. After the owning ORM agent's proposed `graphql-orm-*` repository
+   consolidation reaches a reviewed final commit, repin this exact dependency
+   universe and implement the AI-specific empty-target restore collector,
+   repair applier, validator, recovery epoch, and readiness gate. Backup 0.6.0
+   already satisfies the current ORM 0.16.0 compatibility gate.
 2. Keep the durable tool-policy GraphQL lifecycle closed until applied restore
    exists and every stored bound is enforced by live execution.
 3. Treat MSSQL as compile/schema-only while the separate upstream
@@ -552,7 +554,7 @@ intentional.
 
 ## Current verification
 
-- The complete `0.56.0` SQLite/provider matrix passes: 176 unit tests, all
+- The complete `0.57.0` SQLite/provider matrix passes: 176 unit tests, all
   integration tests, one explicit live OpenAI test ignored, and 31 generated
   private-ORM doctests intentionally ignored. The generated-operation target
   passes four default-case tests covering exact admission, denial/drift,
@@ -563,7 +565,7 @@ intentional.
   missing-docs Rustdoc also pass with no lowercase aliases.
 - Bare PostgreSQL and MSSQL plus their OpenAI feature combinations pass
   compile-only checks. The complete generated-ORM PostgreSQL parity test
-  migrates the prior background/receipt schema to `0.50.0`, verifies concurrent
+  migrates the prior background/receipt schema to `0.51.0`, verifies concurrent
   exact receipt intake, and passes the existing session/skill/rule/fence suite
   in an ownership-labeled disposable PostgreSQL 17 container, which was
   removed after the test.
@@ -572,14 +574,15 @@ intentional.
   Full `cargo package` upload preparation remains intentionally unavailable
   because unpublished Git-only `agql-auth` has no crates.io package; this is
   not a candidate regression. `cargo-semver-checks` completes successfully for
-  `0.55.0` to `0.56.0`; the pre-1.0 minor move is a breaking-version boundary,
+  `0.56.0` to `0.57.0`; the pre-1.0 minor move is a breaking-version boundary,
   so compatibility lints are not applicable.
 - The dependency universe resolves exactly `graphql-orm` and
   `graphql-orm-macros` 0.16.0 at
   `dd68a001f47f04178bf3389dd47ee952faa6ecf0`, plus `agql-auth` 0.12.0 at
-  `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
-  source and public type universe. Merged `graphql-orm-backup` 0.5.0 remains
-  absent because it pins ORM 0.15.0.
+  `3f3b0c5365adfbe436514a681d977b600991b797`, and
+  `graphql-orm-backup` 0.6.0 at
+  `6a9ccedd76fd140c351c8861de72c4cb7c99feea`, with one
+  runtime/macro/auth/backup/storage source and public type universe.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
   The `0.51.0`/schema `0.47.0` dependency checkpoint is committed and pushed
   at `21f11e46f5e7b221959844cacba7f5ad81841e36`; downstream draft PR #2 CI run

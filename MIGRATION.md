@@ -4,6 +4,39 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: backup 0.6 compatibility checkpoint (crate 0.56.0 to 0.57.0; schema 0.50.0 to 0.51.0)
+
+Update `graphql-orm-backup` to the exact reviewed 0.6.0 merge at
+`6a9ccedd76fd140c351c8861de72c4cb7c99feea`. It resolves the already reviewed
+`graphql-orm` 0.16.0 revision
+`dd68a001f47f04178bf3389dd47ee952faa6ecf0` and
+`graphql-orm-storage` 0.5.0 revision
+`f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5`. Remove local path, patch, or
+branch overrides and regenerate `Cargo.lock`; there must be one ORM and storage
+source/type universe.
+
+Apply AI schema module 0.51.0 before creating the next backup. There is no DDL
+or row rewrite: the version bump records a persistent backup-policy semantic.
+Finalized local attachment and derived-artifact `blob_reference` columns now
+use `Include`, because the opaque local key is required to reconnect a restored
+row to its separately restored object bytes. Treat the backup repository as
+confidential and access-controlled. Quarantine keys, upload-token hashes,
+provider references, credentials, and secrets remain redacted.
+
+Existing snapshots exported under schema 0.50.0 contain a redaction sentinel
+instead of the local object key and cannot prove a complete local-object
+restore. Do not use them to open runtime readiness; create and verify a new
+full snapshot after applying 0.51.0. Incremental ORM backup remains unavailable
+until a reliable upstream change journal exists.
+
+This checkpoint does not expose a production restore API and does not open the
+runtime after database/object import. The remaining downstream work is still
+to collect facts from restored rows, apply generated-ORM repairs, revalidate
+all invariants, record the exact recovery epoch, and open readiness only for a
+zero-fatal applied epoch. Repository consolidation of the `graphql-orm-*`
+packages may change the dependency source layout; repin only to a reviewed
+final owning-repository commit and rerun the full matrix.
+
 ## Unreleased: generated resolver-operation bindings (crate 0.55.0 to 0.56.0; schema remains 0.50.0)
 
 Update the exact `graphql-orm` and `graphql-orm-macros` dependency to 0.16.0 at
@@ -39,10 +72,8 @@ This change adds no entity, column, index, constraint, public GraphQL SDL,
 backup descriptor, or persistent semantic. AI schema module `0.50.0` remains
 unchanged and no data migration is needed. Revalidate the complete composed
 host SDL and server-authored documents during deployment. Applied restore
-remains blocked: merged `graphql-orm-backup` 0.5.0 at
-`20c12e45dad00bda9183751effa969d19c1c5d80` targets ORM 0.15.0 and must be
-updated by its owning agent to the same reviewed ORM 0.16.0 revision, merged or
-released, and returned as a new final SHA before it can be pinned here.
+remains closed. The later 0.57.0 section records the reviewed backup 0.6.0
+alignment and the remaining downstream collector/applier work.
 
 ## Unreleased: close raw provider file-search authority (crate 0.54.0 to 0.55.0; schema remains 0.50.0)
 

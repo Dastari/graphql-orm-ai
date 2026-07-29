@@ -117,28 +117,25 @@ What is missing is the production adapter chain that:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-`graphql-orm-backup` 0.5.0 is merged at
-`20c12e45dad00bda9183751effa969d19c1c5d80` and implements its adapter
-hardening against `graphql-orm` 0.15.0, but it does not match this crate's
-reviewed 0.16.0 runtime.
-Adding it would create incompatible database/metadata/backup types. The
-copy-ready owning-agent prompt is staged at
-`.handoffs/graphql-orm-backup-0.16-integration.md`; it asks the backup owner to
-preserve the completed hardening, add a follow-up update to the reviewed ORM
-0.16.0 revision, finish review, and return the new final merge/release SHA. No
-sibling repository has been modified.
+`graphql-orm-backup` 0.6.0 is merged at
+`6a9ccedd76fd140c351c8861de72c4cb7c99feea` and is pinned here against the
+same reviewed ORM 0.16.0 and storage 0.5.0 revisions. Cargo resolves one
+database/metadata/storage type universe. AI schema module 0.51.0 also includes
+finalized local attachment and artifact object keys in the confidential
+database export while continuing to redact quarantine, upload-token, provider,
+credential, and secret references.
 
-Until a reviewed final upstream SHA is returned:
+This satisfies the upstream compatibility gate, not the applied-restore exit
+gate. The checkpoint intentionally exposes no production restore service.
+Runtime startup, workers, subscriptions, webhook callbacks, and provider
+access remain closed after raw database/object import until the AI-specific
+collector, generated-ORM repair applier, post-apply validator, exact recovery
+epoch, and readiness gate are implemented and exercised through SQLite and an
+owned disposable PostgreSQL round trip. Consumer owners must still rehearse
+their composed schema and object store separately.
 
-- `graphql-orm-backup` is not added to `Cargo.toml`;
-- no local path/patch or duplicate ORM universe is accepted;
-- no backup/restore production claim is made;
-- restored runtime startup, workers, subscriptions, webhook callbacks, and
-  provider access remain closed; and
-- downstream applied-restore implementation is blocked.
-
-After the upstream merge, this repository must pin the exact final SHA,
-regenerate `Cargo.lock`, prove one ORM/storage type universe, implement the
-AI-specific collector/applier, and run SQLite plus owned disposable PostgreSQL
-full database/object round trips. Consumer owners must still rehearse their
-composed schema and object store separately.
+The owning ORM agent is considering consolidation of the `graphql-orm-*`
+packages. This branch is therefore stopped at the exact reviewed dependency and
+backup-schema checkpoint. Any later repository-layout change must arrive as a
+reviewed upstream commit, be repinned here without sibling mutation, and pass
+the complete dependency and backend matrix.

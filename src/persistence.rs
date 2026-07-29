@@ -867,7 +867,6 @@ pub(crate) struct AiAttachmentRecord {
     #[filterable(type = "uuid")]
     pub message_id: Option<graphql_orm::uuid::Uuid>,
     /// Storage-provider opaque reference, never a user-controlled path.
-    #[backup(redact)]
     pub blob_reference: Option<String>,
     /// Pending quarantine object reference, never exposed to clients/models.
     #[backup(redact)]
@@ -930,7 +929,6 @@ pub(crate) struct AiAttachmentArtifactRecord {
     #[filterable(type = "uuid")]
     pub attachment_id: graphql_orm::uuid::Uuid,
     pub artifact_kind: String,
-    #[backup(redact)]
     pub blob_reference: Option<String>,
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_content: Option<serde_json::Value>,
@@ -1980,7 +1978,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.50.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.51.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

@@ -1,4 +1,4 @@
-use graphql_orm::graphql::orm::SchemaModuleCatalog;
+use graphql_orm::graphql::orm::{ColumnBackupPolicy, SchemaModuleCatalog};
 use graphql_orm_ai::{AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule};
 
 #[test]
@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.50.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.51.0");
     assert_eq!(catalog.entities().len(), 40);
     assert!(
         catalog
@@ -167,6 +167,54 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .indexes
             .iter()
             .any(|index| { index.columns == ["message_id"] && !index.is_unique })
+    );
+    let attachment_metadata = catalog
+        .entities()
+        .iter()
+        .find(|entity| entity.table_name == "graphql_orm_ai_attachments")
+        .expect("attachment metadata should exist");
+    assert_eq!(
+        attachment_metadata
+            .fields
+            .iter()
+            .find(|field| field.name == "blob_reference")
+            .expect("attachment blob reference should exist")
+            .backup_policy,
+        ColumnBackupPolicy::Include
+    );
+    for redacted in ["quarantine_blob_reference", "upload_token_hash"] {
+        assert_eq!(
+            attachment_metadata
+                .fields
+                .iter()
+                .find(|field| field.name == redacted)
+                .expect("redacted attachment field should exist")
+                .backup_policy,
+            ColumnBackupPolicy::Redact
+        );
+    }
+    let artifact_metadata = catalog
+        .entities()
+        .iter()
+        .find(|entity| entity.table_name == "graphql_orm_ai_attachment_artifacts")
+        .expect("attachment artifact metadata should exist");
+    assert_eq!(
+        artifact_metadata
+            .fields
+            .iter()
+            .find(|field| field.name == "blob_reference")
+            .expect("artifact blob reference should exist")
+            .backup_policy,
+        ColumnBackupPolicy::Include
+    );
+    assert_eq!(
+        artifact_metadata
+            .fields
+            .iter()
+            .find(|field| field.name == "provider_reference")
+            .expect("artifact provider reference should exist")
+            .backup_policy,
+        ColumnBackupPolicy::Redact
     );
     assert!(
         inbox_event

@@ -159,6 +159,13 @@ waits without polling, resuming, or executing them.
   than retry.
 - Fenced run/attempt contracts, fail-closed startup, and restore reconciliation
   that treats uncertain external effects as uncertain rather than replayable.
+- An exact `graphql-orm-backup` 0.6.0 compatibility pin for SQLite and
+  PostgreSQL in the same reviewed ORM/storage type universe. Schema module
+  0.51.0 preserves finalized local attachment and artifact object keys in
+  confidential backups while keeping quarantine, upload-token, provider,
+  credential, and secret references redacted. Production applied restore and
+  runtime reopening remain closed pending the AI-specific collector, repair,
+  validation, recovery-epoch, and readiness chain.
 - A concrete ORM worker for bounded claims, lease renewal, retry scheduling,
   immutable attempt outcomes, and recovery; plus a mock-tested provider turn
   that durably audits egress before transport and persists protected assistant
@@ -303,10 +310,10 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<re
 ```
 
 > **Pre-release dependency note:** this source snapshot pins the reviewed final
-> `graphql-orm` 0.16.0, `agql-auth` 0.12.0, and `graphql-orm-storage` 0.5.0
-> commits exactly. Keep the full revisions from this manifest; do not replace
-> the shared contracts with moving branches or application-specific
-> substitutes.
+> `graphql-orm` 0.16.0, `graphql-orm-backup` 0.6.0, `agql-auth` 0.12.0, and
+> `graphql-orm-storage` 0.5.0 commits exactly. Keep the full revisions from
+> this manifest; do not replace the shared contracts with moving branches or
+> application-specific substitutes.
 
 A host then:
 

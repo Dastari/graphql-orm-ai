@@ -1,7 +1,7 @@
 # Completion Plan
 
 This is the active execution plan for completing `graphql-orm-ai` from the
-current `0.56.0` generated-operation integration checkpoint. The historical
+current `0.57.0` backup compatibility checkpoint. The historical
 architecture plan at `1573017:docs/plan.md` remains useful design context, but
 its original delivery phases no longer describe the worktree: most foundation,
 provider, persistence, authorization, approval, and coordination contracts are
@@ -14,14 +14,17 @@ what remains deliberately closed.
 
 ## Baseline
 
-- Crate version: `0.56.0` (unpublished generated-operation integration
+- Crate version: `0.57.0` (unpublished backup compatibility
   checkpoint).
-- AI schema-module version: `0.50.0`.
+- AI schema-module version: `0.51.0`.
 - Exact reviewed dependencies:
   - `graphql-orm` and `graphql-orm-macros` `0.16.0` at
     `dd68a001f47f04178bf3389dd47ee952faa6ecf0`.
   - `agql-auth` `0.12.0` at
     `3f3b0c5365adfbe436514a681d977b600991b797`.
+  - `graphql-orm-backup` `0.6.0` at
+    `6a9ccedd76fd140c351c8861de72c4cb7c99feea`, resolving the same ORM 0.16.0
+    and storage 0.5.0 revisions.
 - The complete SQLite/provider, warnings-denied Clippy,
   warnings/missing-docs-denied Rustdoc, PascalCase GraphQL,
   PostgreSQL/MSSQL compile-only, owned disposable PostgreSQL migration,
@@ -29,12 +32,13 @@ what remains deliberately closed.
 - The dependency-alignment checkpoint is committed and pushed at
   `21f11e46f5e7b221959844cacba7f5ad81841e36`; downstream draft PR #2 CI run
   `30253200905` passed all four jobs.
-- Two upstream handoffs are open: follow merged `graphql-orm-backup` 0.5.0
-  with an alignment to the reviewed 0.16.0 type universe, and implement the
-  reusable MSSQL write/runtime production capability set in `graphql-orm`.
-  The generated resolver-operation metadata handoff is satisfied by ORM 0.16.0
-  and is integrated in this crate. Copy-ready owning-agent prompts are staged
-  under `.handoffs/`; no sibling repository has been modified.
+- The backup alignment and generated resolver-operation metadata handoffs are
+  satisfied. The reusable MSSQL write/runtime production capability set
+  remains an upstream `graphql-orm` handoff. The owning ORM agent is also
+  considering consolidation of the `graphql-orm-*` packages; this downstream
+  branch stops at the exact reviewed compatibility checkpoint and will repin
+  only after a reviewed final upstream commit. Copy-ready owning-agent prompts
+  are staged under `.handoffs/`; no sibling repository has been modified.
 - A 2026-07-29 read-only upstream audit confirmed the exact ORM/auth pins.
   The full SQLite/provider/PostgreSQL/MSSQL release matrix passes at this
   checkpoint and resolves one dependency universe.
@@ -323,13 +327,14 @@ requeued, terminal, retained-with-reason, or blocked. Append-only facts and
 incomplete external dependencies are reported truthfully. The privileged
 generic uncertain-effect evidence service remains downstream work.
 
-Applied backup/restore is blocked on `graphql-orm-backup`. Version 0.5.0 merged
-at `20c12e45dad00bda9183751effa969d19c1c5d80` implements its hardening
-against ORM 0.15.0, but would introduce a second ORM type universe beside this
-crate's 0.16.0 runtime. The updated copy-ready prompt is staged at
-`.handoffs/graphql-orm-backup-0.16-integration.md`. Do not pin the incompatible
-0.15.0 merge, add a duplicate type universe, or claim production restore until
-the owning agent returns a reviewed final main/release SHA using ORM 0.16.0.
+The upstream compatibility gate is complete: `graphql-orm-backup` 0.6.0 at
+`6a9ccedd76fd140c351c8861de72c4cb7c99feea` uses this crate's exact reviewed
+ORM 0.16.0 and storage 0.5.0 revisions. Schema 0.51.0 preserves finalized local
+object linkage in confidential backups. Applied restore is still downstream
+work and must not be claimed until the collector, repair applier, validator,
+recovery epoch, readiness gate, and database/object round trips pass. The
+owning ORM agent's proposed repository consolidation must return a reviewed
+final commit before this slice resumes.
 
 ### Work
 
@@ -509,9 +514,9 @@ conformance tests for these seams. It should not absorb deployment authority.
 
 ## Current queue
 
-1. Wait for the reviewed final `graphql-orm-backup` ORM 0.16.0 integration SHA
-   before implementing applied restore; keep the downstream dependency absent
-   and never pin draft PR-head commits.
+1. Wait for a reviewed final commit from the proposed `graphql-orm-*`
+   repository consolidation, then repin and implement the downstream
+   AI-specific applied-restore chain.
 2. Wait for the reviewed final `graphql-orm` MSSQL write/runtime SHA before
    production MSSQL acceptance.
 3. After applied restore, implement and enforce the complete durable

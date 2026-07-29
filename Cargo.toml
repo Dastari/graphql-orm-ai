@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.56.0"
+version = "0.57.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -15,8 +15,18 @@ publish = false
 
 [features]
 default = ["sqlite"]
-sqlite = ["graphql-orm/sqlite"]
-postgres = ["graphql-orm/postgres"]
+sqlite = [
+  "graphql-orm/sqlite",
+  "dep:graphql-orm-backup",
+  "graphql-orm-backup/local",
+  "graphql-orm-backup/orm-sqlite",
+]
+postgres = [
+  "graphql-orm/postgres",
+  "dep:graphql-orm-backup",
+  "graphql-orm-backup/local",
+  "graphql-orm-backup/orm-postgres",
+]
 mssql = ["graphql-orm/mssql"]
 provider-openai = ["dep:base64", "dep:hmac", "dep:reqwest"]
 provider-anthropic = ["dep:reqwest"]
@@ -38,6 +48,7 @@ async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
 futures = "0.3"
 graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "dd68a001f47f04178bf3389dd47ee952faa6ecf0", version = "0.16.0", default-features = false }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm-backup.git", rev = "6a9ccedd76fd140c351c8861de72c4cb7c99feea", version = "0.6.0", optional = true, default-features = false }
 graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm-storage.git", rev = "f1a1f06483d5fd3a0b8fd17f013b3ad4dd9849c5", version = "0.5.0", default-features = false }
 hex = "0.4"
 hmac = { version = "0.12", optional = true }
