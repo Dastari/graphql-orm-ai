@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use agql_auth::ResolvedPrincipal;
 use async_trait::async_trait;
+use graphql_orm::graphql::orm::{
+    GraphqlOperationCatalog, GraphqlOperationKind, GraphqlResolverOperationDescriptor,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -73,6 +76,29 @@ pub enum AiToolOperationDomain {
     AiControlPlane,
     /// GraphQL schema introspection or discovery operation.
     SchemaIntrospection,
+}
+
+/// Host classification for derive-generated GraphQL resolvers.
+///
+/// Generated resolver metadata is discovery and drift detection, not
+/// authorization or proof that an operation belongs to the host application
+/// rather than an AI control plane. Implementations must classify only
+/// reviewed application resolvers as callable. Ordinary resolver
+/// authorization remains authoritative after this static decision.
+pub trait AiGeneratedGraphqlOperationPolicy: Send + Sync {
+    /// Returns whether the exact generated resolver may enter the application
+    /// tool catalog.
+    fn is_application_operation(&self, operation: &GraphqlResolverOperationDescriptor) -> bool;
+}
+
+/// Fail-closed generated resolver classifier.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DenyAllAiGeneratedGraphqlOperationPolicy;
+
+impl AiGeneratedGraphqlOperationPolicy for DenyAllAiGeneratedGraphqlOperationPolicy {
+    fn is_application_operation(&self, _operation: &GraphqlResolverOperationDescriptor) -> bool {
+        false
+    }
 }
 
 /// Rollout maturity ceiling for agent capabilities.
@@ -304,6 +330,78 @@ impl AiToolCatalog {
     /// Returns a safe error for duplicate IDs, forbidden operation domains,
     /// introspection/AI-control-plane documents, or stale contract bindings.
     pub fn register_with_disclosure(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+    ) -> Result<(), AiError> {
+        if descriptor
+            .graphql_contract
+            .as_ref()
+            .is_some_and(|contract| contract.generated_operation().is_some())
+        {
+            return Err(AiError::InvalidConfiguration(
+                "generated operation bindings require catalog revalidation".to_owned(),
+            ));
+        }
+        self.register_disclosed(descriptor, disclosure_schema)
+    }
+
+    /// Registers a generated GraphQL resolver after exact catalog and host
+    /// domain revalidation.
+    ///
+    /// The contract must have been created with
+    /// [`GraphqlOperationContract::with_generated_operation`]. This method
+    /// re-resolves the current exposed catalog coordinate, verifies the
+    /// catalog and operation fingerprints, proves that the server-authored
+    /// document contains only that root field, and asks the host to classify
+    /// the metadata as an application operation. Registration and metadata
+    /// discovery still do not enable the tool or authorize resolver access.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe configuration error for a stale/hidden/ambiguous
+    /// generated resolver, document or operation-kind drift, a denied host
+    /// classification, subscriptions, or any ordinary disclosure/catalog
+    /// validation failure.
+    pub fn register_generated_with_disclosure(
+        &mut self,
+        descriptor: AiToolDescriptor,
+        disclosure_schema: AiDisclosureSchema,
+        operation_catalog: &GraphqlOperationCatalog,
+        operation_policy: &dyn AiGeneratedGraphqlOperationPolicy,
+    ) -> Result<(), AiError> {
+        let contract = descriptor.graphql_contract.as_ref().ok_or_else(|| {
+            AiError::InvalidConfiguration(
+                "generated tools require an exact GraphQL operation contract".to_owned(),
+            )
+        })?;
+        let operation = contract
+            .resolve_generated_operation(operation_catalog, &descriptor.document)
+            .map_err(|_| {
+                AiError::InvalidConfiguration(
+                    "generated GraphQL operation contract is stale".to_owned(),
+                )
+            })?;
+        let kind_matches = matches!(
+            (descriptor.operation_kind, operation.kind()),
+            (AiToolOperationKind::Query, GraphqlOperationKind::Query)
+                | (
+                    AiToolOperationKind::Mutation,
+                    GraphqlOperationKind::Mutation
+                )
+        );
+        if descriptor.operation_domain != AiToolOperationDomain::Application
+            || !kind_matches
+            || !operation_policy.is_application_operation(operation)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "generated resolver is not an admitted application operation".to_owned(),
+            ));
+        }
+        self.register_disclosed(descriptor, disclosure_schema)
+    }
+
+    fn register_disclosed(
         &mut self,
         descriptor: AiToolDescriptor,
         disclosure_schema: AiDisclosureSchema,

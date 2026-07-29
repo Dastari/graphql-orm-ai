@@ -4,6 +4,46 @@
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
 
+## Unreleased: generated resolver-operation bindings (crate 0.55.0 to 0.56.0; schema remains 0.50.0)
+
+Update the exact `graphql-orm` and `graphql-orm-macros` dependency to 0.16.0 at
+`dd68a001f47f04178bf3389dd47ee952faa6ecf0`. Keep `agql-auth` 0.12.0 at
+`3f3b0c5365adfbe436514a681d977b600991b797`. Remove path/patch/branch
+overrides and regenerate `Cargo.lock` so the runtime and derive macro resolve
+one reviewed source/type universe.
+
+Hosts registering derive-generated application operations may now build a
+`GraphqlOperationContract` with `with_generated_operation` and register the
+descriptor through `AiToolCatalog::register_generated_with_disclosure`.
+Supply an explicit `AiGeneratedGraphqlOperationPolicy` that admits only
+reviewed application entities/modules; the provided
+`DenyAllAiGeneratedGraphqlOperationPolicy` is the fail-closed default.
+Registration rejects hidden or ambiguous operations, catalog/operation
+fingerprint drift, kind mismatches, subscriptions, and documents that do not
+contain exactly one named operation selecting exactly one unaliased generated
+root. Ordinary tool enablement, principal-aware host policy, resolver
+authorization, finished-schema validation, projection, and disclosure remain
+separate required checks.
+
+`GraphqlOperationContract` adds the public optional `generated_operation`
+field. This is a pre-1.0 public Rust struct-literal change; prefer
+`GraphqlOperationContract::new` rather than struct literals. The serialized
+field defaults to absent and is omitted when absent, so existing custom-root
+serialized contracts continue to decode and encode as before. A generated
+binding is included automatically in descriptor and approval fingerprints,
+and malformed deserialized bindings fail approval/catalog validation.
+Custom roots continue to use `register_with_disclosure`; that method now
+rejects generated-bound contracts so catalog revalidation cannot be skipped.
+
+This change adds no entity, column, index, constraint, public GraphQL SDL,
+backup descriptor, or persistent semantic. AI schema module `0.50.0` remains
+unchanged and no data migration is needed. Revalidate the complete composed
+host SDL and server-authored documents during deployment. Applied restore
+remains blocked: merged `graphql-orm-backup` 0.5.0 at
+`20c12e45dad00bda9183751effa969d19c1c5d80` targets ORM 0.15.0 and must be
+updated by its owning agent to the same reviewed ORM 0.16.0 revision, merged or
+released, and returned as a new final SHA before it can be pinned here.
+
 ## Unreleased: close raw provider file-search authority (crate 0.54.0 to 0.55.0; schema remains 0.50.0)
 
 `ModelRequest::validate` now rejects
@@ -32,13 +72,14 @@ This change adds no entity, column, index, constraint, GraphQL SDL, backup
 descriptor, or persistent semantic. AI schema module `0.50.0` is therefore
 unchanged and no data migration is needed.
 
-The accompanying Slice 3-7 audit documents do not open another public Rust,
-GraphQL, provider, backend, or persistence capability. In particular, durable
-tool-policy management, generated resolver-operation metadata, applied
+At that checkpoint the accompanying Slice 3-7 audit documents did not open
+another public Rust, GraphQL, provider, backend, or persistence capability.
+Durable tool-policy management, generated resolver-operation metadata, applied
 backup/restore, provider-persistent upload/search, and MSSQL production writes
-remain unavailable. Their `.handoffs/` prompts are ignored coordination state,
-not dependencies or packaged migration artifacts. No additional data migration
-is required for those documentation-only classifications.
+were unavailable. The later 0.56.0 section above records the generated
+resolver-metadata integration; the other gates remain closed. Ignored
+`.handoffs/` prompts are coordination state, not dependencies or packaged
+migration artifacts.
 
 ## Unreleased: complete OpenAI background terminal reconciliation (crate 0.53.0 to 0.54.0; schema 0.49.0 to 0.50.0)
 

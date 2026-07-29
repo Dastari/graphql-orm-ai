@@ -12,8 +12,8 @@ mutation never grants resolver access by itself.
 | Tool catalog | Implemented. Registration requires a server-authored document, exact GraphQL contract, static disclosure schema, bounded projection, and current descriptor fingerprint. | Hosts review and register every descriptor; absence stays disabled. |
 | In-memory enablement | Implemented. `AiToolPolicySet` requires an explicit enabled binding to the exact current descriptor fingerprint and a deployment maturity ceiling. | The host supplies the current set and the principal-aware `AiToolAuthorizationPolicy`; ordinary resolver authorization still runs. |
 | Durable tool-policy record | Schema exists, but authenticated read/manage and live-policy resolution are not implemented. Existing `maximum_calls`, `maximum_output_bytes`, `constraints`, risk, and approval fields are not a runtime proof. | Keep the GraphQL lifecycle closed until the applied-restore gate passes and every stored bound is enforced at execution, not merely persisted. |
-| Operation/disclosure metadata | Explicit reviewed application contracts and disclosure schemas are implemented. Generated ORM resolver metadata is not available upstream. | A copy-ready `graphql-orm` owning-agent prompt is staged in `.handoffs/`. Keep generation closed until a reviewed final upstream SHA is pinned. |
-| Recursion prevention | Explicit operation domains plus a fail-closed identifier scanner reject known AI control-plane and introspection names. This is defense in depth, not a complete schema-aware proof. | Continue requiring reviewed application-only descriptors. Add schema-aware validation only after generated resolver metadata can identify the exact target. |
+| Operation/disclosure metadata | Explicit reviewed application contracts and disclosure schemas are implemented. ORM 0.16.0 generated catalogs now bind an exact exposed generated resolver, catalog/operation fingerprints, operation kind, and one server-authored root selection. | Hosts must explicitly classify the descriptor as an application operation and still supply the finished-schema, projection, disclosure, enablement, and authorization contracts. Custom roots remain explicit. |
+| Recursion prevention | Generated operations require exact catalog resolution plus an explicit host application-domain policy. All descriptors still carry explicit operation domains, and the fail-closed identifier scanner rejects known AI control-plane and introspection names. | Metadata is discovery/drift evidence, not authorization. Keep the scanner for custom roots and defense in depth; ordinary resolver authorization remains authoritative. |
 | Provider-persistent files | Raw provider store IDs are rejected before transport. Inline attachment input and exact deletion of already-known provider artifacts remain separate capabilities. | Upload/index/search stays closed under the lifecycle in [provider-persistent files](provider-files.md). |
 
 ## Durable tool-enablement lifecycle
@@ -46,18 +46,26 @@ and applied restore is available.
 
 ## Resolver-operation metadata boundary
 
-`graphql-orm` 0.15.0 computes generated resolver names and exposure inside its
-derive implementation, while public `EntityMetadata` contains storage/schema
-facts only. `graphql-orm-ai` must not reimplement those naming and exposure
-rules: a duplicate table could silently authorize the wrong resolver after a
-case, rename, projection, mutation-policy, or backend-capability change.
+`graphql-orm` 0.16.0 exposes project-agnostic static descriptors and an
+exposure-resolved operation catalog. `GraphqlOperationContract` can bind one
+current catalog fingerprint, one exposed operation fingerprint/kind/category,
+and one server-authored document containing exactly one named operation and
+one unaliased generated root. `register_generated_with_disclosure` re-resolves
+that binding against the current catalog and then requires an explicit
+`AiGeneratedGraphqlOperationPolicy`. The provided policy denies all by
+default.
 
-The staged upstream prompt requests project-agnostic static descriptors for
-generated operations. It deliberately leaves data classification, result
-projection, AI control-plane ownership, registration, and authorization in
-this crate or the host. Until a reviewed final upstream SHA is repinned,
-explicit host-reviewed `GraphqlOperationContract` plus
-`AiDisclosureSchema` remains the only supported path.
+The upstream metadata deliberately does not define application versus AI
+control-plane ownership, complete host SDL, server-authored documents, result
+projections, disclosure classification, runtime limits, or authorization.
+Those remain host/downstream responsibilities. A generated descriptor is not
+enabled merely because it is discoverable, and every invocation still passes
+fresh host policy plus ordinary resolver authorization.
+
+Custom roots are outside the generated catalog. They continue to use explicit
+host-reviewed `GraphqlOperationContract` plus `AiDisclosureSchema` and the
+fail-closed identifier scanner. The crate does not infer custom-root exposure
+from partial SDL or reimplement ORM naming rules.
 
 ## Production host seams
 
@@ -107,9 +115,9 @@ be proven by the owning deployment and consumer acceptance suites.
 
 ## Slice 6 result
 
-No safe runtime capability is opened by this audit. Provider-file authority
-remains closed, the durable tool-policy lifecycle waits on applied restore,
-and schema-aware metadata generation waits on the reviewed upstream resolver
-metadata contract. Existing explicit catalog, disclosure, secret, delegation,
+Generated-operation registration is now implemented as a safer drift-binding
+path, but it does not independently open or authorize a tool. Provider-file
+authority remains closed and the durable tool-policy lifecycle still waits on
+applied restore. Existing explicit catalog, disclosure, secret, delegation,
 and private-transport seams remain supported and fail closed when a required
 host implementation is absent.

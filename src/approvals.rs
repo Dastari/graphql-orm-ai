@@ -111,6 +111,7 @@ impl AiApprovalBinding {
             || self.policy_version.trim().is_empty()
             || self.authorization_state_digest.trim().is_empty()
             || self.resources.len() > 100
+            || !self.operation.generated_operation_shape_is_valid()
             || self.preview_hash != preview.stable_hash()
         {
             return Err(AiError::InvalidConfiguration(

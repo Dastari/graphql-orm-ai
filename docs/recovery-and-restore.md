@@ -117,11 +117,16 @@ What is missing is the production adapter chain that:
 6. records the exact recovery epoch; and
 7. opens readiness only for that applied, zero-fatal epoch.
 
-The latest `graphql-orm-backup` main still pins `graphql-orm` 0.6.1, while this
-crate uses the reviewed 0.15.0 runtime. Adding it would create incompatible
-database/metadata/backup types. The copy-ready owning-agent prompt is staged at
-`.handoffs/graphql-orm-backup-0.15-integration.md`. No sibling repository has
-been modified.
+`graphql-orm-backup` 0.5.0 is merged at
+`20c12e45dad00bda9183751effa969d19c1c5d80` and implements its adapter
+hardening against `graphql-orm` 0.15.0, but it does not match this crate's
+reviewed 0.16.0 runtime.
+Adding it would create incompatible database/metadata/backup types. The
+copy-ready owning-agent prompt is staged at
+`.handoffs/graphql-orm-backup-0.16-integration.md`; it asks the backup owner to
+preserve the completed hardening, add a follow-up update to the reviewed ORM
+0.16.0 revision, finish review, and return the new final merge/release SHA. No
+sibling repository has been modified.
 
 Until a reviewed final upstream SHA is returned:
 

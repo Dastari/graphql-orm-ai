@@ -5,13 +5,26 @@ Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION
 
 ## [Unreleased]
 
-This development line advances the pre-1.0 crate version to `0.55.0` and AI
-schema module to `0.50.0`. It aligns the reviewed dependency universe and
-completes the durable OpenAI background terminal-reconciliation runtime, then
-closes raw provider file-search IDs behind the reviewed persistent-file design.
+This development line advances the pre-1.0 crate version to `0.56.0` and AI
+schema module to `0.50.0`. It aligns the reviewed dependency universe,
+integrates generated resolver-operation metadata, completes the durable OpenAI
+background terminal-reconciliation runtime, and closes raw provider
+file-search IDs behind the reviewed persistent-file design.
 
 ### Added
 
+- `GraphqlOperationContract::with_generated_operation`,
+  `GraphqlGeneratedOperationBinding`, and
+  `AiToolCatalog::register_generated_with_disclosure` bind one
+  server-authored GraphQL document to one currently exposed derive-generated
+  resolver and the exact immutable `graphql-orm` operation catalog. Admission
+  rechecks catalog/operation fingerprints, operation kind, exact unaliased
+  single-root selection, ordinary disclosure bounds, and an explicit
+  host-supplied `AiGeneratedGraphqlOperationPolicy`. The default policy denies
+  all generated operations. Metadata remains discovery/drift evidence, not
+  enablement, application-domain classification, authorization, finished host
+  SDL validation, projection, disclosure, or runtime limits. Custom roots
+  retain the explicit reviewed contract/scanner path.
 - `docs/provider-files.md` now defines the complete default-deny capability,
   durable identity, state-machine, quota, pricing, egress, cleanup, retention,
   restore, and conformance contract for future provider-persistent upload and
@@ -28,10 +41,13 @@ closes raw provider file-search IDs behind the reviewed persistent-file design.
   unsupported.
 - `docs/recovery-and-restore.md` classifies current recovery, retention,
   append-only, backup, and restore states and fixes the evidence contract for a
-  future privileged uncertain-effect service. The applied-restore audit found
-  that current `graphql-orm-backup` main still resolves `graphql-orm` 0.6.1;
-  a copy-ready owning-agent handoff requests alignment to the reviewed 0.15.0
-  runtime. No duplicate dependency universe or downstream workaround is added.
+  future privileged uncertain-effect service. `graphql-orm-backup` PR #2 is
+  merged at `20c12e45dad00bda9183751effa969d19c1c5d80` and implements the
+  adapter hardening against ORM 0.15.0, but is not compatible with this crate's
+  reviewed ORM 0.16.0 universe. The copy-ready owning-agent handoff now
+  requests a focused follow-up 0.16.0 integration and a new reviewed final
+  merge/release SHA. No incompatible pin, duplicate dependency universe, or
+  downstream workaround is accepted.
 - `docs/coordination-gates.md` applies the ordering proof to every Slice 5
   shape. Existing complete read-only adoption and sequential single-mutation
   provider-retained turns are confirmed; provider-turn-only, partial, mixed,
@@ -42,9 +58,9 @@ closes raw provider file-search IDs behind the reviewed persistent-file design.
   audit. The explicit catalog/disclosure, secret-store, delegated-authority,
   and private-transport seams remain supported, while durable tool-policy
   management stays closed until its stored constraints are enforced and
-  applied restore passes. A copy-ready `graphql-orm` owning-agent handoff
-  requests project-agnostic generated resolver-operation metadata; no sibling
-  repository was modified.
+  applied restore passes. Reviewed `graphql-orm` generated resolver metadata is
+  now integrated for exact schema-aware generated-root drift checks; custom
+  roots remain explicit and scanner-checked.
 - `docs/backend-capability-matrix.md` records the Slice 7 evidence boundary:
   SQLite and PostgreSQL are classified separately from host/consumer proof,
   applied restore remains closed, and MSSQL remains an experimental
@@ -77,13 +93,12 @@ closes raw provider file-search IDs behind the reviewed persistent-file design.
   output. Conflicting terminal evidence closes for recovery without releasing
   uncertain capacity. Exact replay validates the durable graph and returns
   `AlreadyReconciled`.
-- The latest reviewed upstream audit was repeated before this slice:
-  `graphql-orm`/`graphql-orm-macros` remain at `0.15.0`
-  (`6beef53633befd90a4d4810887a3e4640dc4ad91`) and `agql-auth` remains at
+- The reviewed dependency audit now pins
+  `graphql-orm`/`graphql-orm-macros` `0.16.0`
+  (`dd68a001f47f04178bf3389dd47ee952faa6ecf0`) and keeps `agql-auth`
   `0.12.0` (`3f3b0c5365adfbe436514a681d977b600991b797`).
-  These are the current upstream `main` revisions, resolve as one package/type
-  universe, and require no downstream compatibility change or upstream
-  handoff.
+  They resolve as one package/type universe. The ORM change is additive
+  upstream but enables the new downstream generated-operation binding API.
 - With `provider-openai` plus SQLite/PostgreSQL,
   `OrmAiOpenAiBackgroundRetrievalService` now revalidates an exact active
   reconciliation claim, freshly rehydrates principal authority, proves
@@ -280,13 +295,12 @@ closes raw provider file-search IDs behind the reviewed persistent-file design.
   retention, cost, or deletion authority. Existing inline attachment input,
   exact provider-file deletion, rule vocabulary, and immutable per-search-call
   pricing remain available independently.
-- The exact Git dependency universe now pins `graphql-orm` 0.15.0 at
-  `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at the
+- The exact Git dependency universe now pins `graphql-orm` 0.16.0 at
+  `dd68a001f47f04178bf3389dd47ee952faa6ecf0` and `agql-auth` 0.12.0 at the
   peeled `v0.12.0` target
-  `3f3b0c5365adfbe436514a681d977b600991b797`. The ORM update incorporates the
-  reviewed PostgreSQL constraint-index introspection fix, aligns its optional
-  auth bridge to the same auth revision, and fixes exact bounded-mutation and
-  retention-purge sentinels above the public 100-row read cap. No AI entity,
+  `3f3b0c5365adfbe436514a681d977b600991b797`. ORM 0.16.0 adds the reviewed
+  generated resolver-operation descriptor/catalog API while retaining the
+  earlier PostgreSQL introspection and bounded-mutation fixes. No AI entity,
   GraphQL SDL, or stored-data migration changes.
 - Ordinary CI jobs now resolve the exact upstream revisions from the public
   manifest instead of checking out unused sibling worktrees. The SemVer job

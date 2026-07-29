@@ -1768,6 +1768,7 @@ fn validate_binding_fields(binding: &AiApprovalBinding) -> Result<(), AiError> {
             .delegated_actor_subject
             .as_ref()
             .is_some_and(|value| value.is_empty() || value.len() > 512)
+        || !binding.operation.generated_operation_shape_is_valid()
     {
         return Err(AiError::InvalidConfiguration(
             "approval binding contains invalid fields".to_owned(),

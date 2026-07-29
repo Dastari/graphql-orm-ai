@@ -17,6 +17,12 @@ and deliberately incomplete inventory.
   invocation audit metadata.
 - `graphql-orm` dependency-owned schema-module catalog with module ID, version,
   namespace, fingerprint, backup metadata, and restore-hook declarations.
+- `graphql-orm` 0.16.0 generated resolver-operation catalog integration:
+  exact exposed operation/catalog fingerprints, operation kind/category, and
+  one server-authored unaliased root selection are bound into the tool and
+  approval fingerprints. An explicit host application-domain policy is
+  required and denies all by default; finished-schema validation, disclosure,
+  enablement, and ordinary resolver authorization remain separate.
 - `graphql-orm` portable fencing/CAS state contracts and stale-worker tests.
 - `graphql-orm` validated Relay-style bidirectional keyset input, portable
   `before` predicates, and generated repository `first/after` plus
@@ -504,11 +510,10 @@ and deliberately incomplete inventory.
   constraints are not runtime proof and the lifecycle remains closed pending
   applied restore; see
   [control-plane and production integration gates](control-plane-production.md).
-- Resolver-operation disclosure metadata generation and complete schema-aware
-  control-plane recursion validation. The current catalog uses explicit
-  reviewed operation contracts, disclosure schemas, and a fail-closed
-  identifier scanner. A copy-ready project-agnostic `graphql-orm` metadata
-  handoff is staged in `.handoffs/`.
+- Complete schema-aware classification for host-defined custom roots. Generated
+  ORM roots now use the reviewed 0.16.0 catalog and explicit host
+  application-domain policy; custom roots continue to use explicit reviewed
+  operation/disclosure contracts and a fail-closed identifier scanner.
 - Deployment-specific delegated-credential issuers and private HTTP GraphQL
   transports. The generic exact-binding adapter is implemented; credential
   format, fixed destination mapping, network isolation, and application audit
@@ -526,9 +531,9 @@ and deliberately incomplete inventory.
 The detailed sequence and acceptance gates are maintained in the
 [completion plan](completion-plan.md). The leading priorities are:
 
-1. Wait for reviewed final `graphql-orm-backup` and `graphql-orm`
-   resolver-metadata SHAs before applied restore or schema-aware generated
-   disclosure integration; copy-ready prompts are staged in `.handoffs/`.
+1. Wait for a reviewed final `graphql-orm-backup` SHA aligned to ORM 0.16.0
+   before applied restore. Merged version 0.5.0 targets ORM 0.15.0 and is not
+   eligible; the updated copy-ready prompt is staged in `.handoffs/`.
 2. Keep the durable tool-policy GraphQL lifecycle closed until applied restore
    exists and every stored bound is enforced by live execution.
 3. Treat MSSQL as compile/schema-only while the separate upstream
@@ -547,34 +552,37 @@ intentional.
 
 ## Current verification
 
-- The complete `0.55.0` Slice 2-7 candidate SQLite/provider matrix passes: 176
-  unit tests, all integration tests, one explicit live OpenAI test ignored,
-  and 31 generated private-ORM doctests intentionally ignored. The focused
-  provider/content security integration target now has seven passing tests,
-  including rejection of raw provider file-search IDs before transport.
-- Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc passed
+- The complete `0.56.0` SQLite/provider matrix passes: 176 unit tests, all
+  integration tests, one explicit live OpenAI test ignored, and 31 generated
+  private-ORM doctests intentionally ignored. The generated-operation target
+  passes four default-case tests covering exact admission, denial/drift,
+  unexposed mutations, and legacy custom-contract decoding.
+- Full warnings-denied Clippy and warnings/missing-docs-denied Rustdoc pass
   with all native/profiled provider adapters and the installed harness.
-  PascalCase SDL and missing-docs Rustdoc also passed with no lowercase aliases.
+  PascalCase SDL, the generated-operation target under Pascal naming, and
+  missing-docs Rustdoc also pass with no lowercase aliases.
 - Bare PostgreSQL and MSSQL plus their OpenAI feature combinations pass
   compile-only checks. The complete generated-ORM PostgreSQL parity test
   migrates the prior background/receipt schema to `0.50.0`, verifies concurrent
   exact receipt intake, and passes the existing session/skill/rule/fence suite
-  in an ownership-labeled disposable PostgreSQL 17 container, which is removed
-  after the test.
-- The 328-file `cargo package --list` review contains no ignored handoff,
+  in an ownership-labeled disposable PostgreSQL 17 container, which was
+  removed after the test.
+- The 329-file `cargo package --list` review contains no ignored handoff,
   credential, local path, target output, or consumer-specific artifact.
   Full `cargo package` upload preparation remains intentionally unavailable
   because unpublished Git-only `agql-auth` has no crates.io package; this is
   not a candidate regression. `cargo-semver-checks` completes successfully for
-  `0.54.0` to `0.55.0`; the pre-1.0 minor move is a breaking-version boundary,
-  so no compatibility lints are applicable.
-- The dependency universe now resolves exactly `graphql-orm` 0.15.0 at
-  `6beef53633befd90a4d4810887a3e4640dc4ad91` and `agql-auth` 0.12.0 at
+  `0.55.0` to `0.56.0`; the pre-1.0 minor move is a breaking-version boundary,
+  so compatibility lints are not applicable.
+- The dependency universe resolves exactly `graphql-orm` and
+  `graphql-orm-macros` 0.16.0 at
+  `dd68a001f47f04178bf3389dd47ee952faa6ecf0`, plus `agql-auth` 0.12.0 at
   `3f3b0c5365adfbe436514a681d977b600991b797`, with one runtime/macro/auth
-  source and public type universe.
+  source and public type universe. Merged `graphql-orm-backup` 0.5.0 remains
+  absent because it pins ORM 0.15.0.
 - Pushed `0.49.0`/schema `0.46.0` and PR CI run `29495696905` are fully green.
   The `0.51.0`/schema `0.47.0` dependency checkpoint is committed and pushed
-  at `21f11e46f5e7b221959844cacba7f5ad81841e36`; draft PR #2 CI run
+  at `21f11e46f5e7b221959844cacba7f5ad81841e36`; downstream draft PR #2 CI run
   `30253200905` passed unit/compile, owned PostgreSQL parity, release-policy,
   and SemVer jobs. The Slice 1 terminal-reconciliation design checkpoint is
   pushed at `a10b3d6f35798367229ce605872b666dbf925993`; its first durable claim-
@@ -591,8 +599,7 @@ intentional.
   `323612a4c4c6313afc8ef5041210f3c9354908b1`.
 - The mutually exclusive backend features intentionally cannot be checked with
   Cargo `--all-features` in one build.
-- `git diff --check` and the one-source dependency audit pass. Release-policy
-  verification passes against the `0.54.0` checkpoint. The Slice 2-7
+- `git diff --check` and the one-source dependency audit pass. The Slice 2-7
   provider-file closure and remaining-gate audit is committed at
   `5a3e18771aeb4faa58b279385b768b39cfa68ec3`. The
   [backend capability matrix](backend-capability-matrix.md) remains the

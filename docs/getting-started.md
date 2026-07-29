@@ -6,7 +6,7 @@ reviewed dependency universe for `graphql-orm-ai`, `graphql-orm`, and
 overrides are unsupported release artifacts.
 
 The current public source snapshot consumes the reviewed final `graphql-orm`
-0.15.0 main commit and the peeled `agql-auth` 0.12.0 annotated-tag target.
+0.16.0 main commit and the peeled `agql-auth` 0.12.0 annotated-tag target.
 Standalone Git builds therefore resolve one reviewed dependency universe
 without depending on moving sibling default branches.
 

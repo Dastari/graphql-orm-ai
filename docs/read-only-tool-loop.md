@@ -12,6 +12,11 @@ A model definition is accepted only when all of these are true:
 - the stable tool ID is registered in `AiToolCatalog` with an exact logical
   GraphQL target, server-authored document, operation name, schema/document/
   projection fingerprint, and static disclosure schema;
+- derive-generated operations additionally carry the exact current
+  `graphql-orm` catalog and operation fingerprints, select only one unaliased
+  generated root, and pass an explicit host application-domain policy through
+  `register_generated_with_disclosure`; custom roots continue through the
+  explicit reviewed scanner path;
 - `AiToolPolicySet` contains an enabled binding for the current exact
   descriptor fingerprint;
 - the descriptor is an application `Query` at `ReadOnly` maturity and risk;

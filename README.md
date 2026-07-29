@@ -303,7 +303,7 @@ graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm-ai", rev = "<re
 ```
 
 > **Pre-release dependency note:** this source snapshot pins the reviewed final
-> `graphql-orm` 0.15.0, `agql-auth` 0.12.0, and `graphql-orm-storage` 0.5.0
+> `graphql-orm` 0.16.0, `agql-auth` 0.12.0, and `graphql-orm-storage` 0.5.0
 > commits exactly. Keep the full revisions from this manifest; do not replace
 > the shared contracts with moving branches or application-specific
 > substitutes.
@@ -318,7 +318,11 @@ A host then:
    principal-aware tool authorization, egress policy, provider, and
    restore-readiness implementations.
 4. Registers immutable logical GraphQL targets and reviewed application tools
-   with exact operation and disclosure contracts.
+   with exact operation and disclosure contracts. Derive-generated operations
+   bind the current `graphql_orm_operation_catalog()` through
+   `GraphqlOperationContract::with_generated_operation` and
+   `register_generated_with_disclosure`; custom roots retain the explicit
+   reviewed registration path.
 5. Composes `AiQueryRoot`, `AiMutationRoot`, and `AiSubscriptionRoot`, plus
    separately composable configuration, proposal, attachment, and skill roots
    as required, into the application or dedicated AI subgraph.
