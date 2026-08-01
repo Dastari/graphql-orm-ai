@@ -1,5 +1,11 @@
 # graphql-orm-ai
 
+> [!IMPORTANT]
+> This standalone repository is deprecated and will no longer be updated.
+> Development has moved to the
+> [`graphql-orm` monorepo](https://github.com/Dastari/graphql-orm), under
+> [`crates/graphql-orm-ai`](https://github.com/Dastari/graphql-orm/tree/main/crates/graphql-orm-ai).
+
 `graphql-orm-ai` is a project-agnostic, security-first AI agent runtime for
 applications built with [`graphql-orm`](https://github.com/Dastari/graphql-orm)
 and [`agql-auth`](https://github.com/Dastari/agql-auth). It turns explicitly
